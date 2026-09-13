@@ -19,7 +19,6 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
-import androidx.compose.material.icons.outlined.DeleteOutline
 import androidx.compose.material.icons.outlined.Favorite
 import androidx.compose.material.icons.outlined.FavoriteBorder
 import androidx.compose.material.icons.outlined.MoreVert
@@ -147,13 +146,17 @@ fun MediaDetailsScreen(
             Spacer(Modifier.height(Spacing.lg))
 
             AppCard {
+                InfoRow("Filename", item.filename)
+                Spacer(Modifier.height(Spacing.sm))
                 InfoRow("File size", formatFileSize(item.fileSizeBytes))
                 Spacer(Modifier.height(Spacing.sm))
                 InfoRow("Date", formatDateTime(item.capturedAtMillis))
                 Spacer(Modifier.height(Spacing.sm))
-                InfoRow("Device", item.device)
-                Spacer(Modifier.height(Spacing.sm))
                 InfoRow("Resolution", item.resolution)
+                Spacer(Modifier.height(Spacing.sm))
+                InfoRow("Media type", if (item.type == MediaType.VIDEO) "Video" else "Photo")
+                Spacer(Modifier.height(Spacing.sm))
+                InfoRow("Device", item.device)
             }
 
             Spacer(Modifier.height(Spacing.lg))
@@ -161,16 +164,16 @@ fun MediaDetailsScreen(
             Spacer(Modifier.height(Spacing.sm))
             AppCard {
                 DestinationRow(
-                    name = "Cloud Backup",
-                    completed = item.cloudBackupCompleted,
-                    processingState = item.backupState.takeIf { !item.cloudBackupCompleted }
+                    name = "Backup",
+                    completed = item.backupCompleted,
+                    processingState = item.backupState.takeIf { !item.backupCompleted }
                 )
                 Spacer(Modifier.height(Spacing.md))
                 DestinationRow(
                     name = "Telegram",
                     completed = item.telegramCompleted,
                     processingState = item.backupState.takeIf {
-                        item.cloudBackupCompleted && !item.telegramCompleted
+                        item.backupCompleted && !item.telegramCompleted
                     }
                 )
                 if (item.backupState != BackupState.COMPLETED && item.backupState != BackupState.FAILED && item.backupState != BackupState.WAITING) {
@@ -205,22 +208,13 @@ fun MediaDetailsScreen(
                     modifier = Modifier.weight(1f)
                 )
             }
-            Spacer(Modifier.height(Spacing.sm))
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(Spacing.sm)
-            ) {
+            if (item.backupState == BackupState.FAILED) {
+                Spacer(Modifier.height(Spacing.sm))
                 SecondaryActionButton(
                     text = "Retry",
-                    onClick = {},
+                    onClick = viewModel::retryBackup,
                     icon = Icons.Outlined.Refresh,
-                    modifier = Modifier.weight(1f)
-                )
-                SecondaryActionButton(
-                    text = "Delete",
-                    onClick = {},
-                    icon = Icons.Outlined.DeleteOutline,
-                    modifier = Modifier.weight(1f)
+                    modifier = Modifier.fillMaxWidth()
                 )
             }
             Spacer(Modifier.height(Spacing.xxl))
@@ -276,7 +270,7 @@ private fun DestinationRow(
     processingState: BackupState?
 ) {
     val (label, color) = when {
-        completed -> "Completed" to StatusConnected
+        completed -> "✓ Backup completed" to StatusConnected
         processingState == BackupState.FAILED -> "Failed" to StatusAttention
         processingState == BackupState.WAITING -> "Waiting" to Mist
         processingState == BackupState.UPLOADING -> "Uploading" to StatusSyncing
@@ -284,8 +278,9 @@ private fun DestinationRow(
         processingState == BackupState.SENDING_TELEGRAM -> "Telegram sync" to StatusSyncing
         else -> "Pending" to IvoryMuted
     }
+    val displayLabel = if (name == "Telegram" && completed) "✓ Synced" else label
     Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
         Text(name, style = MaterialTheme.typography.bodyLarge, color = Ivory, modifier = Modifier.weight(1f))
-        Text(label, style = MaterialTheme.typography.labelLarge, color = color)
+        Text(displayLabel, style = MaterialTheme.typography.labelLarge, color = if (completed) Sage else color)
     }
 }

@@ -2,8 +2,10 @@ package com.mydrive.app.data.repository
 
 import com.mydrive.app.data.mock.MockMediaData
 import com.mydrive.app.data.model.ActivityEvent
+import com.mydrive.app.data.model.AlbumFolder
 import com.mydrive.app.data.model.BackupOverview
 import com.mydrive.app.data.model.BackupPreferences
+import com.mydrive.app.data.model.BackupState
 import com.mydrive.app.data.model.MediaItem
 import com.mydrive.app.data.model.StorageSummary
 import com.mydrive.app.data.model.SyncSummary
@@ -44,7 +46,35 @@ class MediaRepository {
     private val _syncSummary = MutableStateFlow(MockMediaData.syncSummary)
     val syncSummary: StateFlow<SyncSummary> = _syncSummary.asStateFlow()
 
+    private val albumMeta = MockMediaData.albums.associateBy { it.id }
+
     fun mediaById(id: String): MediaItem? = _media.value.firstOrNull { it.id == id }
+
+    fun albumById(id: String): AlbumFolder? {
+        val meta = albumMeta[id] ?: return null
+        val count = _media.value.count { it.albumId == id }
+        val cover = _media.value
+            .filter { it.albumId == id }
+            .maxByOrNull { it.capturedAtMillis }
+        return meta.copy(
+            mediaCount = count,
+            coverSeed = cover?.thumbnailSeed ?: meta.coverSeed,
+            coverType = cover?.type ?: meta.coverType
+        )
+    }
+
+    fun albums(): List<AlbumFolder> {
+        val grouped = _media.value.groupBy { it.albumId }
+        return albumMeta.values.map { album ->
+            val items = grouped[album.id].orEmpty()
+            val cover = items.maxByOrNull { it.capturedAtMillis }
+            album.copy(
+                mediaCount = items.size,
+                coverSeed = cover?.thumbnailSeed ?: album.coverSeed,
+                coverType = cover?.type ?: album.coverType
+            )
+        }
+    }
 
     fun toggleFavorite(id: String) {
         _media.update { items ->
@@ -52,6 +82,44 @@ class MediaRepository {
                 if (item.id == id) item.copy(isFavorite = !item.isFavorite) else item
             }
         }
+    }
+
+    fun retryBackup(id: String) {
+        _media.update { items ->
+            items.map { item ->
+                if (item.id == id && item.backupState == BackupState.FAILED) {
+                    item.copy(
+                        backupState = BackupState.UPLOADING,
+                        progress = 0.12f,
+                        errorMessage = null,
+                        backupCompleted = false,
+                        telegramCompleted = false
+                    )
+                } else {
+                    item
+                }
+            }
+        }
+        refreshSyncSummary()
+    }
+
+    fun retryFailed() {
+        _media.update { items ->
+            items.map { item ->
+                if (item.backupState == BackupState.FAILED) {
+                    item.copy(
+                        backupState = BackupState.UPLOADING,
+                        progress = 0.12f,
+                        errorMessage = null,
+                        backupCompleted = false,
+                        telegramCompleted = false
+                    )
+                } else {
+                    item
+                }
+            }
+        }
+        refreshSyncSummary()
     }
 
     fun updatePreferences(transform: (BackupPreferences) -> BackupPreferences) {
@@ -66,5 +134,15 @@ class MediaRepository {
         _telegram.update {
             it.copy(connected = true, chatId = if (it.chatId.isBlank()) "48291037" else it.chatId)
         }
+    }
+
+    private fun refreshSyncSummary() {
+        val items = _media.value
+        val inProgress = items.count {
+            it.backupState == BackupState.UPLOADING ||
+                it.backupState == BackupState.PROCESSING ||
+                it.backupState == BackupState.SENDING_TELEGRAM
+        }
+        _syncSummary.update { it.copy(inProgressCount = inProgress) }
     }
 }

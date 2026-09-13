@@ -10,29 +10,36 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 
-data class MediaDetailsUiState(
-    val item: MediaItem?
+data class MediaViewerUiState(
+    val items: List<MediaItem>,
+    val initialIndex: Int
 )
 
-class MediaDetailsViewModel(
+class MediaViewerViewModel(
     private val repository: MediaRepository,
     private val mediaId: String
 ) : ViewModel() {
 
-    val uiState: StateFlow<MediaDetailsUiState> = repository.media
-        .map { items -> MediaDetailsUiState(items.firstOrNull { it.id == mediaId }) }
+    val uiState: StateFlow<MediaViewerUiState> = repository.media
+        .map { media ->
+            val sorted = media.sortedByDescending { it.capturedAtMillis }
+            val index = sorted.indexOfFirst { it.id == mediaId }.coerceAtLeast(0)
+            MediaViewerUiState(items = sorted, initialIndex = index)
+        }
         .stateIn(
             scope = viewModelScope,
             started = SharingStarted.WhileSubscribed(5_000),
-            initialValue = MediaDetailsUiState(repository.mediaById(mediaId))
+            initialValue = run {
+                val sorted = repository.media.value.sortedByDescending { it.capturedAtMillis }
+                MediaViewerUiState(
+                    items = sorted,
+                    initialIndex = sorted.indexOfFirst { it.id == mediaId }.coerceAtLeast(0)
+                )
+            }
         )
 
-    fun toggleFavorite() {
-        repository.toggleFavorite(mediaId)
-    }
-
-    fun retryBackup() {
-        repository.retryBackup(mediaId)
+    fun toggleFavorite(id: String) {
+        repository.toggleFavorite(id)
     }
 
     companion object {
@@ -40,7 +47,7 @@ class MediaDetailsViewModel(
             object : ViewModelProvider.Factory {
                 @Suppress("UNCHECKED_CAST")
                 override fun <T : ViewModel> create(modelClass: Class<T>): T {
-                    return MediaDetailsViewModel(repository, mediaId) as T
+                    return MediaViewerViewModel(repository, mediaId) as T
                 }
             }
     }

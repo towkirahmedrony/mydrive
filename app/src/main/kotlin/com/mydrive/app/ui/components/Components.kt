@@ -500,7 +500,7 @@ fun stateVisual(state: BackupState): Triple<String, Color, ImageVector> = when (
     BackupState.COMPLETED -> Triple("Completed", StatusConnected, Icons.Outlined.CloudDone)
     BackupState.UPLOADING -> Triple("Uploading", StatusSyncing, Icons.Outlined.CloudUpload)
     BackupState.PROCESSING -> Triple("Processing", StatusSyncing, Icons.Outlined.CloudQueue)
-    BackupState.SENDING_TELEGRAM -> Triple("Sending to Telegram", StatusSyncing, Icons.Outlined.CloudUpload)
+    BackupState.SENDING_TELEGRAM -> Triple("Telegram sync", StatusSyncing, Icons.Outlined.CloudUpload)
     BackupState.WAITING -> Triple("Waiting", Mist, Icons.Outlined.CloudQueue)
     BackupState.FAILED -> Triple("Failed", StatusAttention, Icons.Outlined.ErrorOutline)
 }

@@ -31,11 +31,20 @@ data class MediaItem(
     val durationSeconds: Int? = null,
     val isFavorite: Boolean = false,
     val backupState: BackupState = BackupState.COMPLETED,
-    val cloudBackupCompleted: Boolean = true,
+    val backupCompleted: Boolean = true,
     val telegramCompleted: Boolean = true,
     val thumbnailSeed: Int,
     val progress: Float = 0f,
-    val errorMessage: String? = null
+    val errorMessage: String? = null,
+    val albumId: String = "camera"
+)
+
+data class AlbumFolder(
+    val id: String,
+    val name: String,
+    val coverSeed: Int,
+    val coverType: MediaType = MediaType.PHOTO,
+    val mediaCount: Int = 0
 )
 
 data class ActivityEvent(

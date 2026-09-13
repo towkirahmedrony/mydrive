@@ -3,6 +3,7 @@ package com.mydrive.app.ui.gallery
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -11,19 +12,14 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.lazy.grid.GridCells
-import androidx.compose.foundation.lazy.grid.GridItemSpan
-import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
-import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Close
-import androidx.compose.material.icons.outlined.FilterList
-import androidx.compose.material.icons.outlined.PhotoLibrary
+import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -37,10 +33,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.mydrive.app.ui.components.EmptyState
-import com.mydrive.app.ui.components.MediaThumb
+import com.mydrive.app.ui.components.AlbumStrip
+import com.mydrive.app.ui.components.CompactBackupStatus
+import com.mydrive.app.ui.components.MediaGrid
 import com.mydrive.app.ui.theme.ChipShape
 import com.mydrive.app.ui.theme.Copper
 import com.mydrive.app.ui.theme.Graphite
@@ -53,7 +51,8 @@ import com.mydrive.app.ui.theme.Stroke
 @Composable
 fun GalleryScreen(
     viewModel: GalleryViewModel,
-    onMediaClick: (String) -> Unit
+    onMediaClick: (String) -> Unit,
+    onAlbumClick: (String) -> Unit
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     var searchOpen by rememberSaveable { mutableStateOf(false) }
@@ -70,7 +69,7 @@ fun GalleryScreen(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
-                text = "Gallery",
+                text = "Albums",
                 style = MaterialTheme.typography.headlineMedium,
                 color = Ivory,
                 modifier = Modifier.weight(1f)
@@ -80,8 +79,14 @@ fun GalleryScreen(
                 if (!searchOpen) viewModel.setQuery("")
             }
             Spacer(Modifier.size(Spacing.xs))
-            IconButtonCircle(icon = Icons.Outlined.FilterList) { }
+            IconButtonCircle(icon = Icons.Outlined.MoreVert) { }
         }
+
+        CompactBackupStatus(
+            syncingCount = state.syncingCount,
+            failedCount = state.failedCount,
+            modifier = Modifier.padding(bottom = Spacing.xs)
+        )
 
         if (searchOpen) {
             SearchField(
@@ -98,43 +103,27 @@ fun GalleryScreen(
             onSelect = viewModel::setFilter,
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = Spacing.md, vertical = Spacing.sm)
+                .padding(horizontal = Spacing.md, vertical = Spacing.xs)
         )
 
-        if (state.groups.isEmpty()) {
-            EmptyState(
-                title = "No media yet",
-                message = "Your backed up photos and videos will appear here.",
-                icon = Icons.Outlined.PhotoLibrary,
-                modifier = Modifier.fillMaxSize()
-            )
-        } else {
-            LazyVerticalGrid(
-                columns = GridCells.Fixed(3),
-                modifier = Modifier.fillMaxSize(),
-                contentPadding = PaddingValues(
-                    start = Spacing.md,
-                    end = Spacing.md,
-                    bottom = Spacing.lg
-                ),
-                horizontalArrangement = Arrangement.spacedBy(Spacing.xs),
-                verticalArrangement = Arrangement.spacedBy(Spacing.xs)
-            ) {
-                state.groups.forEach { group ->
-                    item(span = { GridItemSpan(3) }, key = "g-${group.label}") {
-                        Text(
-                            text = group.label,
-                            style = MaterialTheme.typography.titleSmall,
-                            color = Mist,
-                            modifier = Modifier.padding(top = Spacing.md, bottom = Spacing.xs)
-                        )
-                    }
-                    items(group.items, key = { it.id }) { item ->
-                        MediaThumb(item = item, onClick = { onMediaClick(item.id) })
-                    }
+        MediaGrid(
+            groups = state.groups,
+            onMediaClick = onMediaClick,
+            emptyTitle = "No media yet",
+            emptyMessage = "Your photos and videos will appear here.",
+            contentPadding = PaddingValues(bottom = Spacing.lg),
+            header = if (state.albums.isNotEmpty()) {
+                {
+                    AlbumStrip(
+                        albums = state.albums,
+                        onAlbumClick = onAlbumClick,
+                        modifier = Modifier.padding(bottom = Spacing.sm, top = Spacing.xs)
+                    )
                 }
+            } else {
+                null
             }
-        }
+        )
     }
 }
 
@@ -144,7 +133,10 @@ private fun FilterRow(
     onSelect: (GalleryFilter) -> Unit,
     modifier: Modifier = Modifier
 ) {
-    Row(modifier = modifier, horizontalArrangement = Arrangement.spacedBy(Spacing.xs)) {
+    Row(
+        modifier = modifier.horizontalScroll(rememberScrollState()),
+        horizontalArrangement = Arrangement.spacedBy(Spacing.xs)
+    ) {
         GalleryFilter.entries.forEach { filter ->
             val active = filter == selected
             val label = when (filter) {
@@ -193,7 +185,7 @@ private fun SearchField(
             modifier = Modifier.weight(1f),
             decorationBox = { inner ->
                 if (value.isEmpty()) {
-                    Text("Search by filename", style = MaterialTheme.typography.bodyMedium, color = Mist)
+                    Text("Search photos and videos", style = MaterialTheme.typography.bodyMedium, color = Mist)
                 }
                 inner()
             }
@@ -203,7 +195,7 @@ private fun SearchField(
 
 @Composable
 private fun IconButtonCircle(
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    icon: ImageVector,
     onClick: () -> Unit
 ) {
     Box(

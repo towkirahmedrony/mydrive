@@ -26,11 +26,8 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.mydrive.app.data.model.BackupState
 import com.mydrive.app.data.model.MediaItem
-import com.mydrive.app.ui.components.AppCard
 import com.mydrive.app.ui.components.BackupStateChip
 import com.mydrive.app.ui.components.EmptyState
 import com.mydrive.app.ui.components.PrimaryActionButton
@@ -40,11 +37,13 @@ import com.mydrive.app.ui.components.SectionHeader
 import com.mydrive.app.ui.components.stateVisual
 import com.mydrive.app.ui.theme.Ink
 import com.mydrive.app.ui.theme.Ivory
-import com.mydrive.app.ui.theme.IvoryMuted
 import com.mydrive.app.ui.theme.Mist
 import com.mydrive.app.ui.theme.Radius
+import com.mydrive.app.ui.theme.Sage
 import com.mydrive.app.ui.theme.Slate
 import com.mydrive.app.ui.theme.Spacing
+import com.mydrive.app.ui.theme.StatusAttention
+import com.mydrive.app.ui.theme.StatusSyncing
 import com.mydrive.app.ui.util.formatFileSize
 import com.mydrive.app.ui.util.thumbnailBrush
 
@@ -54,6 +53,11 @@ fun SyncScreen(
     onMediaClick: (String) -> Unit
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
+    val headlineColor = when {
+        state.failed.isNotEmpty() -> StatusAttention
+        state.inProgress.isNotEmpty() || state.waiting.isNotEmpty() -> StatusSyncing
+        else -> Sage
+    }
 
     LazyColumn(
         modifier = Modifier
@@ -69,23 +73,8 @@ fun SyncScreen(
     ) {
         item {
             Text("Sync", style = MaterialTheme.typography.headlineMedium, color = Ivory)
-        }
-        item {
-            AppCard {
-                Text("Backup activity", style = MaterialTheme.typography.labelLarge, color = Mist)
-                Spacer(Modifier.height(Spacing.sm))
-                Text(
-                    "${state.summary.inProgressCount} files syncing",
-                    style = MaterialTheme.typography.titleLarge,
-                    color = Ivory
-                )
-                Spacer(Modifier.height(Spacing.xxs))
-                Text(
-                    "${state.summary.completedToday} files completed today",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = IvoryMuted
-                )
-            }
+            Spacer(Modifier.height(Spacing.xxs))
+            Text(state.headline, style = MaterialTheme.typography.bodyMedium, color = headlineColor)
         }
 
         if (state.inProgress.isNotEmpty()) {
@@ -125,13 +114,17 @@ fun SyncScreen(
         if (state.failed.isNotEmpty()) {
             item { SectionHeader(title = "Failed") }
             items(state.failed, key = { it.id }) { item ->
-                FailedRow(item = item, onRetry = { }, onClick = { onMediaClick(item.id) })
+                FailedRow(
+                    item = item,
+                    onRetry = { viewModel.retry(item.id) },
+                    onClick = { onMediaClick(item.id) }
+                )
             }
             item {
                 Spacer(Modifier.height(Spacing.xs))
                 PrimaryActionButton(
                     text = "Retry failed",
-                    onClick = {},
+                    onClick = viewModel::retryFailed,
                     icon = Icons.Outlined.Refresh,
                     modifier = Modifier.fillMaxWidth()
                 )
@@ -221,7 +214,7 @@ private fun FailedRow(
             Text(
                 item.errorMessage ?: "Upload failed",
                 style = MaterialTheme.typography.bodySmall,
-                color = com.mydrive.app.ui.theme.StatusAttention
+                color = StatusAttention
             )
         }
         SecondaryActionButton(text = "Retry", onClick = onRetry)

@@ -100,6 +100,11 @@ fun SettingsScreen(
                 SettingsRow(title = "Email", subtitle = state.profile.email)
                 HorizontalDivider(color = Stroke)
                 SettingsRow(title = "Account status", subtitle = state.profile.accountStatus)
+                HorizontalDivider(color = Stroke)
+                SettingsRow(
+                    title = "Logout",
+                    leading = Icons.AutoMirrored.Outlined.Logout
+                )
             }
         }
 
@@ -162,30 +167,10 @@ fun SettingsScreen(
         }
 
         item {
-            SettingsGroup(title = "Storage / Media") {
-                SettingsRow(title = "Total media", subtitle = "${state.storage.totalMedia} items")
-                HorizontalDivider(color = Stroke)
-                SettingsRow(title = "Photos", subtitle = state.storage.photos.toString())
-                HorizontalDivider(color = Stroke)
-                SettingsRow(title = "Videos", subtitle = state.storage.videos.toString())
-                HorizontalDivider(color = Stroke)
-                SettingsRow(title = "Pending uploads", subtitle = state.storage.pendingUploads.toString())
-            }
-        }
-
-        item {
             SettingsGroup(title = "Other") {
                 SettingsRow(
                     title = "Notifications",
                     leading = Icons.Outlined.NotificationsNone,
-                    trailing = {
-                        Icon(Icons.AutoMirrored.Outlined.KeyboardArrowRight, contentDescription = null, tint = Mist)
-                    }
-                )
-                HorizontalDivider(color = Stroke)
-                SettingsRow(
-                    title = "About",
-                    leading = Icons.Outlined.Info,
                     trailing = {
                         Icon(Icons.AutoMirrored.Outlined.KeyboardArrowRight, contentDescription = null, tint = Mist)
                     }
@@ -208,8 +193,11 @@ fun SettingsScreen(
                 )
                 HorizontalDivider(color = Stroke)
                 SettingsRow(
-                    title = "Logout",
-                    leading = Icons.AutoMirrored.Outlined.Logout
+                    title = "About Albums",
+                    leading = Icons.Outlined.Info,
+                    trailing = {
+                        Icon(Icons.AutoMirrored.Outlined.KeyboardArrowRight, contentDescription = null, tint = Mist)
+                    }
                 )
             }
         }

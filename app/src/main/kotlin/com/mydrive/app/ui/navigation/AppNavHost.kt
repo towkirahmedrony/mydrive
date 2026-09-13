@@ -7,14 +7,14 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.Home
-import androidx.compose.material.icons.outlined.PhotoLibrary
-import androidx.compose.material.icons.outlined.Settings
-import androidx.compose.material.icons.outlined.Sync
-import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Sync
+import androidx.compose.material.icons.outlined.FavoriteBorder
+import androidx.compose.material.icons.outlined.PhotoLibrary
+import androidx.compose.material.icons.outlined.Settings
+import androidx.compose.material.icons.outlined.Sync
 import androidx.compose.material3.Icon
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
@@ -38,12 +38,16 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import com.mydrive.app.data.repository.MediaRepository
+import com.mydrive.app.ui.album.AlbumDetailScreen
+import com.mydrive.app.ui.album.AlbumDetailViewModel
+import com.mydrive.app.ui.favorites.FavoritesScreen
+import com.mydrive.app.ui.favorites.FavoritesViewModel
 import com.mydrive.app.ui.gallery.GalleryScreen
 import com.mydrive.app.ui.gallery.GalleryViewModel
-import com.mydrive.app.ui.home.HomeScreen
-import com.mydrive.app.ui.home.HomeViewModel
 import com.mydrive.app.ui.media.MediaDetailsScreen
 import com.mydrive.app.ui.media.MediaDetailsViewModel
+import com.mydrive.app.ui.media.MediaViewerScreen
+import com.mydrive.app.ui.media.MediaViewerViewModel
 import com.mydrive.app.ui.settings.SettingsScreen
 import com.mydrive.app.ui.settings.SettingsViewModel
 import com.mydrive.app.ui.settings.TelegramSettingsScreen
@@ -52,7 +56,6 @@ import com.mydrive.app.ui.sync.SyncViewModel
 import com.mydrive.app.ui.theme.Copper
 import com.mydrive.app.ui.theme.Graphite
 import com.mydrive.app.ui.theme.Ink
-import com.mydrive.app.ui.theme.Ivory
 import com.mydrive.app.ui.theme.Mist
 import com.mydrive.app.ui.theme.Radius
 import com.mydrive.app.ui.theme.Stroke
@@ -65,8 +68,8 @@ private data class TabItem(
 )
 
 private val tabs = listOf(
-    TabItem(AppDestination.Home, "Home", Icons.Filled.Home, Icons.Outlined.Home),
-    TabItem(AppDestination.Gallery, "Gallery", Icons.Filled.PhotoLibrary, Icons.Outlined.PhotoLibrary),
+    TabItem(AppDestination.Albums, "Albums", Icons.Filled.PhotoLibrary, Icons.Outlined.PhotoLibrary),
+    TabItem(AppDestination.Favorites, "Favorites", Icons.Filled.Favorite, Icons.Outlined.FavoriteBorder),
     TabItem(AppDestination.Sync, "Sync", Icons.Filled.Sync, Icons.Outlined.Sync),
     TabItem(AppDestination.Settings, "Settings", Icons.Filled.Settings, Icons.Outlined.Settings)
 )
@@ -129,44 +132,31 @@ fun AppNavHost(repository: MediaRepository) {
     ) { innerPadding ->
         NavHost(
             navController = navController,
-            startDestination = AppDestination.Home.route,
+            startDestination = AppDestination.Albums.route,
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
         ) {
-            composable(AppDestination.Home.route) {
-                val vm: HomeViewModel = viewModel(factory = HomeViewModel.factory(repository))
-                HomeScreen(
-                    viewModel = vm,
-                    onSeeAll = {
-                        navController.navigate(AppDestination.Gallery.route) {
-                            popUpTo(navController.graph.findStartDestination().id) { saveState = true }
-                            launchSingleTop = true
-                            restoreState = true
-                        }
-                    },
-                    onMediaClick = { id -> navController.navigate(AppDestination.MediaDetails.create(id)) },
-                    onBackupNow = {
-                        navController.navigate(AppDestination.Sync.route) {
-                            popUpTo(navController.graph.findStartDestination().id) { saveState = true }
-                            launchSingleTop = true
-                            restoreState = true
-                        }
-                    }
-                )
-            }
-            composable(AppDestination.Gallery.route) {
+            composable(AppDestination.Albums.route) {
                 val vm: GalleryViewModel = viewModel(factory = GalleryViewModel.factory(repository))
                 GalleryScreen(
                     viewModel = vm,
-                    onMediaClick = { id -> navController.navigate(AppDestination.MediaDetails.create(id)) }
+                    onMediaClick = { id -> navController.navigate(AppDestination.MediaViewer.create(id)) },
+                    onAlbumClick = { id -> navController.navigate(AppDestination.AlbumDetail.create(id)) }
+                )
+            }
+            composable(AppDestination.Favorites.route) {
+                val vm: FavoritesViewModel = viewModel(factory = FavoritesViewModel.factory(repository))
+                FavoritesScreen(
+                    viewModel = vm,
+                    onMediaClick = { id -> navController.navigate(AppDestination.MediaViewer.create(id)) }
                 )
             }
             composable(AppDestination.Sync.route) {
                 val vm: SyncViewModel = viewModel(factory = SyncViewModel.factory(repository))
                 SyncScreen(
                     viewModel = vm,
-                    onMediaClick = { id -> navController.navigate(AppDestination.MediaDetails.create(id)) }
+                    onMediaClick = { id -> navController.navigate(AppDestination.MediaViewer.create(id)) }
                 )
             }
             composable(AppDestination.Settings.route) {
@@ -174,6 +164,20 @@ fun AppNavHost(repository: MediaRepository) {
                 SettingsScreen(
                     viewModel = vm,
                     onOpenTelegram = { navController.navigate(AppDestination.TelegramSettings.route) }
+                )
+            }
+            composable(
+                route = AppDestination.MediaViewer.route,
+                arguments = listOf(navArgument("mediaId") { type = NavType.StringType })
+            ) { entry ->
+                val mediaId = entry.arguments?.getString("mediaId").orEmpty()
+                val vm: MediaViewerViewModel = viewModel(
+                    factory = MediaViewerViewModel.factory(repository, mediaId)
+                )
+                MediaViewerScreen(
+                    viewModel = vm,
+                    onBack = { navController.popBackStack() },
+                    onOpenDetails = { id -> navController.navigate(AppDestination.MediaDetails.create(id)) }
                 )
             }
             composable(
@@ -185,6 +189,20 @@ fun AppNavHost(repository: MediaRepository) {
                     factory = MediaDetailsViewModel.factory(repository, mediaId)
                 )
                 MediaDetailsScreen(viewModel = vm, onBack = { navController.popBackStack() })
+            }
+            composable(
+                route = AppDestination.AlbumDetail.route,
+                arguments = listOf(navArgument("albumId") { type = NavType.StringType })
+            ) { entry ->
+                val albumId = entry.arguments?.getString("albumId").orEmpty()
+                val vm: AlbumDetailViewModel = viewModel(
+                    factory = AlbumDetailViewModel.factory(repository, albumId)
+                )
+                AlbumDetailScreen(
+                    viewModel = vm,
+                    onBack = { navController.popBackStack() },
+                    onMediaClick = { id -> navController.navigate(AppDestination.MediaViewer.create(id)) }
+                )
             }
             composable(AppDestination.TelegramSettings.route) {
                 val vm: SettingsViewModel = viewModel(factory = SettingsViewModel.factory(repository))

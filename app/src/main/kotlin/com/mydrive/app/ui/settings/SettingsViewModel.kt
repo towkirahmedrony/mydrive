@@ -4,7 +4,6 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.mydrive.app.data.model.BackupPreferences
-import com.mydrive.app.data.model.StorageSummary
 import com.mydrive.app.data.model.TelegramSettings
 import com.mydrive.app.data.model.UserProfile
 import com.mydrive.app.data.repository.MediaRepository
@@ -16,8 +15,7 @@ import kotlinx.coroutines.flow.stateIn
 data class SettingsUiState(
     val profile: UserProfile,
     val preferences: BackupPreferences,
-    val telegram: TelegramSettings,
-    val storage: StorageSummary
+    val telegram: TelegramSettings
 )
 
 class SettingsViewModel(
@@ -27,18 +25,16 @@ class SettingsViewModel(
     val uiState: StateFlow<SettingsUiState> = combine(
         repository.profile,
         repository.preferences,
-        repository.telegram,
-        repository.storage
-    ) { profile, preferences, telegram, storage ->
-        SettingsUiState(profile, preferences, telegram, storage)
+        repository.telegram
+    ) { profile, preferences, telegram ->
+        SettingsUiState(profile, preferences, telegram)
     }.stateIn(
         scope = viewModelScope,
         started = SharingStarted.WhileSubscribed(5_000),
         initialValue = SettingsUiState(
             profile = repository.profile.value,
             preferences = repository.preferences.value,
-            telegram = repository.telegram.value,
-            storage = repository.storage.value
+            telegram = repository.telegram.value
         )
     )
 

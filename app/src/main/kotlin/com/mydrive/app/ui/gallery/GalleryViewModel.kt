@@ -3,9 +3,11 @@ package com.mydrive.app.ui.gallery
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import com.mydrive.app.data.model.AlbumFolder
 import com.mydrive.app.data.model.MediaItem
 import com.mydrive.app.data.model.MediaType
 import com.mydrive.app.data.repository.MediaRepository
+import com.mydrive.app.ui.components.compactBackupLabel
 import com.mydrive.app.ui.util.dateGroupLabel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -26,7 +28,10 @@ data class MediaGroup(
 data class GalleryUiState(
     val filter: GalleryFilter,
     val query: String,
-    val groups: List<MediaGroup>
+    val groups: List<MediaGroup>,
+    val albums: List<AlbumFolder>,
+    val syncingCount: Int,
+    val failedCount: Int
 )
 
 class GalleryViewModel(
@@ -59,15 +64,24 @@ class GalleryViewModel(
             .groupBy { dateGroupLabel(it.capturedAtMillis) }
             .map { (label, items) -> MediaGroup(label, items) }
 
+        val (syncing, failed) = compactBackupLabel(media)
+
         GalleryUiState(
             filter = currentFilter,
             query = currentQuery,
-            groups = groups
+            groups = groups,
+            albums = if (currentFilter == GalleryFilter.ALL && currentQuery.isBlank()) {
+                repository.albums()
+            } else {
+                emptyList()
+            },
+            syncingCount = syncing,
+            failedCount = failed
         )
     }.stateIn(
         scope = viewModelScope,
         started = SharingStarted.WhileSubscribed(5_000),
-        initialValue = GalleryUiState(GalleryFilter.ALL, "", emptyList())
+        initialValue = GalleryUiState(GalleryFilter.ALL, "", emptyList(), emptyList(), 0, 0)
     )
 
     fun setFilter(value: GalleryFilter) {
