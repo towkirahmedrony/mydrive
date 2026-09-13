@@ -164,13 +164,14 @@ fun AlbumCard(
             text = album.name,
             style = MaterialTheme.typography.titleSmall,
             color = colors.onBackground,
-            modifier = Modifier.padding(top = Spacing.xs),
+            modifier = Modifier.padding(top = Spacing.xs, start = Spacing.xs, end = Spacing.xs),
             maxLines = 1
         )
         Box(
             modifier = Modifier
                 .fillMaxWidth()
                 .background(Color.Yellow)
+                .padding(horizontal = Spacing.xs, vertical = 2.dp)
         ) {
             Text(
                 text = "${album.mediaCount} ${if (album.mediaCount == 1) "item" else "items"}",
