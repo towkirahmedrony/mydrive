@@ -463,10 +463,12 @@ fun PrimaryActionButton(
     text: String,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
-    icon: ImageVector? = null
+    icon: ImageVector? = null,
+    enabled: Boolean = true
 ) {
     Surface(
         onClick = onClick,
+        enabled = enabled,
         modifier = modifier,
         shape = ChipShape,
         color = Copper,

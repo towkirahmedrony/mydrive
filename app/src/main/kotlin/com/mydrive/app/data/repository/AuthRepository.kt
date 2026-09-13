@@ -15,6 +15,7 @@ import com.mydrive.app.data.remote.dto.ProfileRow
 import io.github.jan.supabase.SupabaseClient
 import io.github.jan.supabase.auth.auth
 import io.github.jan.supabase.auth.providers.builtin.Email
+import io.github.jan.supabase.auth.status.RefreshFailureCause
 import io.github.jan.supabase.auth.status.SessionStatus
 import io.github.jan.supabase.postgrest.from
 import kotlinx.coroutines.CoroutineScope
@@ -42,13 +43,16 @@ class AuthRepository(
     private val _state = MutableStateFlow<AuthState>(AuthState.Loading)
     val state: StateFlow<AuthState> = _state.asStateFlow()
 
+    private val sessionMutex = Mutex()
     private val deviceMutex = Mutex()
     private var registeredDeviceId: String? = null
     private var lastSeenAtMillis = 0L
     private var sessionJob: Job? = null
+    private var watcherJob: Job? = null
 
     init {
         restoreSession()
+        watchSession()
     }
 
     fun restoreSession() {
@@ -61,16 +65,29 @@ class AuthRepository(
             }
             try {
                 client.auth.awaitInitialization()
-                when (val status = client.auth.sessionStatus.value) {
+                var status = client.auth.sessionStatus.value
+                if (status is SessionStatus.RefreshFailure) {
+                    for (attempt in 1..3) {
+                        delay(800L * attempt)
+                        runCatching { client.auth.loadFromStorage() }
+                        status = client.auth.sessionStatus.value
+                        if (status !is SessionStatus.RefreshFailure) break
+                    }
+                }
+                when (val resolved = client.auth.sessionStatus.value) {
                     is SessionStatus.Authenticated -> completeAuthenticatedSession(pendingFullName = null)
                     is SessionStatus.RefreshFailure -> {
-                        runCatching { client.auth.signOut() }
+                        if (shouldClearRefreshFailure(resolved.cause)) {
+                            runCatching { client.auth.signOut() }
+                        }
                         _state.value = AuthState.Unauthenticated
                     }
                     else -> _state.value = AuthState.Unauthenticated
                 }
-            } catch (_: Throwable) {
-                runCatching { client.auth.signOut() }
+            } catch (error: Throwable) {
+                if (AuthErrorMapper.isSessionExpired(error)) {
+                    runCatching { client.auth.signOut() }
+                }
                 _state.value = AuthState.Unauthenticated
             }
         }
@@ -109,7 +126,6 @@ class AuthRepository(
             }
             val session = supabase.auth.currentSessionOrNull()
             if (session == null) {
-                _state.value = AuthState.Unauthenticated
                 throw EmailConfirmationRequired()
             }
             completeAuthenticatedSession(pendingFullName = fullName)
@@ -130,17 +146,17 @@ class AuthRepository(
     }
 
     suspend fun logout(): Result<Unit> {
-        val supabase = client
         registeredDeviceId = null
         lastSeenAtMillis = 0L
         return runCatching {
-            supabase?.auth?.signOut()
+            client?.auth?.signOut()
             Unit
         }.also {
             _state.value = AuthState.Unauthenticated
         }.fold(
             onSuccess = { Result.success(Unit) },
             onFailure = {
+                runCatching { client?.auth?.clearSession() }
                 _state.value = AuthState.Unauthenticated
                 Result.success(Unit)
             }
@@ -155,17 +171,44 @@ class AuthRepository(
         }
     }
 
-    private suspend fun completeAuthenticatedSession(pendingFullName: String?) {
-        val supabase = client ?: throw IllegalStateException(notConfiguredMessage())
-        val userId = supabase.auth.currentUserOrNull()?.id
-            ?: throw IllegalStateException("Your session expired. Please sign in again.")
-        val profile = loadProfile(userId, pendingFullName)
-        if (profile.isSuspended) {
-            _state.value = AuthState.Suspended(profile)
-            return
+    private fun watchSession() {
+        val supabase = client ?: return
+        watcherJob?.cancel()
+        watcherJob = scope.launch {
+            supabase.auth.sessionStatus.collect { status ->
+                when (status) {
+                    is SessionStatus.NotAuthenticated -> {
+                        val current = _state.value
+                        if (current is AuthState.Authenticated || current is AuthState.Suspended) {
+                            registeredDeviceId = null
+                            lastSeenAtMillis = 0L
+                            _state.value = AuthState.Unauthenticated
+                        }
+                    }
+                    else -> Unit
+                }
+            }
         }
-        runCatching { touchDevice(force = true) }
-        _state.value = AuthState.Authenticated(profile)
+    }
+
+    private suspend fun completeAuthenticatedSession(pendingFullName: String?) {
+        sessionMutex.withLock {
+            val supabase = client ?: throw IllegalStateException(notConfiguredMessage())
+            val userId = supabase.auth.currentUserOrNull()?.id
+                ?: throw IllegalStateException("Your session expired. Please sign in again.")
+            val already = when (val current = _state.value) {
+                is AuthState.Authenticated -> current.profile.id == userId
+                is AuthState.Suspended -> current.profile.id == userId
+                else -> false
+            }
+            if (already) return
+            val profile = loadProfile(userId, pendingFullName)
+            if (profile.isSuspended) {
+                _state.value = AuthState.Suspended(profile)
+                return
+            }
+            _state.value = AuthState.Authenticated(profile)
+        }
         scope.launch {
             runCatching { touchDevice(force = true) }
         }
@@ -192,9 +235,12 @@ class AuthRepository(
                             }
                         }
                     }
+                    val email = row.email?.trim().orEmpty().ifBlank {
+                        supabase.auth.currentUserOrNull()?.email.orEmpty()
+                    }
                     return AuthUserProfile(
                         id = row.id,
-                        email = row.email.orEmpty(),
+                        email = email,
                         fullName = name,
                         role = row.role.orEmpty(),
                         status = row.status.orEmpty().ifBlank { "active" }
@@ -241,7 +287,6 @@ class AuthRepository(
                         )
                     )
                 } catch (_: Throwable) {
-                    // Reuse an existing row if this device was already registered.
                 }
                 val reusedId = findExistingDeviceId(userId, deviceUid)
                 if (reusedId != null) {
@@ -269,27 +314,33 @@ class AuthRepository(
     }
 
     private suspend fun runAuth(block: suspend () -> Unit): Result<Unit> {
-        _state.value = AuthState.Loading
         return try {
             block()
             Result.success(Unit)
         } catch (error: EmailConfirmationRequired) {
-            _state.value = AuthState.Unauthenticated
             Result.failure(error)
         } catch (error: ProfileNotFound) {
             runCatching { client?.auth?.signOut() }
             _state.value = AuthState.Unauthenticated
             Result.failure(IllegalStateException("We couldn't load your account. Please try again."))
         } catch (error: Throwable) {
-            runCatching {
-                if (client?.auth?.currentSessionOrNull() == null) {
-                    _state.value = AuthState.Unauthenticated
-                }
-            }
-            if (_state.value is AuthState.Loading) {
+            val current = _state.value
+            if (current is AuthState.Loading) {
+                _state.value = AuthState.Unauthenticated
+            } else if (client?.auth?.currentSessionOrNull() == null &&
+                current !is AuthState.Authenticated &&
+                current !is AuthState.Suspended
+            ) {
                 _state.value = AuthState.Unauthenticated
             }
             Result.failure(IllegalStateException(AuthErrorMapper.message(error)))
+        }
+    }
+
+    private fun shouldClearRefreshFailure(cause: RefreshFailureCause): Boolean {
+        return when (cause) {
+            is RefreshFailureCause.NetworkError -> false
+            is RefreshFailureCause.InternalServerError -> AuthErrorMapper.isSessionExpired(cause.exception)
         }
     }
 

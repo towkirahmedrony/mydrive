@@ -1,5 +1,7 @@
 package com.mydrive.app.data.auth
 
+import io.github.jan.supabase.auth.exception.AuthErrorCode
+import io.github.jan.supabase.auth.exception.AuthRestException
 import io.github.jan.supabase.auth.exception.AuthWeakPasswordException
 import io.github.jan.supabase.exceptions.HttpRequestException
 import io.github.jan.supabase.exceptions.RestException
@@ -13,6 +15,15 @@ object AuthErrorMapper {
 
     fun message(error: Throwable): String {
         if (error is AuthWeakPasswordException) return "Choose a stronger password."
+        if (error is AuthRestException) {
+            mappedAuthCode(error.errorCode)?.let { return it }
+            val description = error.errorDescription.trim()
+            if (description.isNotBlank()) {
+                mappedRaw(description.lowercase())?.let { return it }
+                if (isUserFacing(description)) return clean(description)
+            }
+        }
+
         val raw = buildString {
             append(error.message.orEmpty())
             append(' ')
@@ -25,23 +36,59 @@ object AuthErrorMapper {
             }
         }.lowercase()
 
-        return when {
-            isNetwork(error, raw) -> "No internet connection. Check your network and try again."
-            isUnavailable(raw) -> "Albums is temporarily unavailable. Please try again."
-            isInvalidCredentials(raw) -> "Incorrect email or password."
-            isEmailTaken(raw) -> "This email is already registered."
-            isWeakPassword(raw) -> "Choose a stronger password."
-            isInvalidEmail(raw) -> "Enter a valid email address."
-            isSessionExpired(raw) -> "Your session expired. Please sign in again."
-            isRateLimited(raw) -> "Too many attempts. Please wait and try again."
-            isEmailNotConfirmed(raw) -> "Confirm your email, then sign in."
-            else -> "Something went wrong. Please try again."
+        mappedRaw(raw)?.let { return it }
+        if (isNetwork(error, raw)) return "No internet connection. Check your network and try again."
+
+        val fallback = error.message?.trim().orEmpty()
+        if (isUserFacing(fallback)) return clean(fallback)
+        if (error is RestException) {
+            val description = error.description?.trim().orEmpty()
+            if (isUserFacing(description)) return clean(description)
         }
+        return "Something went wrong. Please try again."
     }
 
     fun isSessionExpired(error: Throwable): Boolean {
+        if (error is AuthRestException) {
+            return error.errorCode == AuthErrorCode.SessionExpired ||
+                error.errorCode == AuthErrorCode.SessionNotFound ||
+                error.errorCode == AuthErrorCode.BadJwt ||
+                error.errorCode == AuthErrorCode.RefreshTokenNotFound ||
+                error.errorCode == AuthErrorCode.RefreshTokenAlreadyUsed
+        }
         val raw = (error.message.orEmpty() + " " + error.cause?.message.orEmpty()).lowercase()
         return isSessionExpired(raw)
+    }
+
+    private fun mappedAuthCode(code: AuthErrorCode?): String? = when (code) {
+        AuthErrorCode.InvalidCredentials -> "Incorrect email or password."
+        AuthErrorCode.EmailExists, AuthErrorCode.UserAlreadyExists -> "This email is already registered."
+        AuthErrorCode.WeakPassword -> "Choose a stronger password."
+        AuthErrorCode.ValidationFailed -> "Enter a valid email address."
+        AuthErrorCode.EmailNotConfirmed -> "Confirm your email, then sign in."
+        AuthErrorCode.UserBanned -> "This account is suspended and can't use Albums."
+        AuthErrorCode.OverRequestRateLimit,
+        AuthErrorCode.OverEmailSendRateLimit -> "Too many attempts. Please wait and try again."
+        AuthErrorCode.SessionExpired,
+        AuthErrorCode.SessionNotFound,
+        AuthErrorCode.BadJwt,
+        AuthErrorCode.RefreshTokenNotFound,
+        AuthErrorCode.RefreshTokenAlreadyUsed -> "Your session expired. Please sign in again."
+        AuthErrorCode.SignupDisabled -> "New accounts can't be created right now."
+        AuthErrorCode.EmailProviderDisabled -> "Email sign-in is unavailable right now."
+        else -> null
+    }
+
+    private fun mappedRaw(raw: String): String? = when {
+        isUnavailable(raw) -> "Albums is temporarily unavailable. Please try again."
+        isInvalidCredentials(raw) -> "Incorrect email or password."
+        isEmailTaken(raw) -> "This email is already registered."
+        isWeakPassword(raw) -> "Choose a stronger password."
+        isInvalidEmail(raw) -> "Enter a valid email address."
+        isSessionExpired(raw) -> "Your session expired. Please sign in again."
+        isRateLimited(raw) -> "Too many attempts. Please wait and try again."
+        isEmailNotConfirmed(raw) -> "Confirm your email, then sign in."
+        else -> null
     }
 
     private fun isNetwork(error: Throwable, raw: String): Boolean {
@@ -113,5 +160,24 @@ object AuthErrorMapper {
 
     private fun isEmailNotConfirmed(raw: String): Boolean {
         return raw.contains("email not confirmed") || raw.contains("email_not_confirmed")
+    }
+
+    private fun isUserFacing(text: String): Boolean {
+        if (text.isBlank() || text.length > 180) return false
+        val lower = text.lowercase()
+        if (lower.contains("io.github") ||
+            lower.contains("kotlinx.") ||
+            lower.contains("unexpected status") ||
+            lower.contains("http/") ||
+            lower.contains("json") && lower.contains("serial")
+        ) {
+            return false
+        }
+        return text.any { it.isWhitespace() } || text.endsWith(".")
+    }
+
+    private fun clean(text: String): String {
+        val trimmed = text.trim().trimEnd(':')
+        return trimmed.replaceFirstChar { if (it.isLowerCase()) it.titlecase() else it.toString() }
     }
 }

@@ -68,7 +68,8 @@ fun ForgotPasswordScreen(
         Spacer(Modifier.height(Spacing.lg))
         PrimaryActionButton(
             text = if (state.isSubmitting) "Sending..." else "Send reset link",
-            onClick = { if (!state.isSubmitting) viewModel.sendPasswordReset() },
+            onClick = viewModel::sendPasswordReset,
+            enabled = !state.isSubmitting,
             modifier = Modifier.fillMaxWidth()
         )
         Spacer(Modifier.height(Spacing.lg))

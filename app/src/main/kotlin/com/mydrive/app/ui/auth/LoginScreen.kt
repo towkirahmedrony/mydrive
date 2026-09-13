@@ -79,7 +79,8 @@ fun LoginScreen(
         Spacer(Modifier.height(Spacing.lg))
         PrimaryActionButton(
             text = if (state.isSubmitting) "Signing in..." else "Login",
-            onClick = { if (!state.isSubmitting) viewModel.login() },
+            onClick = viewModel::login,
+            enabled = !state.isSubmitting,
             modifier = Modifier.fillMaxWidth()
         )
         Spacer(Modifier.height(Spacing.lg))

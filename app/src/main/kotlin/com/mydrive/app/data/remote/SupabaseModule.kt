@@ -23,7 +23,11 @@ object SupabaseModule {
                 }
             )
             httpEngine = OkHttp.create()
-            install(Auth)
+            install(Auth) {
+                autoLoadFromStorage = true
+                autoSaveToStorage = true
+                alwaysAutoRefresh = true
+            }
             install(Postgrest)
         }
     }

@@ -22,6 +22,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.mydrive.app.ui.components.PrimaryActionButton
 import com.mydrive.app.ui.theme.Copper
+import com.mydrive.app.ui.theme.Sage
 import com.mydrive.app.ui.theme.Spacing
 
 @Composable
@@ -78,10 +79,15 @@ fun SignUpScreen(
             Spacer(Modifier.height(Spacing.sm))
             Text(state.errorMessage.orEmpty(), style = MaterialTheme.typography.bodySmall, color = colors.error)
         }
+        if (state.infoMessage != null) {
+            Spacer(Modifier.height(Spacing.sm))
+            Text(state.infoMessage.orEmpty(), style = MaterialTheme.typography.bodySmall, color = Sage)
+        }
         Spacer(Modifier.height(Spacing.lg))
         PrimaryActionButton(
             text = if (state.isSubmitting) "Creating account..." else "Sign Up",
-            onClick = { if (!state.isSubmitting) viewModel.signUp() },
+            onClick = viewModel::signUp,
+            enabled = !state.isSubmitting,
             modifier = Modifier.fillMaxWidth()
         )
         Spacer(Modifier.height(Spacing.lg))

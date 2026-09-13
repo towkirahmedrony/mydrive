@@ -1,5 +1,6 @@
 package com.mydrive.app.ui.auth
 
+import android.util.Patterns
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
@@ -23,7 +24,8 @@ data class SignUpFormState(
     val password: String = "",
     val confirmPassword: String = "",
     val isSubmitting: Boolean = false,
-    val errorMessage: String? = null
+    val errorMessage: String? = null,
+    val infoMessage: String? = null
 )
 
 data class ForgotPasswordFormState(
@@ -55,19 +57,19 @@ class AuthViewModel(
     }
 
     fun setSignUpFullName(value: String) {
-        _signUp.update { it.copy(fullName = value, errorMessage = null) }
+        _signUp.update { it.copy(fullName = value, errorMessage = null, infoMessage = null) }
     }
 
     fun setSignUpEmail(value: String) {
-        _signUp.update { it.copy(email = value, errorMessage = null) }
+        _signUp.update { it.copy(email = value, errorMessage = null, infoMessage = null) }
     }
 
     fun setSignUpPassword(value: String) {
-        _signUp.update { it.copy(password = value, errorMessage = null) }
+        _signUp.update { it.copy(password = value, errorMessage = null, infoMessage = null) }
     }
 
     fun setSignUpConfirmPassword(value: String) {
-        _signUp.update { it.copy(confirmPassword = value, errorMessage = null) }
+        _signUp.update { it.copy(confirmPassword = value, errorMessage = null, infoMessage = null) }
     }
 
     fun setForgotEmail(value: String) {
@@ -76,6 +78,7 @@ class AuthViewModel(
 
     fun login() {
         val form = _login.value
+        if (form.isSubmitting) return
         val email = form.email.trim()
         val password = form.password
         val validation = validateLogin(email, password)
@@ -98,29 +101,38 @@ class AuthViewModel(
 
     fun signUp() {
         val form = _signUp.value
+        if (form.isSubmitting) return
         val fullName = form.fullName.trim()
         val email = form.email.trim()
         val validation = validateSignUp(fullName, email, form.password, form.confirmPassword)
         if (validation != null) {
-            _signUp.update { it.copy(errorMessage = validation) }
+            _signUp.update { it.copy(errorMessage = validation, infoMessage = null) }
             return
         }
         viewModelScope.launch {
-            _signUp.update { it.copy(isSubmitting = true, errorMessage = null) }
+            _signUp.update { it.copy(isSubmitting = true, errorMessage = null, infoMessage = null) }
             val result = authRepository.signUp(fullName, email, form.password)
+            val confirmationRequired = result.exceptionOrNull() is AuthRepository.EmailConfirmationRequired
             _signUp.update {
                 it.copy(
                     isSubmitting = false,
-                    errorMessage = result.exceptionOrNull()?.message,
-                    password = if (result.isSuccess) "" else it.password,
-                    confirmPassword = if (result.isSuccess) "" else it.confirmPassword
+                    errorMessage = if (confirmationRequired) null else result.exceptionOrNull()?.message,
+                    infoMessage = if (confirmationRequired) {
+                        result.exceptionOrNull()?.message
+                    } else {
+                        null
+                    },
+                    password = if (result.isSuccess || confirmationRequired) "" else it.password,
+                    confirmPassword = if (result.isSuccess || confirmationRequired) "" else it.confirmPassword
                 )
             }
         }
     }
 
     fun sendPasswordReset() {
-        val email = _forgotPassword.value.email.trim()
+        val current = _forgotPassword.value
+        if (current.isSubmitting) return
+        val email = current.email.trim()
         val validation = validateEmail(email)
         if (validation != null) {
             _forgotPassword.update { it.copy(errorMessage = validation, infoMessage = null) }
@@ -157,6 +169,7 @@ class AuthViewModel(
     ): String? {
         if (fullName.isBlank()) return "Enter your full name."
         validateEmail(email)?.let { return it }
+        if (password.isBlank()) return "Enter a password."
         if (password.length < 6) return "Choose a stronger password."
         if (password != confirmPassword) return "Passwords do not match."
         return null
@@ -164,7 +177,7 @@ class AuthViewModel(
 
     private fun validateEmail(email: String): String? {
         if (email.isBlank()) return "Enter your email."
-        if (!email.contains("@") || !email.contains(".")) return "Enter a valid email address."
+        if (!Patterns.EMAIL_ADDRESS.matcher(email).matches()) return "Enter a valid email address."
         return null
     }
 

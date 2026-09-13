@@ -8,11 +8,12 @@ class DeviceIdStore(context: Context) {
     private val prefs = context.applicationContext
         .getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
+    @Synchronized
     fun deviceUid(): String {
         val existing = prefs.getString(KEY_UID, null)
         if (!existing.isNullOrBlank()) return existing
         val created = UUID.randomUUID().toString()
-        prefs.edit().putString(KEY_UID, created).apply()
+        prefs.edit().putString(KEY_UID, created).commit()
         return created
     }
 
