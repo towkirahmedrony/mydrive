@@ -1,7 +1,10 @@
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
+    alias(libs.plugins.kotlin.serialization)
 }
 
 android {
@@ -16,11 +19,28 @@ android {
         versionName = "1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        val localProperties = Properties()
+        val localFile = rootProject.file("local.properties")
+        if (localFile.exists()) {
+            localFile.inputStream().use { stream -> localProperties.load(stream) }
+        }
+        val supabaseUrl = (localProperties.getProperty("SUPABASE_URL")
+            ?: project.findProperty("SUPABASE_URL") as String?
+            ?: System.getenv("SUPABASE_URL")
+            ?: "").trim()
+        val supabaseAnonKey = (localProperties.getProperty("SUPABASE_ANON_KEY")
+            ?: project.findProperty("SUPABASE_ANON_KEY") as String?
+            ?: System.getenv("SUPABASE_ANON_KEY")
+            ?: "").trim()
+        buildConfigField("String", "SUPABASE_URL", "\"${supabaseUrl.replace("\"", "\\\"")}\"")
+        buildConfigField("String", "SUPABASE_ANON_KEY", "\"${supabaseAnonKey.replace("\"", "\\\"")}\"")
     }
 
     buildFeatures {
         viewBinding = true
         compose = true
+        buildConfig = true
     }
 
     compileOptions {
@@ -52,5 +72,11 @@ dependencies {
     implementation(libs.androidx.lifecycle.viewmodel.ktx)
     implementation(libs.androidx.lifecycle.viewmodel.compose)
     implementation(libs.androidx.lifecycle.runtime.compose)
+    implementation(libs.androidx.lifecycle.process)
+    implementation(libs.kotlinx.serialization.json)
+    implementation(platform(libs.supabase.bom))
+    implementation(libs.supabase.auth.kt)
+    implementation(libs.supabase.postgrest.kt)
+    implementation(libs.ktor.client.okhttp)
     debugImplementation(libs.androidx.compose.ui.tooling)
 }
