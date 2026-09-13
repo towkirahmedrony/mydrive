@@ -1,13 +1,23 @@
 package com.mydrive.app
 
 import android.app.Application
+import com.mydrive.app.data.local.DeviceIdStore
 import com.mydrive.app.data.local.FavoritesStore
 import com.mydrive.app.data.local.GalleryTabStore
 import com.mydrive.app.data.media.MediaPermissions
 import com.mydrive.app.data.media.MediaStoreDataSource
+import com.mydrive.app.data.remote.NetworkMonitor
+import com.mydrive.app.data.remote.SupabaseConfig
+import com.mydrive.app.data.remote.SupabaseModule
+import com.mydrive.app.data.repository.AuthRepository
 import com.mydrive.app.data.repository.MediaRepository
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 
 class MyDriveApp : Application() {
+    private val applicationScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+
     val galleryTabStore: GalleryTabStore by lazy { GalleryTabStore(this) }
 
     val mediaRepository: MediaRepository by lazy {
@@ -18,8 +28,12 @@ class MyDriveApp : Application() {
         )
     }
 
-    companion object {
-        const val SUPABASE_URL = "https://gpiuxcdjmrzcouhjapcs.supabase.co"
-        const val SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImdwaXV4Y2RqbXJ6Y291aGphcGNzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODkyMjY1MTMsImV4cCI6MjEwNDgwMjUxM30.Tm6IPdc5mlSH0J76mbmXut4nd33JnyAG982o30sOu2A"
+    val authRepository: AuthRepository by lazy {
+        AuthRepository(
+            client = if (SupabaseConfig.isConfigured) SupabaseModule.create() else null,
+            deviceIdStore = DeviceIdStore(this),
+            network = NetworkMonitor(this),
+            scope = applicationScope
+        )
     }
 }

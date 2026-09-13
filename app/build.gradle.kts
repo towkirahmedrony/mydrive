@@ -1,10 +1,7 @@
-import java.util.Properties
-
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
-    alias(libs.plugins.kotlin.serialization)
 }
 
 android {
@@ -20,21 +17,8 @@ android {
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
-        val localProperties = Properties()
-        val localFile = rootProject.file("local.properties")
-        if (localFile.exists()) {
-            localFile.inputStream().use { stream -> localProperties.load(stream) }
-        }
-        val supabaseUrl = (localProperties.getProperty("SUPABASE_URL")
-            ?: project.findProperty("SUPABASE_URL") as String?
-            ?: System.getenv("SUPABASE_URL")
-            ?: "").trim()
-        val supabaseAnonKey = (localProperties.getProperty("SUPABASE_ANON_KEY")
-            ?: project.findProperty("SUPABASE_ANON_KEY") as String?
-            ?: System.getenv("SUPABASE_ANON_KEY")
-            ?: "").trim()
-        buildConfigField("String", "SUPABASE_URL", "\"${supabaseUrl.replace("\"", "\\\"")}\"")
-        buildConfigField("String", "SUPABASE_ANON_KEY", "\"${supabaseAnonKey.replace("\"", "\\\"")}\"")
+        buildConfigField("String", "SUPABASE_URL", "\"https://gpiuxcdjmrzcouhjapcs.supabase.co\"")
+        buildConfigField("String", "SUPABASE_ANON_KEY", "\"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImdwaXV4Y2RqbXJ6Y291aGphcGNzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODkyMjY1MTMsImV4cCI6MjEwNDgwMjUxM30.Tm6IPdc5mlSH0J76mbmXut4nd33JnyAG982o30sOu2A\"")
     }
 
     buildFeatures {
@@ -72,11 +56,5 @@ dependencies {
     implementation(libs.androidx.lifecycle.viewmodel.ktx)
     implementation(libs.androidx.lifecycle.viewmodel.compose)
     implementation(libs.androidx.lifecycle.runtime.compose)
-    implementation(libs.androidx.lifecycle.process)
-    implementation(libs.kotlinx.serialization.json)
-    implementation(platform(libs.supabase.bom))
-    implementation(libs.supabase.auth.kt)
-    implementation(libs.supabase.postgrest.kt)
-    implementation(libs.ktor.client.okhttp)
     debugImplementation(libs.androidx.compose.ui.tooling)
 }
