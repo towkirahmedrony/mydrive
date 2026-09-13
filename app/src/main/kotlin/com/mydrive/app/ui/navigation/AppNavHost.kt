@@ -1,5 +1,8 @@
 package com.mydrive.app.ui.navigation
 
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Box
@@ -7,15 +10,16 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Favorite
+import androidx.compose.material.icons.filled.Photo
 import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Sync
-import androidx.compose.material.icons.outlined.FavoriteBorder
+import androidx.compose.material.icons.outlined.Photo
 import androidx.compose.material.icons.outlined.PhotoLibrary
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.Sync
 import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.NavigationBarItemDefaults
@@ -37,11 +41,12 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
+import com.mydrive.app.data.local.GalleryTabStore
 import com.mydrive.app.data.repository.MediaRepository
 import com.mydrive.app.ui.album.AlbumDetailScreen
 import com.mydrive.app.ui.album.AlbumDetailViewModel
-import com.mydrive.app.ui.favorites.FavoritesScreen
-import com.mydrive.app.ui.favorites.FavoritesViewModel
+import com.mydrive.app.ui.albums.AlbumsScreen
+import com.mydrive.app.ui.albums.AlbumsViewModel
 import com.mydrive.app.ui.gallery.GalleryScreen
 import com.mydrive.app.ui.gallery.GalleryViewModel
 import com.mydrive.app.ui.media.MediaDetailsScreen
@@ -54,11 +59,7 @@ import com.mydrive.app.ui.settings.TelegramSettingsScreen
 import com.mydrive.app.ui.sync.SyncScreen
 import com.mydrive.app.ui.sync.SyncViewModel
 import com.mydrive.app.ui.theme.Copper
-import com.mydrive.app.ui.theme.Graphite
-import com.mydrive.app.ui.theme.Ink
-import com.mydrive.app.ui.theme.Mist
 import com.mydrive.app.ui.theme.Radius
-import com.mydrive.app.ui.theme.Stroke
 
 private data class TabItem(
     val destination: AppDestination,
@@ -68,29 +69,35 @@ private data class TabItem(
 )
 
 private val tabs = listOf(
+    TabItem(AppDestination.Photos, "Photos", Icons.Filled.Photo, Icons.Outlined.Photo),
     TabItem(AppDestination.Albums, "Albums", Icons.Filled.PhotoLibrary, Icons.Outlined.PhotoLibrary),
-    TabItem(AppDestination.Favorites, "Favorites", Icons.Filled.Favorite, Icons.Outlined.FavoriteBorder),
     TabItem(AppDestination.Sync, "Sync", Icons.Filled.Sync, Icons.Outlined.Sync),
     TabItem(AppDestination.Settings, "Settings", Icons.Filled.Settings, Icons.Outlined.Settings)
 )
 
+private val tabFade = tween<Float>(durationMillis = 160)
+
 @Composable
-fun AppNavHost(repository: MediaRepository) {
+fun AppNavHost(
+    repository: MediaRepository,
+    galleryTabStore: GalleryTabStore
+) {
     val navController = rememberNavController()
     val navBackStackEntry by navController.currentBackStackEntryAsState()
     val currentDestination = navBackStackEntry?.destination
     val showBottomBar = currentDestination?.route in bottomDestinations.map { it.route }
+    val colors = MaterialTheme.colorScheme
 
     Scaffold(
-        containerColor = Ink,
+        containerColor = colors.background,
         bottomBar = {
             if (showBottomBar) {
                 Box(
                     modifier = Modifier
                         .padding(horizontal = 16.dp, vertical = 12.dp)
                         .clip(RoundedCornerShape(Radius.xl))
-                        .background(Graphite)
-                        .border(1.dp, Stroke, RoundedCornerShape(Radius.xl))
+                        .background(colors.surfaceVariant)
+                        .border(1.dp, colors.outlineVariant, RoundedCornerShape(Radius.xl))
                 ) {
                     NavigationBar(
                         containerColor = Color.Transparent,
@@ -101,6 +108,9 @@ fun AppNavHost(repository: MediaRepository) {
                             NavigationBarItem(
                                 selected = selected,
                                 onClick = {
+                                    if (tab.destination in galleryDestinations) {
+                                        galleryTabStore.saveRoute(tab.destination.route)
+                                    }
                                     navController.navigate(tab.destination.route) {
                                         popUpTo(navController.graph.findStartDestination().id) {
                                             saveState = true
@@ -119,8 +129,8 @@ fun AppNavHost(repository: MediaRepository) {
                                 colors = NavigationBarItemDefaults.colors(
                                     selectedIconColor = Copper,
                                     selectedTextColor = Copper,
-                                    unselectedIconColor = Mist,
-                                    unselectedTextColor = Mist,
+                                    unselectedIconColor = colors.onSurfaceVariant,
+                                    unselectedTextColor = colors.onSurfaceVariant,
                                     indicatorColor = Copper.copy(alpha = 0.14f)
                                 )
                             )
@@ -132,24 +142,27 @@ fun AppNavHost(repository: MediaRepository) {
     ) { innerPadding ->
         NavHost(
             navController = navController,
-            startDestination = AppDestination.Albums.route,
+            startDestination = galleryTabStore.startRoute(),
             modifier = Modifier
                 .fillMaxSize()
-                .padding(innerPadding)
+                .padding(innerPadding),
+            enterTransition = { fadeIn(tabFade) },
+            exitTransition = { fadeOut(tabFade) },
+            popEnterTransition = { fadeIn(tabFade) },
+            popExitTransition = { fadeOut(tabFade) }
         ) {
-            composable(AppDestination.Albums.route) {
+            composable(AppDestination.Photos.route) {
                 val vm: GalleryViewModel = viewModel(factory = GalleryViewModel.factory(repository))
                 GalleryScreen(
                     viewModel = vm,
-                    onMediaClick = { id -> navController.navigate(AppDestination.MediaViewer.create(id)) },
-                    onAlbumClick = { id -> navController.navigate(AppDestination.AlbumDetail.create(id)) }
+                    onMediaClick = { id -> navController.navigate(AppDestination.MediaViewer.create(id)) }
                 )
             }
-            composable(AppDestination.Favorites.route) {
-                val vm: FavoritesViewModel = viewModel(factory = FavoritesViewModel.factory(repository))
-                FavoritesScreen(
+            composable(AppDestination.Albums.route) {
+                val vm: AlbumsViewModel = viewModel(factory = AlbumsViewModel.factory(repository))
+                AlbumsScreen(
                     viewModel = vm,
-                    onMediaClick = { id -> navController.navigate(AppDestination.MediaViewer.create(id)) }
+                    onAlbumClick = { id -> navController.navigate(AppDestination.AlbumDetail.create(id)) }
                 )
             }
             composable(AppDestination.Sync.route) {

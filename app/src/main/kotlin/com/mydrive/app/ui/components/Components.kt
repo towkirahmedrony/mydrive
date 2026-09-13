@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.CloudDone
 import androidx.compose.material.icons.outlined.CloudQueue
@@ -27,6 +28,7 @@ import androidx.compose.material.icons.outlined.ErrorOutline
 import androidx.compose.material.icons.outlined.Favorite
 import androidx.compose.material.icons.outlined.Inbox
 import androidx.compose.material.icons.outlined.PlayArrow
+import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -39,7 +41,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -50,21 +55,16 @@ import com.mydrive.app.data.model.MediaType
 import com.mydrive.app.ui.theme.CardShape
 import com.mydrive.app.ui.theme.ChipShape
 import com.mydrive.app.ui.theme.Copper
-import com.mydrive.app.ui.theme.Graphite
 import com.mydrive.app.ui.theme.Ink
 import com.mydrive.app.ui.theme.Ivory
 import com.mydrive.app.ui.theme.MediaShape
-import com.mydrive.app.ui.theme.Mist
 import com.mydrive.app.ui.theme.Overlay
 import com.mydrive.app.ui.theme.Radius
-import com.mydrive.app.ui.theme.Sage
-import com.mydrive.app.ui.theme.Slate
 import com.mydrive.app.ui.theme.Spacing
 import com.mydrive.app.ui.theme.StatusAttention
 import com.mydrive.app.ui.theme.StatusConnected
+import com.mydrive.app.ui.theme.StatusIdle
 import com.mydrive.app.ui.theme.StatusSyncing
-import com.mydrive.app.ui.theme.Stroke
-import com.mydrive.app.ui.theme.StrokeStrong
 import com.mydrive.app.ui.util.formatDuration
 
 @Composable
@@ -73,12 +73,13 @@ fun AppCard(
     onClick: (() -> Unit)? = null,
     content: @Composable ColumnScope.() -> Unit
 ) {
+    val colors = MaterialTheme.colorScheme
     val clickMod = if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier
     Column(
         modifier = modifier
             .clip(CardShape)
-            .background(Graphite)
-            .border(1.dp, Stroke, CardShape)
+            .background(colors.surfaceVariant)
+            .border(1.dp, colors.outlineVariant, CardShape)
             .then(clickMod)
             .padding(Spacing.lg),
         content = content
@@ -99,7 +100,7 @@ fun SectionHeader(
         Text(
             text = title,
             style = MaterialTheme.typography.titleMedium,
-            color = Ivory,
+            color = MaterialTheme.colorScheme.onBackground,
             modifier = Modifier.weight(1f)
         )
         if (actionLabel != null && onAction != null) {
@@ -120,11 +121,12 @@ fun StatCard(
     modifier: Modifier = Modifier,
     accent: Color = Copper
 ) {
+    val colors = MaterialTheme.colorScheme
     Column(
         modifier = modifier
             .clip(RoundedCornerShape(Radius.md))
-            .background(Slate)
-            .border(1.dp, Stroke, RoundedCornerShape(Radius.md))
+            .background(colors.surfaceVariant)
+            .border(1.dp, colors.outlineVariant, RoundedCornerShape(Radius.md))
             .padding(horizontal = Spacing.md, vertical = Spacing.sm)
     ) {
         Text(
@@ -137,7 +139,7 @@ fun StatCard(
         Text(
             text = label,
             style = MaterialTheme.typography.labelMedium,
-            color = Mist
+            color = MaterialTheme.colorScheme.onSurfaceVariant
         )
     }
 }
@@ -198,57 +200,66 @@ fun MediaThumb(
     onClick: (() -> Unit)? = null
 ) {
     val clickMod = if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier
+    val description = if (item.type == MediaType.VIDEO) {
+        "Video ${item.filename}"
+    } else {
+        "Photo ${item.filename}"
+    }
     Box(
         modifier = modifier
             .clip(MediaShape)
             .aspectRatio(1f)
             .then(clickMod)
+            .semantics { contentDescription = description }
     ) {
         MediaImage(
             uri = item.uri,
             seed = item.thumbnailSeed,
             type = item.type,
             modifier = Modifier.fillMaxSize(),
-            sizePx = 256
+            sizePx = 256,
+            contentDescription = description
         )
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(
-                    Brush.verticalGradient(
-                        colors = listOf(Color.Transparent, Overlay),
-                        startY = 80f
-                    )
-                )
-        )
-        if (item.type == MediaType.VIDEO && item.durationSeconds != null) {
-            Row(
+        if (item.type == MediaType.VIDEO) {
+            Box(
                 modifier = Modifier
-                    .align(Alignment.BottomStart)
-                    .padding(Spacing.xs)
-                    .clip(ChipShape)
-                    .background(Ink.copy(alpha = 0.72f))
-                    .padding(horizontal = 6.dp, vertical = 2.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Icon(
-                    Icons.Outlined.PlayArrow,
-                    contentDescription = null,
-                    tint = Ivory,
-                    modifier = Modifier.size(12.dp)
-                )
-                Spacer(Modifier.width(2.dp))
-                Text(
-                    text = formatDuration(item.durationSeconds),
-                    style = MaterialTheme.typography.labelSmall,
-                    color = Ivory
-                )
+                    .fillMaxSize()
+                    .background(
+                        Brush.verticalGradient(
+                            colors = listOf(Color.Transparent, Overlay),
+                            startY = 80f
+                        )
+                    )
+            )
+            if (item.durationSeconds != null) {
+                Row(
+                    modifier = Modifier
+                        .align(Alignment.BottomStart)
+                        .padding(Spacing.xs)
+                        .clip(ChipShape)
+                        .background(Ink.copy(alpha = 0.72f))
+                        .padding(horizontal = 6.dp, vertical = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        Icons.Outlined.PlayArrow,
+                        contentDescription = "Video",
+                        tint = Ivory,
+                        modifier = Modifier.size(12.dp)
+                    )
+                    Spacer(Modifier.width(2.dp))
+                    Text(
+                        text = formatDuration(item.durationSeconds),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = Ivory
+                    )
+                }
             }
         }
         if (item.isFavorite) {
             Icon(
                 Icons.Outlined.Favorite,
-                contentDescription = null,
+                contentDescription = "Favorite",
                 tint = Copper,
                 modifier = Modifier
                     .align(Alignment.TopEnd)
@@ -271,7 +282,7 @@ fun MiniSyncDot(state: BackupState) {
     val color = when (state) {
         BackupState.COMPLETED -> StatusConnected
         BackupState.FAILED -> StatusAttention
-        BackupState.WAITING, BackupState.NOT_STARTED -> Mist
+        BackupState.WAITING, BackupState.NOT_STARTED -> StatusIdle
         else -> StatusSyncing
     }
     Box(
@@ -279,7 +290,7 @@ fun MiniSyncDot(state: BackupState) {
             .size(8.dp)
             .clip(CircleShape)
             .background(color)
-            .border(1.dp, Ink.copy(alpha = 0.4f), CircleShape)
+            .border(1.dp, MaterialTheme.colorScheme.background.copy(alpha = 0.4f), CircleShape)
     )
 }
 
@@ -300,15 +311,16 @@ fun SettingsRow(
             .padding(horizontal = Spacing.md, vertical = Spacing.sm),
         verticalAlignment = Alignment.CenterVertically
     ) {
+        val colors = MaterialTheme.colorScheme
         if (leading != null) {
             Icon(leading, contentDescription = null, tint = Copper, modifier = Modifier.size(22.dp))
             Spacer(Modifier.width(Spacing.sm))
         }
         Column(modifier = Modifier.weight(1f)) {
-            Text(text = title, style = MaterialTheme.typography.bodyLarge, color = Ivory)
+            Text(text = title, style = MaterialTheme.typography.bodyLarge, color = colors.onBackground)
             if (subtitle != null) {
                 Spacer(Modifier.height(2.dp))
-                Text(text = subtitle, style = MaterialTheme.typography.bodySmall, color = Mist)
+                Text(text = subtitle, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
             }
         }
         if (trailing != null) {
@@ -332,10 +344,10 @@ fun SettingsSwitchRow(
                 checked = checked,
                 onCheckedChange = onCheckedChange,
                 colors = SwitchDefaults.colors(
-                    checkedThumbColor = Ink,
+                    checkedThumbColor = MaterialTheme.colorScheme.onPrimary,
                     checkedTrackColor = Copper,
-                    uncheckedThumbColor = Ivory,
-                    uncheckedTrackColor = Slate
+                    uncheckedThumbColor = MaterialTheme.colorScheme.onSurface,
+                    uncheckedTrackColor = MaterialTheme.colorScheme.surfaceVariant
                 )
             )
         }
@@ -348,18 +360,19 @@ fun SettingsGroup(
     modifier: Modifier = Modifier,
     content: @Composable ColumnScope.() -> Unit
 ) {
+    val colors = MaterialTheme.colorScheme
     Column(modifier = modifier.fillMaxWidth()) {
         Text(
             text = title,
             style = MaterialTheme.typography.labelLarge,
-            color = Mist,
+            color = colors.onSurfaceVariant,
             modifier = Modifier.padding(horizontal = Spacing.md, vertical = Spacing.xs)
         )
         Column(
             modifier = Modifier
                 .clip(CardShape)
-                .background(Graphite)
-                .border(1.dp, Stroke, CardShape),
+                .background(colors.surfaceVariant)
+                .border(1.dp, colors.outlineVariant, CardShape),
             content = content
         )
     }
@@ -378,11 +391,12 @@ fun EmptyState(
             .padding(Spacing.xxl),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Icon(icon, contentDescription = null, tint = Mist, modifier = Modifier.size(40.dp))
+        val colors = MaterialTheme.colorScheme
+        Icon(icon, contentDescription = null, tint = colors.onSurfaceVariant, modifier = Modifier.size(40.dp))
         Spacer(Modifier.height(Spacing.sm))
-        Text(text = title, style = MaterialTheme.typography.titleMedium, color = Ivory)
+        Text(text = title, style = MaterialTheme.typography.titleMedium, color = colors.onBackground)
         Spacer(Modifier.height(Spacing.xxs))
-        Text(text = message, style = MaterialTheme.typography.bodySmall, color = Mist)
+        Text(text = message, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
     }
 }
 
@@ -400,7 +414,7 @@ fun ProgressCard(
         modifier = modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(Radius.md))
-            .background(Slate)
+            .background(MaterialTheme.colorScheme.surfaceVariant)
             .padding(Spacing.sm),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -414,12 +428,16 @@ fun ProgressCard(
             Text(
                 text = filename,
                 style = MaterialTheme.typography.titleSmall,
-                color = Ivory,
+                color = MaterialTheme.colorScheme.onBackground,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
             Spacer(Modifier.height(2.dp))
-            Text(text = "$fileSize · $stateLabel", style = MaterialTheme.typography.bodySmall, color = Mist)
+            Text(
+                text = "$fileSize · $stateLabel",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
             Spacer(Modifier.height(Spacing.xs))
             androidx.compose.material3.LinearProgressIndicator(
                 progress = { progress },
@@ -428,7 +446,7 @@ fun ProgressCard(
                     .height(4.dp)
                     .clip(ChipShape),
                 color = Copper,
-                trackColor = Ink.copy(alpha = 0.5f)
+                trackColor = MaterialTheme.colorScheme.background.copy(alpha = 0.5f)
             )
         }
         Spacer(Modifier.width(Spacing.sm))
@@ -480,8 +498,8 @@ fun SecondaryActionButton(
         modifier = modifier,
         shape = ChipShape,
         color = Color.Transparent,
-        contentColor = Ivory,
-        border = androidx.compose.foundation.BorderStroke(1.dp, StrokeStrong)
+        contentColor = MaterialTheme.colorScheme.onBackground,
+        border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
     ) {
         Row(
             modifier = Modifier.padding(horizontal = Spacing.md, vertical = Spacing.sm),
@@ -497,12 +515,57 @@ fun SecondaryActionButton(
     }
 }
 
-fun stateVisual(state: BackupState): Triple<String, Color, ImageVector> = when (state) {
-    BackupState.COMPLETED -> Triple("Completed", StatusConnected, Icons.Outlined.CloudDone)
-    BackupState.NOT_STARTED -> Triple("Not synced yet", Mist, Icons.Outlined.CloudQueue)
-    BackupState.UPLOADING -> Triple("Uploading", StatusSyncing, Icons.Outlined.CloudUpload)
-    BackupState.PROCESSING -> Triple("Processing", StatusSyncing, Icons.Outlined.CloudQueue)
-    BackupState.SENDING_TELEGRAM -> Triple("Telegram sync", StatusSyncing, Icons.Outlined.CloudUpload)
-    BackupState.WAITING -> Triple("Waiting", Mist, Icons.Outlined.CloudQueue)
-    BackupState.FAILED -> Triple("Failed", StatusAttention, Icons.Outlined.ErrorOutline)
+fun stateVisual(state: BackupState): Triple<String, Color, ImageVector> {
+    val idle = StatusIdleColor
+    return when (state) {
+        BackupState.COMPLETED -> Triple("Completed", StatusConnected, Icons.Outlined.CloudDone)
+        BackupState.NOT_STARTED -> Triple("Not synced yet", idle, Icons.Outlined.CloudQueue)
+        BackupState.UPLOADING -> Triple("Uploading", StatusSyncing, Icons.Outlined.CloudUpload)
+        BackupState.PROCESSING -> Triple("Processing", StatusSyncing, Icons.Outlined.CloudQueue)
+        BackupState.SENDING_TELEGRAM -> Triple("Telegram sync", StatusSyncing, Icons.Outlined.CloudUpload)
+        BackupState.WAITING -> Triple("Waiting", idle, Icons.Outlined.CloudQueue)
+        BackupState.FAILED -> Triple("Failed", StatusAttention, Icons.Outlined.ErrorOutline)
+    }
+}
+
+private val StatusIdleColor = Color(0xFF8B909A)
+
+@Composable
+fun SearchField(
+    value: String,
+    onValueChange: (String) -> Unit,
+    placeholder: String,
+    modifier: Modifier = Modifier
+) {
+    val colors = MaterialTheme.colorScheme
+    Row(
+        modifier = modifier
+            .clip(ChipShape)
+            .background(colors.surfaceVariant)
+            .border(1.dp, colors.outlineVariant, ChipShape)
+            .padding(horizontal = Spacing.md, vertical = Spacing.sm),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(
+            Icons.Outlined.Search,
+            contentDescription = "Search",
+            tint = colors.onSurfaceVariant,
+            modifier = Modifier.size(18.dp)
+        )
+        Spacer(Modifier.size(Spacing.xs))
+        BasicTextField(
+            value = value,
+            onValueChange = onValueChange,
+            singleLine = true,
+            textStyle = MaterialTheme.typography.bodyMedium.copy(color = colors.onBackground),
+            cursorBrush = SolidColor(Copper),
+            modifier = Modifier.weight(1f),
+            decorationBox = { inner ->
+                if (value.isEmpty()) {
+                    Text(placeholder, style = MaterialTheme.typography.bodyMedium, color = colors.onSurfaceVariant)
+                }
+                inner()
+            }
+        )
+    }
 }

@@ -51,18 +51,16 @@ import com.mydrive.app.ui.components.EmptyState
 import com.mydrive.app.ui.components.MediaImage
 import com.mydrive.app.ui.components.SecondaryActionButton
 import com.mydrive.app.ui.theme.Copper
-import com.mydrive.app.ui.theme.Graphite
 import com.mydrive.app.ui.theme.Ink
 import com.mydrive.app.ui.theme.Ivory
 import com.mydrive.app.ui.theme.IvoryMuted
-import com.mydrive.app.ui.theme.Mist
 import com.mydrive.app.ui.theme.Radius
 import com.mydrive.app.ui.theme.Sage
 import com.mydrive.app.ui.theme.Spacing
 import com.mydrive.app.ui.theme.StatusAttention
 import com.mydrive.app.ui.theme.StatusConnected
+import com.mydrive.app.ui.theme.StatusIdle
 import com.mydrive.app.ui.theme.StatusSyncing
-import com.mydrive.app.ui.theme.Stroke
 import com.mydrive.app.ui.util.formatDateTime
 import com.mydrive.app.ui.util.formatDuration
 import com.mydrive.app.ui.util.formatFileSize
@@ -77,10 +75,11 @@ fun MediaDetailsScreen(
     val context = LocalContext.current
 
     if (item == null) {
+        val colors = MaterialTheme.colorScheme
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .background(Ink)
+                .background(colors.background)
         ) {
             TopBar(onBack = onBack)
             EmptyState(title = "Media not found", message = "This item is no longer available.")
@@ -88,10 +87,11 @@ fun MediaDetailsScreen(
         return
     }
 
+    val colors = MaterialTheme.colorScheme
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .background(Ink)
+            .background(colors.background)
             .verticalScroll(rememberScrollState())
     ) {
         TopBar(onBack = onBack)
@@ -99,7 +99,7 @@ fun MediaDetailsScreen(
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .background(Ink)
+                .background(colors.background)
                 .padding(horizontal = Spacing.md)
         ) {
             Box(
@@ -154,7 +154,7 @@ fun MediaDetailsScreen(
         }
 
         Column(modifier = Modifier.padding(Spacing.md)) {
-            Text(item.filename, style = MaterialTheme.typography.titleLarge, color = Ivory)
+            Text(item.filename, style = MaterialTheme.typography.titleLarge, color = colors.onBackground)
             Spacer(Modifier.height(Spacing.xs))
             BackupStateChip(item.backupState)
             Spacer(Modifier.height(Spacing.lg))
@@ -182,7 +182,7 @@ fun MediaDetailsScreen(
             }
 
             Spacer(Modifier.height(Spacing.lg))
-            Text("Backup Status", style = MaterialTheme.typography.titleMedium, color = Ivory)
+            Text("Backup Status", style = MaterialTheme.typography.titleMedium, color = colors.onBackground)
             Spacer(Modifier.height(Spacing.sm))
             AppCard {
                 DestinationRow(
@@ -272,20 +272,20 @@ private fun CircleIcon(
         modifier = Modifier
             .size(40.dp)
             .clip(CircleShape)
-            .background(Graphite)
-            .border(1.dp, Stroke, CircleShape)
+            .background(MaterialTheme.colorScheme.surfaceVariant)
+            .border(1.dp, MaterialTheme.colorScheme.outlineVariant, CircleShape)
             .clickable(onClick = onClick),
         contentAlignment = Alignment.Center
     ) {
-        Icon(icon, contentDescription = contentDescription, tint = Ivory, modifier = Modifier.size(20.dp))
+        Icon(icon, contentDescription = contentDescription, tint = MaterialTheme.colorScheme.onSurface, modifier = Modifier.size(20.dp))
     }
 }
 
 @Composable
 private fun InfoRow(label: String, value: String) {
     Row(modifier = Modifier.fillMaxWidth()) {
-        Text(label, style = MaterialTheme.typography.bodyMedium, color = Mist, modifier = Modifier.weight(1f))
-        Text(value, style = MaterialTheme.typography.bodyMedium, color = Ivory)
+        Text(label, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.weight(1f))
+        Text(value, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onBackground)
     }
 }
 
@@ -298,7 +298,7 @@ private fun DestinationRow(
     val (label, color) = when {
         completed -> "✓ Backup completed" to StatusConnected
         processingState == BackupState.FAILED -> "Failed" to StatusAttention
-        processingState == BackupState.WAITING -> "Waiting" to Mist
+        processingState == BackupState.WAITING -> "Waiting" to StatusIdle
         processingState == BackupState.UPLOADING -> "Uploading" to StatusSyncing
         processingState == BackupState.PROCESSING -> "Processing" to StatusSyncing
         processingState == BackupState.SENDING_TELEGRAM -> "Telegram sync" to StatusSyncing
@@ -307,7 +307,7 @@ private fun DestinationRow(
     }
     val displayLabel = if (name == "Telegram" && completed) "✓ Synced" else label
     Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-        Text(name, style = MaterialTheme.typography.bodyLarge, color = Ivory, modifier = Modifier.weight(1f))
+        Text(name, style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onBackground, modifier = Modifier.weight(1f))
         Text(displayLabel, style = MaterialTheme.typography.labelLarge, color = if (completed) Sage else color)
     }
 }

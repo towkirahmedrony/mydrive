@@ -26,13 +26,29 @@ fun MediaImage(
     type: MediaType,
     modifier: Modifier = Modifier,
     contentScale: ContentScale = ContentScale.Crop,
-    sizePx: Int = 320
+    sizePx: Int = 256,
+    contentDescription: String? = null,
+    placeholderBitmap: Bitmap? = null
 ) {
     val context = LocalContext.current
-    var bitmap by remember(uri, sizePx) { mutableStateOf<Bitmap?>(null) }
+    var bitmap by remember(uri, sizePx) {
+        mutableStateOf(
+            placeholderBitmap
+                ?: ThumbnailLoader.peek(uri, sizePx)
+                ?: ThumbnailLoader.peek(uri, 256)
+        )
+    }
 
     LaunchedEffect(uri, sizePx) {
-        bitmap = if (uri.isBlank()) null else ThumbnailLoader.load(context, uri, sizePx)
+        val cached = ThumbnailLoader.peek(uri, sizePx)
+        if (cached != null) {
+            bitmap = cached
+            return@LaunchedEffect
+        }
+        val loaded = if (uri.isBlank()) null else ThumbnailLoader.load(context, uri, sizePx)
+        if (loaded != null) {
+            bitmap = loaded
+        }
     }
 
     Box(modifier = modifier.background(thumbnailBrush(seed, type))) {
@@ -40,7 +56,7 @@ fun MediaImage(
         if (current != null && !current.isRecycled) {
             Image(
                 bitmap = current.asImageBitmap(),
-                contentDescription = null,
+                contentDescription = contentDescription,
                 modifier = Modifier.fillMaxSize(),
                 contentScale = contentScale
             )

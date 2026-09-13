@@ -35,13 +35,7 @@ import com.mydrive.app.ui.components.PrimaryActionButton
 import com.mydrive.app.ui.components.SecondaryActionButton
 import com.mydrive.app.ui.components.SyncStatusChip
 import com.mydrive.app.data.model.ConnectionStatus
-import com.mydrive.app.ui.theme.Graphite
-import com.mydrive.app.ui.theme.Ink
-import com.mydrive.app.ui.theme.Ivory
-import com.mydrive.app.ui.theme.IvoryMuted
-import com.mydrive.app.ui.theme.Mist
 import com.mydrive.app.ui.theme.Spacing
-import com.mydrive.app.ui.theme.Stroke
 
 @Composable
 fun TelegramSettingsScreen(
@@ -50,11 +44,12 @@ fun TelegramSettingsScreen(
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val telegram = state.telegram
+    val colors = MaterialTheme.colorScheme
 
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .background(Ink)
+            .background(colors.background)
             .verticalScroll(rememberScrollState())
             .padding(Spacing.md)
     ) {
@@ -63,15 +58,15 @@ fun TelegramSettingsScreen(
                 modifier = Modifier
                     .size(40.dp)
                     .clip(CircleShape)
-                    .background(Graphite)
-                    .border(1.dp, Stroke, CircleShape)
+                    .background(colors.surfaceVariant)
+                    .border(1.dp, colors.outlineVariant, CircleShape)
                     .clickable(onClick = onBack),
                 contentAlignment = Alignment.Center
             ) {
-                Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = "Back", tint = Ivory)
+                Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = "Back", tint = colors.onSurface)
             }
             Spacer(Modifier.size(Spacing.md))
-            Text("Telegram Backup", style = MaterialTheme.typography.headlineMedium, color = Ivory)
+            Text("Telegram Backup", style = MaterialTheme.typography.headlineMedium, color = colors.onBackground)
         }
 
         Spacer(Modifier.height(Spacing.xl))
@@ -81,7 +76,7 @@ fun TelegramSettingsScreen(
                 Text(
                     "Status",
                     style = MaterialTheme.typography.labelLarge,
-                    color = Mist,
+                    color = colors.onSurfaceVariant,
                     modifier = Modifier.weight(1f)
                 )
                 SyncStatusChip(
@@ -93,7 +88,7 @@ fun TelegramSettingsScreen(
             Text(
                 "Telegram is used as your personal backup destination for media.",
                 style = MaterialTheme.typography.bodyMedium,
-                color = IvoryMuted
+                color = colors.onSurfaceVariant
             )
         }
 
@@ -138,7 +133,7 @@ fun TelegramSettingsScreen(
 
 @Composable
 private fun FieldLabel(text: String) {
-    Text(text, style = MaterialTheme.typography.labelLarge, color = Mist)
+    Text(text, style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
 }
 
 @Composable
@@ -146,11 +141,11 @@ private fun MaskedField(value: String) {
     Text(
         text = value,
         style = MaterialTheme.typography.titleMedium,
-        color = Ivory,
+        color = MaterialTheme.colorScheme.onBackground,
         modifier = Modifier
             .fillMaxWidth()
             .clip(androidx.compose.foundation.shape.RoundedCornerShape(12.dp))
-            .background(Ink.copy(alpha = 0.45f))
+            .background(MaterialTheme.colorScheme.background.copy(alpha = 0.45f))
             .padding(horizontal = Spacing.md, vertical = Spacing.sm)
     )
 }

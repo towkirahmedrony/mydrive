@@ -36,12 +36,8 @@ import com.mydrive.app.ui.components.ProgressCard
 import com.mydrive.app.ui.components.SecondaryActionButton
 import com.mydrive.app.ui.components.SectionHeader
 import com.mydrive.app.ui.components.stateVisual
-import com.mydrive.app.ui.theme.Ink
-import com.mydrive.app.ui.theme.Ivory
-import com.mydrive.app.ui.theme.Mist
 import com.mydrive.app.ui.theme.Radius
 import com.mydrive.app.ui.theme.Sage
-import com.mydrive.app.ui.theme.Slate
 import com.mydrive.app.ui.theme.Spacing
 import com.mydrive.app.ui.theme.StatusAttention
 import com.mydrive.app.ui.theme.StatusSyncing
@@ -60,10 +56,16 @@ fun SyncScreen(
         else -> Sage
     }
 
+    val colors = MaterialTheme.colorScheme
+    val empty = state.inProgress.isEmpty() &&
+        state.waiting.isEmpty() &&
+        state.failed.isEmpty() &&
+        state.completed.isEmpty()
+
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
-            .background(Ink),
+            .background(colors.background),
         contentPadding = PaddingValues(
             start = Spacing.md,
             end = Spacing.md,
@@ -73,7 +75,7 @@ fun SyncScreen(
         verticalArrangement = Arrangement.spacedBy(Spacing.sm)
     ) {
         item {
-            Text("Sync", style = MaterialTheme.typography.headlineMedium, color = Ivory)
+            Text("Sync", style = MaterialTheme.typography.headlineMedium, color = colors.onBackground)
             Spacer(Modifier.height(Spacing.xxs))
             Text(state.headline, style = MaterialTheme.typography.bodyMedium, color = headlineColor)
         }
@@ -132,10 +134,10 @@ fun SyncScreen(
             }
         }
 
-        if (state.inProgress.isEmpty() && state.waiting.isEmpty() && state.failed.isEmpty() && state.completed.isEmpty()) {
+        if (empty) {
             item {
                 EmptyState(
-                    title = "Nothing in the queue",
+                    title = "Everything is up to date",
                     message = "New backups will appear here as they start."
                 )
             }
@@ -164,7 +166,7 @@ private fun SyncRow(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(Radius.md))
-            .background(Slate)
+            .background(MaterialTheme.colorScheme.surfaceVariant)
             .clickable(onClick = onClick)
             .padding(Spacing.sm),
         verticalAlignment = Alignment.CenterVertically
@@ -178,12 +180,17 @@ private fun SyncRow(
         }
         Spacer(Modifier.width(Spacing.sm))
         Column(modifier = Modifier.weight(1f)) {
-            Text(item.filename, style = MaterialTheme.typography.titleSmall, color = Ivory, maxLines = 1)
+            Text(
+                item.filename,
+                style = MaterialTheme.typography.titleSmall,
+                color = MaterialTheme.colorScheme.onBackground,
+                maxLines = 1
+            )
             Spacer(Modifier.height(2.dp))
             Text(
                 extra ?: formatFileSize(item.fileSizeBytes),
                 style = MaterialTheme.typography.bodySmall,
-                color = Mist
+                color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
         BackupStateChip(item.backupState)
@@ -200,7 +207,7 @@ private fun FailedRow(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(Radius.md))
-            .background(Slate)
+            .background(MaterialTheme.colorScheme.surfaceVariant)
             .clickable(onClick = onClick)
             .padding(Spacing.sm),
         verticalAlignment = Alignment.CenterVertically
@@ -214,7 +221,12 @@ private fun FailedRow(
         }
         Spacer(Modifier.width(Spacing.sm))
         Column(modifier = Modifier.weight(1f)) {
-            Text(item.filename, style = MaterialTheme.typography.titleSmall, color = Ivory, maxLines = 1)
+            Text(
+                item.filename,
+                style = MaterialTheme.typography.titleSmall,
+                color = MaterialTheme.colorScheme.onBackground,
+                maxLines = 1
+            )
             Spacer(Modifier.height(2.dp))
             Text(
                 item.errorMessage ?: "Upload failed",

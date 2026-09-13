@@ -35,6 +35,9 @@ class MediaRepository(
     private val _media = MutableStateFlow<List<MediaItem>>(emptyList())
     val media: StateFlow<List<MediaItem>> = _media.asStateFlow()
 
+    private val _albums = MutableStateFlow<List<AlbumFolder>>(emptyList())
+    val albums: StateFlow<List<AlbumFolder>> = _albums.asStateFlow()
+
     private val _loadState = MutableStateFlow(initialLoadState())
     val loadState: StateFlow<MediaLoadState> = _loadState.asStateFlow()
 
@@ -73,24 +76,9 @@ class MediaRepository(
 
     fun mediaById(id: String): MediaItem? = _media.value.firstOrNull { it.id == id }
 
-    fun albumById(id: String): AlbumFolder? = albums().firstOrNull { it.id == id }
+    fun albumById(id: String): AlbumFolder? = _albums.value.firstOrNull { it.id == id }
 
-    fun albums(): List<AlbumFolder> {
-        return _media.value
-            .groupBy { it.albumId }
-            .map { (albumId, items) ->
-                val cover = items.maxByOrNull { it.capturedAtMillis }
-                AlbumFolder(
-                    id = albumId,
-                    name = cover?.albumName?.ifBlank { "Other" } ?: "Other",
-                    coverSeed = cover?.thumbnailSeed ?: 0,
-                    coverType = cover?.type ?: MediaType.PHOTO,
-                    mediaCount = items.size,
-                    coverUri = cover?.uri.orEmpty()
-                )
-            }
-            .sortedByDescending { it.mediaCount }
-    }
+    fun albums(): List<AlbumFolder> = _albums.value
 
     fun toggleFavorite(id: String) {
         favorites.toggle(id)
@@ -164,6 +152,7 @@ class MediaRepository(
             applyAccessState()
             if (!permissions.canReadMedia()) {
                 _media.value = emptyList()
+                _albums.value = emptyList()
                 _storage.value = StorageSummary(0, 0, 0, 0)
                 _loadState.update { it.copy(isLoading = false, errorMessage = null) }
                 return
@@ -176,6 +165,7 @@ class MediaRepository(
                     item.copy(isFavorite = item.id in favoriteIds)
                 }
                 _media.value = items
+                _albums.value = buildAlbums(items)
                 lastRefreshAt = now
                 updateStorage(items)
                 _loadState.update { it.copy(isLoading = false, errorMessage = null) }
@@ -190,6 +180,7 @@ class MediaRepository(
             } catch (_: SecurityException) {
                 applyAccessState()
                 _media.value = emptyList()
+                _albums.value = emptyList()
                 _loadState.update { it.copy(isLoading = false, errorMessage = null) }
             }
         }
@@ -217,6 +208,23 @@ class MediaRepository(
                 permissionDenied = access == MediaAccess.DENIED
             )
         }
+    }
+
+    private fun buildAlbums(items: List<MediaItem>): List<AlbumFolder> {
+        return items
+            .groupBy { it.albumId }
+            .map { (albumId, albumItems) ->
+                val cover = albumItems.maxByOrNull { it.capturedAtMillis }
+                AlbumFolder(
+                    id = albumId,
+                    name = cover?.albumName?.ifBlank { "Other" } ?: "Other",
+                    coverSeed = cover?.thumbnailSeed ?: 0,
+                    coverType = cover?.type ?: MediaType.PHOTO,
+                    mediaCount = albumItems.size,
+                    coverUri = cover?.uri.orEmpty()
+                )
+            }
+            .sortedByDescending { it.mediaCount }
     }
 
     private fun updateStorage(items: List<MediaItem>) {

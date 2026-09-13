@@ -3,6 +3,7 @@ package com.mydrive.app.ui.navigation
 import android.net.Uri
 
 sealed class AppDestination(val route: String) {
+    data object Photos : AppDestination("photos")
     data object Albums : AppDestination("albums")
     data object Favorites : AppDestination("favorites")
     data object Sync : AppDestination("sync")
@@ -20,8 +21,13 @@ sealed class AppDestination(val route: String) {
 }
 
 val bottomDestinations = listOf(
+    AppDestination.Photos,
     AppDestination.Albums,
-    AppDestination.Favorites,
     AppDestination.Sync,
     AppDestination.Settings
+)
+
+val galleryDestinations = listOf(
+    AppDestination.Photos,
+    AppDestination.Albums
 )

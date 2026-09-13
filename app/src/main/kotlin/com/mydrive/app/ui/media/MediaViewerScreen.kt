@@ -54,15 +54,13 @@ import com.mydrive.app.data.model.MediaItem
 import com.mydrive.app.data.model.MediaType
 import com.mydrive.app.ui.components.MediaImage
 import com.mydrive.app.ui.theme.Copper
-import com.mydrive.app.ui.theme.Graphite
 import com.mydrive.app.ui.theme.Ink
 import com.mydrive.app.ui.theme.Ivory
-import com.mydrive.app.ui.theme.Mist
 import com.mydrive.app.ui.theme.Sage
 import com.mydrive.app.ui.theme.Spacing
 import com.mydrive.app.ui.theme.StatusAttention
+import com.mydrive.app.ui.theme.StatusIdle
 import com.mydrive.app.ui.theme.StatusSyncing
-import com.mydrive.app.ui.theme.Stroke
 import com.mydrive.app.ui.util.formatDuration
 
 @Composable
@@ -72,14 +70,15 @@ fun MediaViewerScreen(
     onOpenDetails: (String) -> Unit
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
+    val colors = MaterialTheme.colorScheme
     if (state.items.isEmpty()) {
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .background(Ink),
+                .background(colors.background),
             contentAlignment = Alignment.Center
         ) {
-            Text("Media not found", color = Ivory)
+            Text("Media not found", color = colors.onBackground)
         }
         return
     }
@@ -107,7 +106,7 @@ fun MediaViewerScreen(
             modifier = Modifier.fillMaxSize()
         ) { page ->
             val item = state.items[page]
-            ViewerPage(item = item)
+            ViewerPage(item = item, background = colors.background)
         }
 
         Box(
@@ -170,12 +169,12 @@ fun MediaViewerScreen(
 }
 
 @Composable
-private fun ViewerPage(item: MediaItem) {
+private fun ViewerPage(item: MediaItem, background: Color) {
     val context = LocalContext.current
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(Ink)
+            .background(background)
             .clickable(enabled = item.type == MediaType.VIDEO) {
                 openMediaExternally(context, item)
             },
@@ -187,7 +186,9 @@ private fun ViewerPage(item: MediaItem) {
             type = item.type,
             modifier = Modifier.fillMaxSize(),
             contentScale = ContentScale.Fit,
-            sizePx = 1080
+            sizePx = 720,
+            contentDescription = item.filename,
+            placeholderBitmap = com.mydrive.app.data.media.ThumbnailLoader.peek(item.uri, 256)
         )
         if (item.type == MediaType.VIDEO) {
             Box(
@@ -247,7 +248,7 @@ private fun VideoControls(item: MediaItem) {
             colors = SliderDefaults.colors(
                 thumbColor = Copper,
                 activeTrackColor = Copper,
-                inactiveTrackColor = Mist.copy(alpha = 0.35f)
+                inactiveTrackColor = StatusIdle.copy(alpha = 0.35f)
             )
         )
         Text(
@@ -267,7 +268,7 @@ private fun ViewerAction(
 ) {
     Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.clickable(onClick = onClick)) {
         Icon(icon, contentDescription = label, tint = tint, modifier = Modifier.size(22.dp))
-        Text(label, style = MaterialTheme.typography.labelSmall, color = Mist, modifier = Modifier.padding(top = 4.dp))
+        Text(label, style = MaterialTheme.typography.labelSmall, color = StatusIdle, modifier = Modifier.padding(top = 4.dp))
     }
 }
 
@@ -281,8 +282,8 @@ private fun CircleIcon(
         modifier = Modifier
             .size(40.dp)
             .clip(CircleShape)
-            .background(Graphite.copy(alpha = 0.72f))
-            .border(1.dp, Stroke, CircleShape)
+            .background(Ink.copy(alpha = 0.55f))
+            .border(1.dp, Ivory.copy(alpha = 0.18f), CircleShape)
             .clickable(onClick = onClick),
         contentAlignment = Alignment.Center
     ) {
@@ -303,7 +304,7 @@ private fun backupStatusLabel(item: MediaItem): String = when (item.backupState)
 private fun backupStatusColor(item: MediaItem) = when (item.backupState) {
     BackupState.COMPLETED -> Sage
     BackupState.FAILED -> StatusAttention
-    BackupState.WAITING, BackupState.NOT_STARTED -> Mist
+    BackupState.WAITING, BackupState.NOT_STARTED -> StatusIdle
     else -> StatusSyncing
 }
 

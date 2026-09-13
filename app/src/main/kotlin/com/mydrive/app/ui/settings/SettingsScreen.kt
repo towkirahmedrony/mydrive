@@ -37,12 +37,8 @@ import com.mydrive.app.ui.components.SettingsGroup
 import com.mydrive.app.ui.components.SettingsRow
 import com.mydrive.app.ui.components.SettingsSwitchRow
 import com.mydrive.app.ui.theme.Copper
-import com.mydrive.app.ui.theme.Ink
-import com.mydrive.app.ui.theme.Ivory
-import com.mydrive.app.ui.theme.Mist
 import com.mydrive.app.ui.theme.Sage
 import com.mydrive.app.ui.theme.Spacing
-import com.mydrive.app.ui.theme.Stroke
 
 @Composable
 fun SettingsScreen(
@@ -50,11 +46,12 @@ fun SettingsScreen(
     onOpenTelegram: () -> Unit
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
+    val colors = MaterialTheme.colorScheme
 
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
-            .background(Ink),
+            .background(colors.background),
         contentPadding = PaddingValues(
             start = Spacing.md,
             end = Spacing.md,
@@ -64,7 +61,7 @@ fun SettingsScreen(
         verticalArrangement = Arrangement.spacedBy(Spacing.lg)
     ) {
         item {
-            Text("Settings", style = MaterialTheme.typography.headlineMedium, color = Ivory)
+            Text("Settings", style = MaterialTheme.typography.headlineMedium, color = colors.onBackground)
         }
 
         item {
@@ -85,22 +82,22 @@ fun SettingsScreen(
                         Text(
                             state.profile.name.take(1),
                             style = MaterialTheme.typography.titleLarge,
-                            color = Ink
+                            color = colors.onPrimary
                         )
                     }
                     Spacer(Modifier.width(Spacing.md))
                     Column {
-                        Text(state.profile.name, style = MaterialTheme.typography.titleMedium, color = Ivory)
-                        Text(state.profile.email, style = MaterialTheme.typography.bodySmall, color = Mist)
+                        Text(state.profile.name, style = MaterialTheme.typography.titleMedium, color = colors.onBackground)
+                        Text(state.profile.email, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
                     }
                 }
-                HorizontalDivider(color = Stroke)
+                HorizontalDivider(color = colors.outlineVariant)
                 SettingsRow(title = "Profile", subtitle = state.profile.name)
-                HorizontalDivider(color = Stroke)
+                HorizontalDivider(color = colors.outlineVariant)
                 SettingsRow(title = "Email", subtitle = state.profile.email)
-                HorizontalDivider(color = Stroke)
+                HorizontalDivider(color = colors.outlineVariant)
                 SettingsRow(title = "Account status", subtitle = state.profile.accountStatus)
-                HorizontalDivider(color = Stroke)
+                HorizontalDivider(color = colors.outlineVariant)
                 SettingsRow(
                     title = "Logout",
                     leading = Icons.AutoMirrored.Outlined.Logout
@@ -116,26 +113,26 @@ fun SettingsScreen(
                     checked = state.preferences.automaticBackup,
                     onCheckedChange = viewModel::setAutomaticBackup
                 )
-                HorizontalDivider(color = Stroke)
+                HorizontalDivider(color = colors.outlineVariant)
                 SettingsSwitchRow(
                     title = "Backup photos",
                     checked = state.preferences.backupPhotos,
                     onCheckedChange = viewModel::setBackupPhotos
                 )
-                HorizontalDivider(color = Stroke)
+                HorizontalDivider(color = colors.outlineVariant)
                 SettingsSwitchRow(
                     title = "Backup videos",
                     checked = state.preferences.backupVideos,
                     onCheckedChange = viewModel::setBackupVideos
                 )
-                HorizontalDivider(color = Stroke)
+                HorizontalDivider(color = colors.outlineVariant)
                 SettingsSwitchRow(
                     title = "Wi-Fi only",
                     subtitle = "Avoid using mobile data for uploads",
                     checked = state.preferences.wifiOnly,
                     onCheckedChange = viewModel::setWifiOnly
                 )
-                HorizontalDivider(color = Stroke)
+                HorizontalDivider(color = colors.outlineVariant)
                 SettingsSwitchRow(
                     title = "Upload while charging",
                     checked = state.preferences.uploadWhileCharging,
@@ -154,12 +151,12 @@ fun SettingsScreen(
                         Text(
                             if (state.telegram.connected) "Connected" else "Not connected",
                             style = MaterialTheme.typography.labelMedium,
-                            color = if (state.telegram.connected) Sage else Mist
+                            color = if (state.telegram.connected) Sage else colors.onSurfaceVariant
                         )
                         Icon(
                             Icons.AutoMirrored.Outlined.KeyboardArrowRight,
                             contentDescription = null,
-                            tint = Mist
+                            tint = colors.onSurfaceVariant
                         )
                     }
                 )
@@ -172,31 +169,31 @@ fun SettingsScreen(
                     title = "Notifications",
                     leading = Icons.Outlined.NotificationsNone,
                     trailing = {
-                        Icon(Icons.AutoMirrored.Outlined.KeyboardArrowRight, contentDescription = null, tint = Mist)
+                        Icon(Icons.AutoMirrored.Outlined.KeyboardArrowRight, contentDescription = null, tint = colors.onSurfaceVariant)
                     }
                 )
-                HorizontalDivider(color = Stroke)
+                HorizontalDivider(color = colors.outlineVariant)
                 SettingsRow(
                     title = "Privacy Policy",
                     leading = Icons.Outlined.Policy,
                     trailing = {
-                        Icon(Icons.AutoMirrored.Outlined.KeyboardArrowRight, contentDescription = null, tint = Mist)
+                        Icon(Icons.AutoMirrored.Outlined.KeyboardArrowRight, contentDescription = null, tint = colors.onSurfaceVariant)
                     }
                 )
-                HorizontalDivider(color = Stroke)
+                HorizontalDivider(color = colors.outlineVariant)
                 SettingsRow(
                     title = "Terms",
                     leading = Icons.Outlined.Description,
                     trailing = {
-                        Icon(Icons.AutoMirrored.Outlined.KeyboardArrowRight, contentDescription = null, tint = Mist)
+                        Icon(Icons.AutoMirrored.Outlined.KeyboardArrowRight, contentDescription = null, tint = colors.onSurfaceVariant)
                     }
                 )
-                HorizontalDivider(color = Stroke)
+                HorizontalDivider(color = colors.outlineVariant)
                 SettingsRow(
                     title = "About Albums",
                     leading = Icons.Outlined.Info,
                     trailing = {
-                        Icon(Icons.AutoMirrored.Outlined.KeyboardArrowRight, contentDescription = null, tint = Mist)
+                        Icon(Icons.AutoMirrored.Outlined.KeyboardArrowRight, contentDescription = null, tint = colors.onSurfaceVariant)
                     }
                 )
             }

@@ -1,12 +1,10 @@
-package com.mydrive.app.ui.gallery
+package com.mydrive.app.ui.albums
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
-import com.mydrive.app.data.model.MediaItem
-import com.mydrive.app.data.model.MediaType
+import com.mydrive.app.data.model.AlbumFolder
 import com.mydrive.app.data.repository.MediaRepository
-import com.mydrive.app.ui.util.dateGroupLabel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -17,90 +15,54 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
-enum class GalleryFilter {
-    ALL, PHOTOS, VIDEOS, FAVORITES
-}
-
-data class MediaGroup(
-    val label: String,
-    val items: List<MediaItem>
-)
-
-data class GalleryUiState(
-    val filter: GalleryFilter,
+data class AlbumsUiState(
     val query: String,
-    val groups: List<MediaGroup>,
+    val albums: List<AlbumFolder>,
     val isLoading: Boolean = false,
     val needsPermission: Boolean = false,
     val permissionDenied: Boolean = false,
-    val accessPartial: Boolean = false,
     val errorMessage: String? = null,
-    val hasMedia: Boolean = false
+    val hasAlbums: Boolean = false
 )
 
-class GalleryViewModel(
+class AlbumsViewModel(
     private val repository: MediaRepository
 ) : ViewModel() {
 
-    private val filter = MutableStateFlow(GalleryFilter.ALL)
     private val query = MutableStateFlow("")
 
     init {
-        refresh(force = true)
+        refresh(force = false)
     }
 
-    val uiState: StateFlow<GalleryUiState> = combine(
-        repository.media,
+    val uiState: StateFlow<AlbumsUiState> = combine(
+        repository.albums,
         repository.loadState,
-        filter,
         query
-    ) { media, load, currentFilter, currentQuery ->
-        val filtered = media
-            .filter { item ->
-                when (currentFilter) {
-                    GalleryFilter.ALL -> true
-                    GalleryFilter.PHOTOS -> item.type == MediaType.PHOTO
-                    GalleryFilter.VIDEOS -> item.type == MediaType.VIDEO
-                    GalleryFilter.FAVORITES -> item.isFavorite
-                }
-            }
-            .filter { item ->
-                currentQuery.isBlank() || item.filename.contains(currentQuery, ignoreCase = true)
-            }
-            .sortedByDescending { it.capturedAtMillis }
-
-        val groups = filtered
-            .groupBy { dateGroupLabel(it.capturedAtMillis) }
-            .map { (label, items) -> MediaGroup(label, items) }
-
-        GalleryUiState(
-            filter = currentFilter,
+    ) { albums, load, currentQuery ->
+        val filtered = albums.filter { album ->
+            currentQuery.isBlank() || album.name.contains(currentQuery, ignoreCase = true)
+        }
+        AlbumsUiState(
             query = currentQuery,
-            groups = groups,
+            albums = filtered,
             isLoading = load.isLoading,
             needsPermission = load.needsPermission,
             permissionDenied = load.permissionDenied,
-            accessPartial = load.accessPartial,
             errorMessage = load.errorMessage,
-            hasMedia = media.isNotEmpty()
+            hasAlbums = filtered.isNotEmpty() || currentQuery.isNotBlank()
         )
     }.flowOn(Dispatchers.Default).stateIn(
         scope = viewModelScope,
         started = SharingStarted.WhileSubscribed(5_000),
-        initialValue = GalleryUiState(
-            filter = GalleryFilter.ALL,
+        initialValue = AlbumsUiState(
             query = "",
-            groups = emptyList(),
+            albums = emptyList(),
             isLoading = repository.loadState.value.isLoading,
             needsPermission = repository.loadState.value.needsPermission,
-            permissionDenied = repository.loadState.value.permissionDenied,
-            accessPartial = repository.loadState.value.accessPartial
+            permissionDenied = repository.loadState.value.permissionDenied
         )
     )
-
-    fun setFilter(value: GalleryFilter) {
-        filter.value = value
-    }
 
     fun setQuery(value: String) {
         query.update { value }
@@ -124,7 +86,7 @@ class GalleryViewModel(
             object : ViewModelProvider.Factory {
                 @Suppress("UNCHECKED_CAST")
                 override fun <T : ViewModel> create(modelClass: Class<T>): T {
-                    return GalleryViewModel(repository) as T
+                    return AlbumsViewModel(repository) as T
                 }
             }
     }

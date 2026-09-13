@@ -25,12 +25,7 @@ import androidx.compose.ui.unit.dp
 import com.mydrive.app.ui.components.PrimaryActionButton
 import com.mydrive.app.ui.components.SecondaryActionButton
 import com.mydrive.app.ui.theme.Copper
-import com.mydrive.app.ui.theme.Graphite
-import com.mydrive.app.ui.theme.Ink
-import com.mydrive.app.ui.theme.Ivory
-import com.mydrive.app.ui.theme.Mist
 import com.mydrive.app.ui.theme.Spacing
-import com.mydrive.app.ui.theme.Stroke
 
 @Composable
 fun MediaPermissionScreen(
@@ -39,10 +34,11 @@ fun MediaPermissionScreen(
     onOpenSettings: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val colors = MaterialTheme.colorScheme
     Column(
         modifier = modifier
             .fillMaxSize()
-            .background(Ink)
+            .background(colors.background)
             .padding(horizontal = Spacing.xl),
         verticalArrangement = Arrangement.Center,
         horizontalAlignment = Alignment.CenterHorizontally
@@ -50,8 +46,8 @@ fun MediaPermissionScreen(
         Box(
             modifier = Modifier
                 .size(88.dp)
-                .background(Graphite, CircleShape)
-                .border(1.dp, Stroke, CircleShape),
+                .background(colors.surfaceVariant, CircleShape)
+                .border(1.dp, colors.outlineVariant, CircleShape),
             contentAlignment = Alignment.Center
         ) {
             Icon(
@@ -65,7 +61,7 @@ fun MediaPermissionScreen(
         Text(
             text = if (denied) "Allow access to continue" else "Your memories belong here",
             style = MaterialTheme.typography.headlineLarge,
-            color = Ivory,
+            color = colors.onBackground,
             textAlign = TextAlign.Center
         )
         Spacer(Modifier.height(Spacing.sm))
@@ -76,7 +72,7 @@ fun MediaPermissionScreen(
                 "Allow Albums to access your photos and videos so you can browse them in one place."
             },
             style = MaterialTheme.typography.bodyMedium,
-            color = Mist,
+            color = colors.onSurfaceVariant,
             textAlign = TextAlign.Center
         )
         Spacer(Modifier.height(Spacing.xl))

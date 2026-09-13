@@ -20,13 +20,18 @@ object ThumbnailLoader {
         override fun sizeOf(key: String, value: Bitmap): Int = value.byteCount / 1024
     }
 
+    fun peek(uriString: String, sizePx: Int): Bitmap? {
+        if (uriString.isBlank()) return null
+        return cache.get(cacheKey(uriString, sizePx))
+    }
+
     suspend fun load(
         context: Context,
         uriString: String,
         sizePx: Int
     ): Bitmap? = withContext(Dispatchers.IO) {
         if (uriString.isBlank()) return@withContext null
-        val key = "$uriString@$sizePx"
+        val key = cacheKey(uriString, sizePx)
         cache.get(key)?.let { return@withContext it }
         val uri = try {
             Uri.parse(uriString)
@@ -111,6 +116,8 @@ object ThumbnailLoader {
             null
         }
     }
+
+    private fun cacheKey(uriString: String, sizePx: Int): String = "$uriString@$sizePx"
 
     private fun cacheKb(): Int {
         val max = (Runtime.getRuntime().maxMemory() / 1024).toInt()
