@@ -1,5 +1,7 @@
 package com.mydrive.app.ui.navigation
 
+import android.net.Uri
+
 sealed class AppDestination(val route: String) {
     data object Albums : AppDestination("albums")
     data object Favorites : AppDestination("favorites")
@@ -12,7 +14,7 @@ sealed class AppDestination(val route: String) {
         fun create(mediaId: String) = "media/$mediaId"
     }
     data object AlbumDetail : AppDestination("album/{albumId}") {
-        fun create(albumId: String) = "album/$albumId"
+        fun create(albumId: String) = "album/${Uri.encode(albumId)}"
     }
     data object TelegramSettings : AppDestination("settings/telegram")
 }

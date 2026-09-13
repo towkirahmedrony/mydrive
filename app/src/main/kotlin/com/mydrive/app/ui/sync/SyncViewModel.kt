@@ -34,10 +34,12 @@ class SyncViewModel(
             val failed = media.filter { it.backupState == BackupState.FAILED }
             val completed = media.filter { it.backupState == BackupState.COMPLETED }.take(8)
             val active = inProgress.size + waiting.size
+            val notStarted = media.any { it.backupState == BackupState.NOT_STARTED }
             val headline = when {
                 failed.isNotEmpty() && active > 0 -> "$active items syncing · ${failed.size} failed"
                 failed.isNotEmpty() -> "${failed.size} ${if (failed.size == 1) "item" else "items"} failed"
                 active > 0 -> "$active ${if (active == 1) "item" else "items"} syncing"
+                notStarted -> "Backup not started"
                 else -> "Everything is up to date"
             }
             SyncUiState(

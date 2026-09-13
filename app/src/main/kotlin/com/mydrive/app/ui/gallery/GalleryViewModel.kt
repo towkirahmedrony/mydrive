@@ -15,6 +15,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
 
 enum class GalleryFilter {
     ALL, PHOTOS, VIDEOS, FAVORITES
@@ -31,7 +32,13 @@ data class GalleryUiState(
     val groups: List<MediaGroup>,
     val albums: List<AlbumFolder>,
     val syncingCount: Int,
-    val failedCount: Int
+    val failedCount: Int,
+    val isLoading: Boolean = false,
+    val needsPermission: Boolean = false,
+    val permissionDenied: Boolean = false,
+    val accessPartial: Boolean = false,
+    val errorMessage: String? = null,
+    val hasMedia: Boolean = false
 )
 
 class GalleryViewModel(
@@ -41,11 +48,16 @@ class GalleryViewModel(
     private val filter = MutableStateFlow(GalleryFilter.ALL)
     private val query = MutableStateFlow("")
 
+    init {
+        refresh(force = true)
+    }
+
     val uiState: StateFlow<GalleryUiState> = combine(
         repository.media,
+        repository.loadState,
         filter,
         query
-    ) { media, currentFilter, currentQuery ->
+    ) { media, load, currentFilter, currentQuery ->
         val filtered = media
             .filter { item ->
                 when (currentFilter) {
@@ -76,12 +88,29 @@ class GalleryViewModel(
                 emptyList()
             },
             syncingCount = syncing,
-            failedCount = failed
+            failedCount = failed,
+            isLoading = load.isLoading,
+            needsPermission = load.needsPermission,
+            permissionDenied = load.permissionDenied,
+            accessPartial = load.accessPartial,
+            errorMessage = load.errorMessage,
+            hasMedia = media.isNotEmpty()
         )
     }.stateIn(
         scope = viewModelScope,
         started = SharingStarted.WhileSubscribed(5_000),
-        initialValue = GalleryUiState(GalleryFilter.ALL, "", emptyList(), emptyList(), 0, 0)
+        initialValue = GalleryUiState(
+            filter = GalleryFilter.ALL,
+            query = "",
+            groups = emptyList(),
+            albums = emptyList(),
+            syncingCount = 0,
+            failedCount = 0,
+            isLoading = repository.loadState.value.isLoading,
+            needsPermission = repository.loadState.value.needsPermission,
+            permissionDenied = repository.loadState.value.permissionDenied,
+            accessPartial = repository.loadState.value.accessPartial
+        )
     )
 
     fun setFilter(value: GalleryFilter) {
@@ -90,6 +119,19 @@ class GalleryViewModel(
 
     fun setQuery(value: String) {
         query.update { value }
+    }
+
+    fun permissionPermissions(): Array<String> = repository.requiredPermissions()
+
+    fun onPermissionResult() {
+        repository.markPermissionAsked()
+        refresh(force = true)
+    }
+
+    fun refresh(force: Boolean = true) {
+        viewModelScope.launch {
+            repository.refresh(force = force)
+        }
     }
 
     companion object {

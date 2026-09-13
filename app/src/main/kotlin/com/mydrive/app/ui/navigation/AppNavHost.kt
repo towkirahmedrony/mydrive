@@ -194,7 +194,7 @@ fun AppNavHost(repository: MediaRepository) {
                 route = AppDestination.AlbumDetail.route,
                 arguments = listOf(navArgument("albumId") { type = NavType.StringType })
             ) { entry ->
-                val albumId = entry.arguments?.getString("albumId").orEmpty()
+                val albumId = android.net.Uri.decode(entry.arguments?.getString("albumId").orEmpty())
                 val vm: AlbumDetailViewModel = viewModel(
                     factory = AlbumDetailViewModel.factory(repository, albumId)
                 )

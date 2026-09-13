@@ -1,5 +1,10 @@
 package com.mydrive.app.ui.gallery
 
+import android.content.Intent
+import android.net.Uri
+import android.provider.Settings
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -21,10 +26,12 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material.icons.outlined.Search
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -34,11 +41,17 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.mydrive.app.ui.components.AlbumStrip
 import com.mydrive.app.ui.components.CompactBackupStatus
+import com.mydrive.app.ui.components.EmptyState
 import com.mydrive.app.ui.components.MediaGrid
+import com.mydrive.app.ui.permission.MediaPermissionScreen
 import com.mydrive.app.ui.theme.ChipShape
 import com.mydrive.app.ui.theme.Copper
 import com.mydrive.app.ui.theme.Graphite
@@ -56,6 +69,41 @@ fun GalleryScreen(
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     var searchOpen by rememberSaveable { mutableStateOf(false) }
+    val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+
+    val permissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) {
+        viewModel.onPermissionResult()
+    }
+
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                viewModel.refresh(force = false)
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    if (state.needsPermission || state.permissionDenied) {
+        MediaPermissionScreen(
+            denied = state.permissionDenied,
+            onAllowAccess = {
+                permissionLauncher.launch(viewModel.permissionPermissions())
+            },
+            onOpenSettings = {
+                val intent = Intent(
+                    Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                    Uri.fromParts("package", context.packageName, null)
+                )
+                context.startActivity(intent)
+            }
+        )
+        return
+    }
 
     Column(
         modifier = Modifier
@@ -106,24 +154,50 @@ fun GalleryScreen(
                 .padding(horizontal = Spacing.md, vertical = Spacing.xs)
         )
 
-        MediaGrid(
-            groups = state.groups,
-            onMediaClick = onMediaClick,
-            emptyTitle = "No media yet",
-            emptyMessage = "Your photos and videos will appear here.",
-            contentPadding = PaddingValues(bottom = Spacing.lg),
-            header = if (state.albums.isNotEmpty()) {
-                {
-                    AlbumStrip(
-                        albums = state.albums,
-                        onAlbumClick = onAlbumClick,
-                        modifier = Modifier.padding(bottom = Spacing.sm, top = Spacing.xs)
-                    )
+        when {
+            state.isLoading && !state.hasMedia -> {
+                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    CircularProgressIndicator(color = Copper)
                 }
-            } else {
-                null
             }
-        )
+            state.errorMessage != null && !state.hasMedia -> {
+                EmptyState(
+                    title = "Couldn't load media",
+                    message = state.errorMessage ?: "Please try again."
+                )
+            }
+            else -> {
+                val emptyTitle = when (state.filter) {
+                    GalleryFilter.FAVORITES -> "No favorites yet"
+                    GalleryFilter.PHOTOS -> "No photos yet"
+                    GalleryFilter.VIDEOS -> "No videos yet"
+                    GalleryFilter.ALL -> "No photos or videos yet"
+                }
+                val emptyMessage = when {
+                    state.filter == GalleryFilter.FAVORITES -> "Your favorite photos and videos will appear here."
+                    state.query.isNotBlank() -> "No matches for that name."
+                    else -> "Your photos and videos will appear here."
+                }
+                MediaGrid(
+                    groups = state.groups,
+                    onMediaClick = onMediaClick,
+                    emptyTitle = emptyTitle,
+                    emptyMessage = emptyMessage,
+                    contentPadding = PaddingValues(bottom = Spacing.lg),
+                    header = if (state.albums.isNotEmpty()) {
+                        {
+                            AlbumStrip(
+                                albums = state.albums,
+                                onAlbumClick = onAlbumClick,
+                                modifier = Modifier.padding(bottom = Spacing.sm, top = Spacing.xs)
+                            )
+                        }
+                    } else {
+                        null
+                    }
+                )
+            }
+        }
     }
 }
 

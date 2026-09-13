@@ -45,8 +45,8 @@ import com.mydrive.app.ui.theme.Slate
 import com.mydrive.app.ui.theme.Spacing
 import com.mydrive.app.ui.theme.StatusAttention
 import com.mydrive.app.ui.theme.StatusSyncing
+import com.mydrive.app.ui.components.MediaImage
 import com.mydrive.app.ui.util.formatFileSize
-import com.mydrive.app.ui.util.thumbnailBrush
 
 @Composable
 fun SyncScreen(
@@ -145,10 +145,12 @@ fun SyncScreen(
 
 @Composable
 private fun MiniThumb(item: MediaItem) {
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(thumbnailBrush(item.thumbnailSeed, item.type))
+    MediaImage(
+        uri = item.uri,
+        seed = item.thumbnailSeed,
+        type = item.type,
+        modifier = Modifier.fillMaxSize(),
+        sizePx = 160
     )
 }
 
@@ -171,8 +173,9 @@ private fun SyncRow(
             modifier = Modifier
                 .size(52.dp)
                 .clip(RoundedCornerShape(Radius.sm))
-                .background(thumbnailBrush(item.thumbnailSeed, item.type))
-        )
+        ) {
+            MiniThumb(item)
+        }
         Spacer(Modifier.width(Spacing.sm))
         Column(modifier = Modifier.weight(1f)) {
             Text(item.filename, style = MaterialTheme.typography.titleSmall, color = Ivory, maxLines = 1)
@@ -206,8 +209,9 @@ private fun FailedRow(
             modifier = Modifier
                 .size(52.dp)
                 .clip(RoundedCornerShape(Radius.sm))
-                .background(thumbnailBrush(item.thumbnailSeed, item.type))
-        )
+        ) {
+            MiniThumb(item)
+        }
         Spacer(Modifier.width(Spacing.sm))
         Column(modifier = Modifier.weight(1f)) {
             Text(item.filename, style = MaterialTheme.typography.titleSmall, color = Ivory, maxLines = 1)

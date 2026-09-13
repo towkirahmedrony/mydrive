@@ -34,11 +34,9 @@ import com.mydrive.app.ui.theme.CardShape
 import com.mydrive.app.ui.theme.Ivory
 import com.mydrive.app.ui.theme.IvoryMuted
 import com.mydrive.app.ui.theme.Mist
-import com.mydrive.app.ui.theme.Sage
 import com.mydrive.app.ui.theme.Spacing
 import com.mydrive.app.ui.theme.StatusAttention
 import com.mydrive.app.ui.theme.StatusSyncing
-import com.mydrive.app.ui.util.thumbnailBrush
 
 @Composable
 fun MediaGrid(
@@ -117,7 +115,7 @@ fun CompactBackupStatus(
         syncingCount > 0 ->
             "↑ $syncingCount ${if (syncingCount == 1) "item" else "items"} syncing" to StatusSyncing
         else ->
-            "✓ All backed up" to Sage
+            "Backup not started" to Mist
     }
     Text(
         text = text,
@@ -142,9 +140,16 @@ fun AlbumCard(
             modifier = Modifier
                 .fillMaxWidth()
                 .aspectRatio(1f)
-                .clip(CardShape)
-                .background(thumbnailBrush(album.coverSeed, album.coverType))
-        )
+            .clip(CardShape)
+        ) {
+            MediaImage(
+                uri = album.coverUri,
+                seed = album.coverSeed,
+                type = album.coverType,
+                modifier = Modifier.fillMaxSize(),
+                sizePx = 256
+            )
+        }
         Text(
             text = album.name,
             style = MaterialTheme.typography.titleSmall,

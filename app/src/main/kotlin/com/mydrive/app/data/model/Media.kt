@@ -6,6 +6,7 @@ enum class MediaType {
 }
 
 enum class BackupState {
+    NOT_STARTED,
     COMPLETED,
     UPLOADING,
     PROCESSING,
@@ -30,13 +31,23 @@ data class MediaItem(
     val resolution: String,
     val durationSeconds: Int? = null,
     val isFavorite: Boolean = false,
-    val backupState: BackupState = BackupState.COMPLETED,
-    val backupCompleted: Boolean = true,
-    val telegramCompleted: Boolean = true,
+    val backupState: BackupState = BackupState.NOT_STARTED,
+    val backupCompleted: Boolean = false,
+    val telegramCompleted: Boolean = false,
     val thumbnailSeed: Int,
     val progress: Float = 0f,
     val errorMessage: String? = null,
-    val albumId: String = "camera"
+    val albumId: String = "camera",
+    val albumName: String = "",
+    val mediaStoreId: Long = 0L,
+    val uri: String = "",
+    val mimeType: String = "",
+    val dateAddedMillis: Long = 0L,
+    val dateModifiedMillis: Long = 0L,
+    val width: Int = 0,
+    val height: Int = 0,
+    val durationMillis: Long? = null,
+    val relativePath: String? = null
 )
 
 data class AlbumFolder(
@@ -44,7 +55,8 @@ data class AlbumFolder(
     val name: String,
     val coverSeed: Int,
     val coverType: MediaType = MediaType.PHOTO,
-    val mediaCount: Int = 0
+    val mediaCount: Int = 0,
+    val coverUri: String = ""
 )
 
 data class ActivityEvent(
@@ -99,4 +111,13 @@ data class StorageSummary(
 data class SyncSummary(
     val inProgressCount: Int,
     val completedToday: Int
+)
+
+data class MediaLoadState(
+    val accessGranted: Boolean = false,
+    val accessPartial: Boolean = false,
+    val needsPermission: Boolean = true,
+    val permissionDenied: Boolean = false,
+    val isLoading: Boolean = false,
+    val errorMessage: String? = null
 )

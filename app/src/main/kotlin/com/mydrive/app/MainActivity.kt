@@ -5,8 +5,10 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.core.view.WindowCompat
+import androidx.lifecycle.lifecycleScope
 import com.mydrive.app.ui.navigation.AppNavHost
 import com.mydrive.app.ui.theme.MyDriveTheme
+import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -18,6 +20,14 @@ class MainActivity : ComponentActivity() {
             MyDriveTheme {
                 AppNavHost(repository = repository)
             }
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        val repository = (application as MyDriveApp).mediaRepository
+        lifecycleScope.launch {
+            repository.refresh(force = false)
         }
     }
 }

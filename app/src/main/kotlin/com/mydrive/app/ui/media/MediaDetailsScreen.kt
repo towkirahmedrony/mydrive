@@ -36,12 +36,19 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import android.content.Intent
+import android.net.Uri
+import android.widget.Toast
 import com.mydrive.app.data.model.BackupState
+import com.mydrive.app.data.model.MediaItem
 import com.mydrive.app.data.model.MediaType
 import com.mydrive.app.ui.components.AppCard
 import com.mydrive.app.ui.components.BackupStateChip
 import com.mydrive.app.ui.components.EmptyState
+import com.mydrive.app.ui.components.MediaImage
 import com.mydrive.app.ui.components.SecondaryActionButton
 import com.mydrive.app.ui.theme.Copper
 import com.mydrive.app.ui.theme.Graphite
@@ -59,7 +66,6 @@ import com.mydrive.app.ui.theme.Stroke
 import com.mydrive.app.ui.util.formatDateTime
 import com.mydrive.app.ui.util.formatDuration
 import com.mydrive.app.ui.util.formatFileSize
-import com.mydrive.app.ui.util.thumbnailBrush
 
 @Composable
 fun MediaDetailsScreen(
@@ -68,6 +74,7 @@ fun MediaDetailsScreen(
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val item = state.item
+    val context = LocalContext.current
 
     if (item == null) {
         Column(
@@ -99,10 +106,17 @@ fun MediaDetailsScreen(
                 modifier = Modifier
                     .fillMaxWidth()
                     .aspectRatio(if (item.type == MediaType.VIDEO) 16f / 9f else 4f / 3f)
-                    .clip(androidx.compose.foundation.shape.RoundedCornerShape(Radius.lg))
-                    .background(thumbnailBrush(item.thumbnailSeed, item.type)),
+                    .clip(androidx.compose.foundation.shape.RoundedCornerShape(Radius.lg)),
                 contentAlignment = Alignment.Center
             ) {
+                MediaImage(
+                    uri = item.uri,
+                    seed = item.thumbnailSeed,
+                    type = item.type,
+                    modifier = Modifier.fillMaxSize(),
+                    contentScale = ContentScale.Crop,
+                    sizePx = 720
+                )
                 Box(
                     modifier = Modifier
                         .matchParentSize()
@@ -155,8 +169,16 @@ fun MediaDetailsScreen(
                 InfoRow("Resolution", item.resolution)
                 Spacer(Modifier.height(Spacing.sm))
                 InfoRow("Media type", if (item.type == MediaType.VIDEO) "Video" else "Photo")
+                if (item.durationSeconds != null) {
+                    Spacer(Modifier.height(Spacing.sm))
+                    InfoRow("Duration", formatDuration(item.durationSeconds))
+                }
                 Spacer(Modifier.height(Spacing.sm))
-                InfoRow("Device", item.device)
+                InfoRow("Device", item.device.ifBlank { "This device" })
+                if (item.albumName.isNotBlank()) {
+                    Spacer(Modifier.height(Spacing.sm))
+                    InfoRow("Album", item.albumName)
+                }
             }
 
             Spacer(Modifier.height(Spacing.lg))
@@ -176,7 +198,11 @@ fun MediaDetailsScreen(
                         item.backupCompleted && !item.telegramCompleted
                     }
                 )
-                if (item.backupState != BackupState.COMPLETED && item.backupState != BackupState.FAILED && item.backupState != BackupState.WAITING) {
+                if (item.backupState != BackupState.COMPLETED &&
+                    item.backupState != BackupState.FAILED &&
+                    item.backupState != BackupState.WAITING &&
+                    item.backupState != BackupState.NOT_STARTED
+                ) {
                     Spacer(Modifier.height(Spacing.md))
                     LinearProgressIndicator(
                         progress = { item.progress },
@@ -197,7 +223,7 @@ fun MediaDetailsScreen(
             ) {
                 SecondaryActionButton(
                     text = "Share",
-                    onClick = {},
+                    onClick = { shareMedia(context, item) },
                     icon = Icons.Outlined.Share,
                     modifier = Modifier.weight(1f)
                 )
@@ -276,11 +302,26 @@ private fun DestinationRow(
         processingState == BackupState.UPLOADING -> "Uploading" to StatusSyncing
         processingState == BackupState.PROCESSING -> "Processing" to StatusSyncing
         processingState == BackupState.SENDING_TELEGRAM -> "Telegram sync" to StatusSyncing
-        else -> "Pending" to IvoryMuted
+        name == "Telegram" -> "Not synced yet" to IvoryMuted
+        else -> "Backup not started" to IvoryMuted
     }
     val displayLabel = if (name == "Telegram" && completed) "✓ Synced" else label
     Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
         Text(name, style = MaterialTheme.typography.bodyLarge, color = Ivory, modifier = Modifier.weight(1f))
         Text(displayLabel, style = MaterialTheme.typography.labelLarge, color = if (completed) Sage else color)
+    }
+}
+
+private fun shareMedia(context: android.content.Context, item: MediaItem) {
+    if (item.uri.isBlank()) return
+    try {
+        val intent = Intent(Intent.ACTION_SEND).apply {
+            type = item.mimeType.ifBlank { if (item.type == MediaType.VIDEO) "video/*" else "image/*" }
+            putExtra(Intent.EXTRA_STREAM, Uri.parse(item.uri))
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        context.startActivity(Intent.createChooser(intent, item.filename))
+    } catch (_: Exception) {
+        Toast.makeText(context, "Unable to share this item", Toast.LENGTH_SHORT).show()
     }
 }

@@ -66,7 +66,6 @@ import com.mydrive.app.ui.theme.StatusSyncing
 import com.mydrive.app.ui.theme.Stroke
 import com.mydrive.app.ui.theme.StrokeStrong
 import com.mydrive.app.ui.util.formatDuration
-import com.mydrive.app.ui.util.thumbnailBrush
 
 @Composable
 fun AppCard(
@@ -205,10 +204,12 @@ fun MediaThumb(
             .aspectRatio(1f)
             .then(clickMod)
     ) {
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(thumbnailBrush(item.thumbnailSeed, item.type))
+        MediaImage(
+            uri = item.uri,
+            seed = item.thumbnailSeed,
+            type = item.type,
+            modifier = Modifier.fillMaxSize(),
+            sizePx = 256
         )
         Box(
             modifier = Modifier
@@ -270,7 +271,7 @@ fun MiniSyncDot(state: BackupState) {
     val color = when (state) {
         BackupState.COMPLETED -> StatusConnected
         BackupState.FAILED -> StatusAttention
-        BackupState.WAITING -> Mist
+        BackupState.WAITING, BackupState.NOT_STARTED -> Mist
         else -> StatusSyncing
     }
     Box(
@@ -498,6 +499,7 @@ fun SecondaryActionButton(
 
 fun stateVisual(state: BackupState): Triple<String, Color, ImageVector> = when (state) {
     BackupState.COMPLETED -> Triple("Completed", StatusConnected, Icons.Outlined.CloudDone)
+    BackupState.NOT_STARTED -> Triple("Not synced yet", Mist, Icons.Outlined.CloudQueue)
     BackupState.UPLOADING -> Triple("Uploading", StatusSyncing, Icons.Outlined.CloudUpload)
     BackupState.PROCESSING -> Triple("Processing", StatusSyncing, Icons.Outlined.CloudQueue)
     BackupState.SENDING_TELEGRAM -> Triple("Telegram sync", StatusSyncing, Icons.Outlined.CloudUpload)

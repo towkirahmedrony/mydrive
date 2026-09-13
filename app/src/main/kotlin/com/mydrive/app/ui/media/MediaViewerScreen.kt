@@ -42,11 +42,17 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import android.content.Intent
+import android.net.Uri
+import android.widget.Toast
 import com.mydrive.app.data.model.BackupState
 import com.mydrive.app.data.model.MediaItem
 import com.mydrive.app.data.model.MediaType
+import com.mydrive.app.ui.components.MediaImage
 import com.mydrive.app.ui.theme.Copper
 import com.mydrive.app.ui.theme.Graphite
 import com.mydrive.app.ui.theme.Ink
@@ -58,7 +64,6 @@ import com.mydrive.app.ui.theme.StatusAttention
 import com.mydrive.app.ui.theme.StatusSyncing
 import com.mydrive.app.ui.theme.Stroke
 import com.mydrive.app.ui.util.formatDuration
-import com.mydrive.app.ui.util.thumbnailBrush
 
 @Composable
 fun MediaViewerScreen(
@@ -90,6 +95,7 @@ fun MediaViewerScreen(
     }
 
     val current = state.items.getOrNull(pagerState.currentPage) ?: state.items.first()
+    val context = LocalContext.current
 
     Box(
         modifier = Modifier
@@ -156,7 +162,7 @@ fun MediaViewerScreen(
                     label = "Favorite",
                     tint = if (current.isFavorite) Copper else Ivory
                 ) { viewModel.toggleFavorite(current.id) }
-                ViewerAction(Icons.Outlined.Share, "Share") {}
+                ViewerAction(Icons.Outlined.Share, "Share") { shareMedia(context, current) }
                 ViewerAction(Icons.Outlined.Info, "Info") { onOpenDetails(current.id) }
             }
         }
@@ -165,12 +171,24 @@ fun MediaViewerScreen(
 
 @Composable
 private fun ViewerPage(item: MediaItem) {
+    val context = LocalContext.current
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(thumbnailBrush(item.thumbnailSeed, item.type)),
+            .background(Ink)
+            .clickable(enabled = item.type == MediaType.VIDEO) {
+                openMediaExternally(context, item)
+            },
         contentAlignment = Alignment.Center
     ) {
+        MediaImage(
+            uri = item.uri,
+            seed = item.thumbnailSeed,
+            type = item.type,
+            modifier = Modifier.fillMaxSize(),
+            contentScale = ContentScale.Fit,
+            sizePx = 1080
+        )
         if (item.type == MediaType.VIDEO) {
             Box(
                 modifier = Modifier
@@ -192,6 +210,7 @@ private fun ViewerPage(item: MediaItem) {
 
 @Composable
 private fun VideoControls(item: MediaItem) {
+    val context = LocalContext.current
     var playing by remember(item.id) { mutableStateOf(false) }
     var progress by remember(item.id) { mutableFloatStateOf(0.22f) }
     val duration = item.durationSeconds ?: 0
@@ -207,7 +226,10 @@ private fun VideoControls(item: MediaItem) {
                 .size(40.dp)
                 .clip(CircleShape)
                 .background(Copper)
-                .clickable { playing = !playing },
+                .clickable {
+                    playing = !playing
+                    if (playing) openMediaExternally(context, item)
+                },
             contentAlignment = Alignment.Center
         ) {
             Icon(
@@ -270,6 +292,7 @@ private fun CircleIcon(
 
 private fun backupStatusLabel(item: MediaItem): String = when (item.backupState) {
     BackupState.COMPLETED -> "✓ Backed up"
+    BackupState.NOT_STARTED -> "Backup not started"
     BackupState.UPLOADING -> "Uploading"
     BackupState.PROCESSING -> "Processing"
     BackupState.SENDING_TELEGRAM -> "Telegram sync"
@@ -280,6 +303,39 @@ private fun backupStatusLabel(item: MediaItem): String = when (item.backupState)
 private fun backupStatusColor(item: MediaItem) = when (item.backupState) {
     BackupState.COMPLETED -> Sage
     BackupState.FAILED -> StatusAttention
-    BackupState.WAITING -> Mist
+    BackupState.WAITING, BackupState.NOT_STARTED -> Mist
     else -> StatusSyncing
+}
+
+private fun shareMedia(context: android.content.Context, item: MediaItem) {
+    if (item.uri.isBlank()) return
+    try {
+        val intent = Intent(Intent.ACTION_SEND).apply {
+            type = item.mimeType.ifBlank { if (item.type == MediaType.VIDEO) "video/*" else "image/*" }
+            putExtra(Intent.EXTRA_STREAM, Uri.parse(item.uri))
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        context.startActivity(Intent.createChooser(intent, item.filename))
+    } catch (_: Exception) {
+        Toast.makeText(context, "Unable to share this item", Toast.LENGTH_SHORT).show()
+    }
+}
+
+private fun openMediaExternally(context: android.content.Context, item: MediaItem) {
+    if (item.uri.isBlank()) {
+        Toast.makeText(context, "This video can't be opened", Toast.LENGTH_SHORT).show()
+        return
+    }
+    try {
+        val intent = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(
+                Uri.parse(item.uri),
+                item.mimeType.ifBlank { "video/*" }
+            )
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        context.startActivity(intent)
+    } catch (_: Exception) {
+        Toast.makeText(context, "This video can't be opened", Toast.LENGTH_SHORT).show()
+    }
 }
