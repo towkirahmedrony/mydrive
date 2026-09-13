@@ -23,7 +23,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import com.mydrive.app.data.model.AlbumFolder
 import com.mydrive.app.data.model.BackupState
@@ -163,13 +162,14 @@ fun AlbumCard(
             text = album.name,
             style = MaterialTheme.typography.titleSmall,
             color = colors.onBackground,
-            modifier = Modifier.padding(top = Spacing.xs),
+            modifier = Modifier.padding(top = Spacing.sm),
             maxLines = 1
         )
         Text(
-            text = "DEBUG: ${album.mediaCount} ${if (album.mediaCount == 1) "item" else "items"}",
+            text = "${album.mediaCount} ${if (album.mediaCount == 1) "item" else "items"}",
             style = MaterialTheme.typography.labelSmall,
-            color = Color.Red
+            color = colors.onSurfaceVariant,
+            modifier = Modifier.padding(top = 3.dp)
         )
     }
 }
