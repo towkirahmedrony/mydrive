@@ -17,4 +17,9 @@ class MyDriveApp : Application() {
             permissions = MediaPermissions(this)
         )
     }
+
+    companion object {
+        const val SUPABASE_URL = "https://gpiuxcdjmrzcouhjapcs.supabase.co"
+        const val SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImdwaXV4Y2RqbXJ6Y291aGphcGNzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODkyMjY1MTMsImV4cCI6MjEwNDgwMjUxM30.Tm6IPdc5mlSH0J76mbmXut4nd33JnyAG982o30sOu2A"
+    }
 }
