@@ -42,6 +42,7 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import com.mydrive.app.data.local.GalleryTabStore
+import com.mydrive.app.data.repository.AuthRepository
 import com.mydrive.app.data.repository.MediaRepository
 import com.mydrive.app.ui.album.AlbumDetailScreen
 import com.mydrive.app.ui.album.AlbumDetailViewModel
@@ -80,6 +81,7 @@ private val tabFade = tween<Float>(durationMillis = 160)
 @Composable
 fun AppNavHost(
     repository: MediaRepository,
+    authRepository: AuthRepository,
     galleryTabStore: GalleryTabStore
 ) {
     val navController = rememberNavController()
@@ -173,7 +175,9 @@ fun AppNavHost(
                 )
             }
             composable(AppDestination.Settings.route) {
-                val vm: SettingsViewModel = viewModel(factory = SettingsViewModel.factory(repository))
+                val vm: SettingsViewModel = viewModel(
+                    factory = SettingsViewModel.factory(repository, authRepository)
+                )
                 SettingsScreen(
                     viewModel = vm,
                     onOpenTelegram = { navController.navigate(AppDestination.TelegramSettings.route) }
@@ -218,7 +222,9 @@ fun AppNavHost(
                 )
             }
             composable(AppDestination.TelegramSettings.route) {
-                val vm: SettingsViewModel = viewModel(factory = SettingsViewModel.factory(repository))
+                val vm: SettingsViewModel = viewModel(
+                    factory = SettingsViewModel.factory(repository, authRepository)
+                )
                 TelegramSettingsScreen(viewModel = vm, onBack = { navController.popBackStack() })
             }
         }

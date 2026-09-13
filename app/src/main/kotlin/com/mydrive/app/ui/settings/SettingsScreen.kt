@@ -80,7 +80,7 @@ fun SettingsScreen(
                         contentAlignment = Alignment.Center
                     ) {
                         Text(
-                            state.profile.name.take(1),
+                            state.profile.name.take(1).ifBlank { "A" },
                             style = MaterialTheme.typography.titleLarge,
                             color = colors.onPrimary
                         )
@@ -100,7 +100,8 @@ fun SettingsScreen(
                 HorizontalDivider(color = colors.outlineVariant)
                 SettingsRow(
                     title = "Logout",
-                    leading = Icons.AutoMirrored.Outlined.Logout
+                    leading = Icons.AutoMirrored.Outlined.Logout,
+                    onClick = viewModel::logout
                 )
             }
         }

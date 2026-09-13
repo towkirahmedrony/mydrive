@@ -82,9 +82,9 @@ data class TodayStats(
 )
 
 data class UserProfile(
-    val name: String,
-    val email: String,
-    val accountStatus: String
+    val name: String = "",
+    val email: String = "",
+    val accountStatus: String = ""
 )
 
 data class BackupPreferences(

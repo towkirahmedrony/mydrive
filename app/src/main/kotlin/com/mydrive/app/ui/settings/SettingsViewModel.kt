@@ -3,14 +3,17 @@ package com.mydrive.app.ui.settings
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import com.mydrive.app.data.auth.AuthState
 import com.mydrive.app.data.model.BackupPreferences
 import com.mydrive.app.data.model.TelegramSettings
 import com.mydrive.app.data.model.UserProfile
+import com.mydrive.app.data.repository.AuthRepository
 import com.mydrive.app.data.repository.MediaRepository
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.launch
 
 data class SettingsUiState(
     val profile: UserProfile,
@@ -19,20 +22,33 @@ data class SettingsUiState(
 )
 
 class SettingsViewModel(
-    private val repository: MediaRepository
+    private val repository: MediaRepository,
+    private val authRepository: AuthRepository
 ) : ViewModel() {
 
     val uiState: StateFlow<SettingsUiState> = combine(
-        repository.profile,
+        authRepository.state,
         repository.preferences,
         repository.telegram
-    ) { profile, preferences, telegram ->
-        SettingsUiState(profile, preferences, telegram)
+    ) { authState, preferences, telegram ->
+        SettingsUiState(
+            profile = when (authState) {
+                is AuthState.Authenticated -> authState.profile.toUserProfile()
+                is AuthState.Suspended -> authState.profile.toUserProfile()
+                else -> UserProfile()
+            },
+            preferences = preferences,
+            telegram = telegram
+        )
     }.stateIn(
         scope = viewModelScope,
         started = SharingStarted.WhileSubscribed(5_000),
         initialValue = SettingsUiState(
-            profile = repository.profile.value,
+            profile = when (val authState = authRepository.state.value) {
+                is AuthState.Authenticated -> authState.profile.toUserProfile()
+                is AuthState.Suspended -> authState.profile.toUserProfile()
+                else -> UserProfile()
+            },
             preferences = repository.preferences.value,
             telegram = repository.telegram.value
         )
@@ -66,12 +82,21 @@ class SettingsViewModel(
         repository.disconnectTelegram()
     }
 
+    fun logout() {
+        viewModelScope.launch {
+            authRepository.logout()
+        }
+    }
+
     companion object {
-        fun factory(repository: MediaRepository): ViewModelProvider.Factory =
+        fun factory(
+            repository: MediaRepository,
+            authRepository: AuthRepository
+        ): ViewModelProvider.Factory =
             object : ViewModelProvider.Factory {
                 @Suppress("UNCHECKED_CAST")
                 override fun <T : ViewModel> create(modelClass: Class<T>): T {
-                    return SettingsViewModel(repository) as T
+                    return SettingsViewModel(repository, authRepository) as T
                 }
             }
     }
