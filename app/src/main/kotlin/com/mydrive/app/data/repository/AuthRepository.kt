@@ -13,6 +13,7 @@ import com.mydrive.app.data.remote.dto.DeviceRow
 import com.mydrive.app.data.remote.dto.ProfileNameUpdate
 import com.mydrive.app.data.remote.dto.ProfileRow
 import io.github.jan.supabase.SupabaseClient
+import io.github.jan.supabase.auth.OtpType
 import io.github.jan.supabase.auth.auth
 import io.github.jan.supabase.auth.providers.builtin.Email
 import io.github.jan.supabase.auth.status.RefreshFailureCause
@@ -49,6 +50,7 @@ class AuthRepository(
     private var lastSeenAtMillis = 0L
     private var sessionJob: Job? = null
     private var watcherJob: Job? = null
+    private var pendingFullName: String? = null
 
     init {
         restoreSession()
@@ -124,11 +126,57 @@ class AuthRepository(
                     put("full_name", fullName)
                 }
             }
-            val session = supabase.auth.currentSessionOrNull()
-            if (session == null) {
-                throw EmailConfirmationRequired()
+            pendingFullName = fullName
+            if (supabase.auth.currentSessionOrNull() != null) {
+                runCatching { supabase.auth.signOut() }
             }
-            completeAuthenticatedSession(pendingFullName = fullName)
+        }
+    }
+
+    suspend fun sendVerificationCode(email: String): Result<Unit> {
+        val supabase = client ?: return Result.failure(IllegalStateException(notConfiguredMessage()))
+        if (!network.isOnline()) {
+            return Result.failure(IllegalStateException(AuthErrorMapper.message(UnknownNetwork())))
+        }
+        val normalized = email.trim()
+        if (normalized.isBlank()) {
+            return Result.failure(IllegalStateException("Enter a valid email address."))
+        }
+        return runCatching {
+            supabase.auth.resendEmail(OtpType.Email.SIGNUP, normalized)
+        }.fold(
+            onSuccess = { Result.success(Unit) },
+            onFailure = { Result.failure(IllegalStateException(AuthErrorMapper.otpMessage(it))) }
+        )
+    }
+
+    suspend fun verifyEmailCode(email: String, code: String): Result<Unit> {
+        val supabase = client ?: return Result.failure(IllegalStateException(notConfiguredMessage()))
+        if (!network.isOnline()) {
+            return Result.failure(IllegalStateException(AuthErrorMapper.message(UnknownNetwork())))
+        }
+        val normalizedEmail = email.trim()
+        val token = code.filter { it.isDigit() }
+        if (normalizedEmail.isBlank()) {
+            return Result.failure(IllegalStateException("Enter a valid email address."))
+        }
+        if (token.length != 6) {
+            return Result.failure(IllegalStateException("Enter the 6-digit code from your email."))
+        }
+        return try {
+            supabase.auth.verifyEmailOtp(
+                type = OtpType.Email.EMAIL,
+                email = normalizedEmail,
+                token = token
+            )
+            completeAuthenticatedSession(pendingFullName = pendingFullName)
+            Result.success(Unit)
+        } catch (error: ProfileNotFound) {
+            runCatching { supabase.auth.signOut() }
+            _state.value = AuthState.Unauthenticated
+            Result.failure(IllegalStateException("We couldn't load your account. Please try again."))
+        } catch (error: Throwable) {
+            Result.failure(IllegalStateException(AuthErrorMapper.otpMessage(error)))
         }
     }
 
@@ -148,6 +196,7 @@ class AuthRepository(
     suspend fun logout(): Result<Unit> {
         registeredDeviceId = null
         lastSeenAtMillis = 0L
+        pendingFullName = null
         return runCatching {
             client?.auth?.signOut()
             Unit

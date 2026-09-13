@@ -48,6 +48,38 @@ object AuthErrorMapper {
         return "Something went wrong. Please try again."
     }
 
+    fun otpMessage(error: Throwable): String {
+        val raw = buildString {
+            append(error.message.orEmpty())
+            append(' ')
+            append(error.cause?.message.orEmpty())
+            if (error is RestException) {
+                append(' ')
+                append(error.error)
+                append(' ')
+                append(error.description.orEmpty())
+            }
+        }.lowercase()
+        if (error is AuthRestException) {
+            when (error.errorCode) {
+                AuthErrorCode.OtpExpired -> return "This code has expired. Request a new one."
+                AuthErrorCode.OverRequestRateLimit,
+                AuthErrorCode.OverEmailSendRateLimit -> return "Too many attempts. Please wait and try again."
+                AuthErrorCode.ValidationFailed -> return "Enter a valid email address."
+                AuthErrorCode.UserNotFound -> return "Enter a valid email address."
+                else -> Unit
+            }
+        }
+        return when {
+            isNetwork(error, raw) -> "No internet connection. Check your network and try again."
+            isOtpExpired(raw) -> "This code has expired. Request a new one."
+            isOtpInvalid(raw) || isInvalidCredentials(raw) -> "That code is incorrect. Please try again."
+            isRateLimited(raw) -> "Too many attempts. Please wait and try again."
+            isInvalidEmail(raw) -> "Enter a valid email address."
+            else -> message(error)
+        }
+    }
+
     fun isSessionExpired(error: Throwable): Boolean {
         if (error is AuthRestException) {
             return error.errorCode == AuthErrorCode.SessionExpired ||
@@ -66,6 +98,8 @@ object AuthErrorMapper {
         AuthErrorCode.WeakPassword -> "Choose a stronger password."
         AuthErrorCode.ValidationFailed -> "Enter a valid email address."
         AuthErrorCode.EmailNotConfirmed -> "Confirm your email, then sign in."
+        AuthErrorCode.OtpExpired -> "This code has expired. Request a new one."
+        AuthErrorCode.OtpDisabled -> "Email verification codes are unavailable right now."
         AuthErrorCode.UserBanned -> "This account is suspended and can't use Albums."
         AuthErrorCode.OverRequestRateLimit,
         AuthErrorCode.OverEmailSendRateLimit -> "Too many attempts. Please wait and try again."
@@ -81,6 +115,8 @@ object AuthErrorMapper {
 
     private fun mappedRaw(raw: String): String? = when {
         isUnavailable(raw) -> "Albums is temporarily unavailable. Please try again."
+        isOtpExpired(raw) -> "This code has expired. Request a new one."
+        isOtpInvalid(raw) -> "That code is incorrect. Please try again."
         isInvalidCredentials(raw) -> "Incorrect email or password."
         isEmailTaken(raw) -> "This email is already registered."
         isWeakPassword(raw) -> "Choose a stronger password."
@@ -160,6 +196,23 @@ object AuthErrorMapper {
 
     private fun isEmailNotConfirmed(raw: String): Boolean {
         return raw.contains("email not confirmed") || raw.contains("email_not_confirmed")
+    }
+
+    private fun isOtpExpired(raw: String): Boolean {
+        return raw.contains("otp_expired") ||
+            raw.contains("otp expired") ||
+            raw.contains("token has expired") ||
+            raw.contains("code has expired") ||
+            raw.contains("expired otp")
+    }
+
+    private fun isOtpInvalid(raw: String): Boolean {
+        return raw.contains("invalid otp") ||
+            raw.contains("otp_invalid") ||
+            raw.contains("invalid token") ||
+            raw.contains("token is invalid") ||
+            raw.contains("invalid email otp") ||
+            raw.contains("wrong code")
     }
 
     private fun isUserFacing(text: String): Boolean {

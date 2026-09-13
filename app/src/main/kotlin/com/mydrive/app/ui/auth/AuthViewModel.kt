@@ -5,6 +5,8 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.mydrive.app.data.repository.AuthRepository
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -25,8 +27,33 @@ data class SignUpFormState(
     val confirmPassword: String = "",
     val isSubmitting: Boolean = false,
     val errorMessage: String? = null,
-    val infoMessage: String? = null
+    val infoMessage: String? = null,
+    val pendingVerificationEmail: String? = null
 )
+
+enum class EmailVerificationPhase {
+    Idle,
+    SendingCode,
+    CodeSent,
+    Verifying,
+    Verified,
+    Error,
+    ResendCooldown
+}
+
+data class EmailVerificationState(
+    val email: String = "",
+    val code: String = "",
+    val phase: EmailVerificationPhase = EmailVerificationPhase.Idle,
+    val cooldownSeconds: Int = 0,
+    val errorMessage: String? = null,
+    val infoMessage: String? = null
+) {
+    val isVerifying: Boolean get() = phase == EmailVerificationPhase.Verifying
+    val isSendingCode: Boolean get() = phase == EmailVerificationPhase.SendingCode
+    val canResend: Boolean get() = cooldownSeconds <= 0 && !isSendingCode && !isVerifying
+    val canVerify: Boolean get() = code.length == 6 && !isVerifying && !isSendingCode
+}
 
 data class ForgotPasswordFormState(
     val email: String = "",
@@ -47,6 +74,11 @@ class AuthViewModel(
 
     private val _forgotPassword = MutableStateFlow(ForgotPasswordFormState())
     val forgotPassword: StateFlow<ForgotPasswordFormState> = _forgotPassword.asStateFlow()
+
+    private val _verification = MutableStateFlow(EmailVerificationState())
+    val verification: StateFlow<EmailVerificationState> = _verification.asStateFlow()
+
+    private var cooldownJob: Job? = null
 
     fun setLoginEmail(value: String) {
         _login.update { it.copy(email = value, errorMessage = null) }
@@ -112,19 +144,172 @@ class AuthViewModel(
         viewModelScope.launch {
             _signUp.update { it.copy(isSubmitting = true, errorMessage = null, infoMessage = null) }
             val result = authRepository.signUp(fullName, email, form.password)
-            val confirmationRequired = result.exceptionOrNull() is AuthRepository.EmailConfirmationRequired
             _signUp.update {
                 it.copy(
                     isSubmitting = false,
-                    errorMessage = if (confirmationRequired) null else result.exceptionOrNull()?.message,
-                    infoMessage = if (confirmationRequired) {
-                        result.exceptionOrNull()?.message
-                    } else {
-                        null
-                    },
-                    password = if (result.isSuccess || confirmationRequired) "" else it.password,
-                    confirmPassword = if (result.isSuccess || confirmationRequired) "" else it.confirmPassword
+                    errorMessage = result.exceptionOrNull()?.message,
+                    infoMessage = null,
+                    password = if (result.isSuccess) "" else it.password,
+                    confirmPassword = if (result.isSuccess) "" else it.confirmPassword,
+                    pendingVerificationEmail = if (result.isSuccess) email else null
                 )
+            }
+            if (result.isSuccess) {
+                beginVerification(email, startCooldown = true)
+            }
+        }
+    }
+
+    fun consumeVerificationNavigation() {
+        _signUp.update { it.copy(pendingVerificationEmail = null) }
+    }
+
+    fun ensureVerificationEmail(email: String) {
+        val normalized = email.trim()
+        if (normalized.isBlank()) return
+        if (_verification.value.email.equals(normalized, ignoreCase = true)) return
+        beginVerification(normalized, startCooldown = _verification.value.cooldownSeconds <= 0)
+    }
+
+    fun setVerificationCode(value: String) {
+        val digits = value.filter { it.isDigit() }.take(6)
+        _verification.update {
+            it.copy(
+                code = digits,
+                errorMessage = null,
+                phase = if (it.phase == EmailVerificationPhase.Error || it.phase == EmailVerificationPhase.Verified) {
+                    if (it.cooldownSeconds > 0) EmailVerificationPhase.ResendCooldown else EmailVerificationPhase.CodeSent
+                } else {
+                    it.phase
+                }
+            )
+        }
+    }
+
+    fun verifyEmailCode() {
+        val current = _verification.value
+        if (!current.canVerify) {
+            if (current.code.length != 6) {
+                _verification.update {
+                    it.copy(
+                        phase = EmailVerificationPhase.Error,
+                        errorMessage = "Enter the 6-digit code from your email."
+                    )
+                }
+            }
+            return
+        }
+        viewModelScope.launch {
+            _verification.update {
+                it.copy(
+                    phase = EmailVerificationPhase.Verifying,
+                    errorMessage = null,
+                    infoMessage = null
+                )
+            }
+            val result = authRepository.verifyEmailCode(current.email, current.code)
+            if (result.isSuccess) {
+                _verification.update {
+                    it.copy(
+                        phase = EmailVerificationPhase.Verified,
+                        errorMessage = null,
+                        infoMessage = null,
+                        code = ""
+                    )
+                }
+            } else {
+                _verification.update {
+                    it.copy(
+                        phase = EmailVerificationPhase.Error,
+                        errorMessage = result.exceptionOrNull()?.message ?: "That code is incorrect. Please try again."
+                    )
+                }
+            }
+        }
+    }
+
+    fun resendVerificationCode() {
+        val current = _verification.value
+        if (!current.canResend) return
+        val email = current.email.ifBlank { _signUp.value.email.trim() }
+        if (email.isBlank()) {
+            _verification.update {
+                it.copy(
+                    phase = EmailVerificationPhase.Error,
+                    errorMessage = "Enter a valid email address."
+                )
+            }
+            return
+        }
+        viewModelScope.launch {
+            _verification.update {
+                it.copy(
+                    phase = EmailVerificationPhase.SendingCode,
+                    errorMessage = null,
+                    infoMessage = null
+                )
+            }
+            val result = authRepository.sendVerificationCode(email)
+            if (result.isSuccess) {
+                _verification.update {
+                    it.copy(
+                        email = email,
+                        phase = EmailVerificationPhase.CodeSent,
+                        infoMessage = "A new verification code was sent."
+                    )
+                }
+                startCooldown()
+            } else {
+                _verification.update {
+                    it.copy(
+                        phase = EmailVerificationPhase.Error,
+                        errorMessage = result.exceptionOrNull()?.message
+                    )
+                }
+            }
+        }
+    }
+
+    private fun beginVerification(email: String, startCooldown: Boolean) {
+        _verification.update {
+            it.copy(
+                email = email,
+                code = "",
+                phase = if (startCooldown) EmailVerificationPhase.ResendCooldown else EmailVerificationPhase.CodeSent,
+                errorMessage = null,
+                infoMessage = null
+            )
+        }
+        if (startCooldown) startCooldown()
+    }
+
+    private fun startCooldown() {
+        cooldownJob?.cancel()
+        cooldownJob = viewModelScope.launch {
+            _verification.update {
+                it.copy(
+                    cooldownSeconds = RESEND_COOLDOWN_SECONDS,
+                    phase = if (it.phase == EmailVerificationPhase.Verifying) {
+                        it.phase
+                    } else {
+                        EmailVerificationPhase.ResendCooldown
+                    }
+                )
+            }
+            while (_verification.value.cooldownSeconds > 0) {
+                delay(1_000)
+                val verifying = _verification.value.phase == EmailVerificationPhase.Verifying
+                _verification.update { state ->
+                    val next = (state.cooldownSeconds - 1).coerceAtLeast(0)
+                    state.copy(
+                        cooldownSeconds = next,
+                        phase = when {
+                            verifying -> EmailVerificationPhase.Verifying
+                            next == 0 && state.phase == EmailVerificationPhase.ResendCooldown -> EmailVerificationPhase.CodeSent
+                            else -> state.phase
+                        }
+                    )
+                }
             }
         }
     }
@@ -182,6 +367,8 @@ class AuthViewModel(
     }
 
     companion object {
+        private const val RESEND_COOLDOWN_SECONDS = 60
+
         fun factory(authRepository: AuthRepository): ViewModelProvider.Factory =
             object : ViewModelProvider.Factory {
                 @Suppress("UNCHECKED_CAST")
