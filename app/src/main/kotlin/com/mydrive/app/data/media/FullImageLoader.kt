@@ -17,11 +17,13 @@ object FullImageLoader {
         override fun sizeOf(key: String, value: Bitmap): Int = value.byteCount / 1024
     }
 
-    fun peek(uriString: String, maxDimPx: Int): Bitmap? {
+    // maxDimPx এর ডিফল্ট ভ্যালু 2048 দেওয়া হয়েছে যাতে আর্গুমেন্ট ছাড়া কল করলেও কোনো এরর না আসে
+    fun peek(uriString: String, maxDimPx: Int = 2048): Bitmap? {
         if (uriString.isBlank()) return null
         return cache.get(cacheKey(uriString, maxDimPx))
     }
 
+    // load ফাংশনেও 2048 ডিফল্ট ভ্যালু দেওয়া হলো
     suspend fun load(
         context: Context,
         uriString: String,
