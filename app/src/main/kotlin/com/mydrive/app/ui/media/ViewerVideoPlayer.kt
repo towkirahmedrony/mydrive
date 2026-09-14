@@ -81,7 +81,10 @@ fun ViewerVideoPlayer(
         }
     }
 
-    LaunchedEffect(seekNonce, player) {
+    // Keyed on state.ready as well so requests issued while the surface is
+    // still buffering are applied as soon as playback is prepared, instead of
+    // being silently dropped.
+    LaunchedEffect(seekNonce, player, state.ready) {
         val target = seekRequestMs ?: return@LaunchedEffect
         val view = player ?: return@LaunchedEffect
         if (state.ready) {
@@ -90,7 +93,7 @@ fun ViewerVideoPlayer(
         }
     }
 
-    LaunchedEffect(playNonce, player) {
+    LaunchedEffect(playNonce, player, state.ready) {
         val shouldPlay = playRequest ?: return@LaunchedEffect
         val view = player ?: return@LaunchedEffect
         if (!state.ready) return@LaunchedEffect

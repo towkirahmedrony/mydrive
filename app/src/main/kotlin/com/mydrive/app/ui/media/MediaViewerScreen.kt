@@ -1,6 +1,7 @@
 package com.mydrive.app.ui.media
 
 import android.app.Activity
+import android.content.Context
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
@@ -45,6 +46,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -52,12 +54,14 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.core.view.WindowCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.mydrive.app.data.media.FullImageLoader
 import com.mydrive.app.data.model.MediaItem
 import com.mydrive.app.data.model.MediaType
 import com.mydrive.app.ui.theme.Copper
@@ -66,6 +70,7 @@ import com.mydrive.app.ui.theme.Ivory
 import com.mydrive.app.ui.theme.Spacing
 import com.mydrive.app.ui.theme.StatusIdle
 import com.mydrive.app.ui.util.formatPlaybackMs
+import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -126,6 +131,27 @@ fun MediaViewerScreen(
 
     val current = state.items.getOrNull(pagerState.currentPage) ?: state.items.first()
     val isVideo = current.type == MediaType.VIDEO
+    val context = LocalContext.current
+    val prefetchScope = rememberCoroutineScope()
+
+    // Warm the ORIGINAL full-resolution decodes for the neighboring pages so
+    // swiping lands on an already-sharp image. Requests go to FullImageLoader's
+    // LRU cache, shared with the page composables via viewerFullResTargetPx.
+    LaunchedEffect(current.id, state.items, context) {
+        val index = state.items.indexOfFirst { it.id == current.id }
+        if (index < 0) return@LaunchedEffect
+        val target = viewerFullResTargetPx(context)
+        listOfNotNull(
+            state.items.getOrNull(index + 1),
+            state.items.getOrNull(index - 1)
+        )
+            .filter { it.type == MediaType.PHOTO && it.uri.isNotBlank() }
+            .forEach { neighbor ->
+                prefetchScope.launch {
+                    FullImageLoader.load(context, neighbor.uri, target)
+                }
+            }
+    }
 
     LaunchedEffect(pagerState.currentPage, current.id) {
         zoomed = false
