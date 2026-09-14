@@ -28,7 +28,8 @@ fun MediaImage(
     contentScale: ContentScale = ContentScale.Crop,
     sizePx: Int = 256,
     contentDescription: String? = null,
-    placeholderBitmap: Bitmap? = null
+    placeholderBitmap: Bitmap? = null,
+    onUnavailable: (() -> Unit)? = null
 ) {
     val context = LocalContext.current
     var bitmap by remember(uri, sizePx) {
@@ -40,14 +41,21 @@ fun MediaImage(
     }
 
     LaunchedEffect(uri, sizePx) {
+        if (uri.isBlank()) {
+            bitmap = null
+            onUnavailable?.invoke()
+            return@LaunchedEffect
+        }
         val cached = ThumbnailLoader.peek(uri, sizePx)
         if (cached != null) {
             bitmap = cached
             return@LaunchedEffect
         }
-        val loaded = if (uri.isBlank()) null else ThumbnailLoader.load(context, uri, sizePx)
+        val loaded = ThumbnailLoader.load(context, uri, sizePx)
         if (loaded != null) {
             bitmap = loaded
+        } else if (bitmap == null) {
+            onUnavailable?.invoke()
         }
     }
 

@@ -55,6 +55,10 @@ class AlbumDetailViewModel(
         query.update { value }
     }
 
+    fun visibleItemIds(): List<String> {
+        return uiState.value.groups.flatMap { group -> group.items.map { it.id } }
+    }
+
     companion object {
         fun factory(repository: MediaRepository, albumId: String): ViewModelProvider.Factory =
             object : ViewModelProvider.Factory {

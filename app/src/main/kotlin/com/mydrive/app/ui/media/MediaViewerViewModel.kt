@@ -17,25 +17,31 @@ data class MediaViewerUiState(
 
 class MediaViewerViewModel(
     private val repository: MediaRepository,
-    private val mediaId: String
+    private val mediaId: String,
+    private val albumId: String?
 ) : ViewModel() {
+
+    private val snapshot: List<MediaItem> = repository.mediaForViewer(mediaId, albumId)
 
     val uiState: StateFlow<MediaViewerUiState> = repository.media
         .map { media ->
-            val sorted = media.sortedByDescending { it.capturedAtMillis }
-            val index = sorted.indexOfFirst { it.id == mediaId }.coerceAtLeast(0)
-            MediaViewerUiState(items = sorted, initialIndex = index)
+            val byId = media.associateBy { it.id }
+            val items = snapshot.map { original ->
+                val live = byId[original.id]
+                live ?: original
+            }
+            MediaViewerUiState(
+                items = items,
+                initialIndex = items.indexOfFirst { it.id == mediaId }.coerceAtLeast(0)
+            )
         }
         .stateIn(
             scope = viewModelScope,
             started = SharingStarted.WhileSubscribed(5_000),
-            initialValue = run {
-                val sorted = repository.media.value.sortedByDescending { it.capturedAtMillis }
-                MediaViewerUiState(
-                    items = sorted,
-                    initialIndex = sorted.indexOfFirst { it.id == mediaId }.coerceAtLeast(0)
-                )
-            }
+            initialValue = MediaViewerUiState(
+                items = snapshot,
+                initialIndex = snapshot.indexOfFirst { it.id == mediaId }.coerceAtLeast(0)
+            )
         )
 
     fun toggleFavorite(id: String) {
@@ -43,11 +49,15 @@ class MediaViewerViewModel(
     }
 
     companion object {
-        fun factory(repository: MediaRepository, mediaId: String): ViewModelProvider.Factory =
+        fun factory(
+            repository: MediaRepository,
+            mediaId: String,
+            albumId: String?
+        ): ViewModelProvider.Factory =
             object : ViewModelProvider.Factory {
                 @Suppress("UNCHECKED_CAST")
                 override fun <T : ViewModel> create(modelClass: Class<T>): T {
-                    return MediaViewerViewModel(repository, mediaId) as T
+                    return MediaViewerViewModel(repository, mediaId, albumId) as T
                 }
             }
     }

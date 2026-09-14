@@ -1,8 +1,14 @@
 package com.mydrive.app.ui.media
 
+import android.app.Activity
+import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -10,8 +16,10 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
@@ -20,19 +28,21 @@ import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.Favorite
 import androidx.compose.material.icons.outlined.FavoriteBorder
 import androidx.compose.material.icons.outlined.Info
-import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material.icons.outlined.Pause
 import androidx.compose.material.icons.outlined.PlayArrow
-import androidx.compose.material.icons.outlined.Share
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -42,209 +52,319 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
+import androidx.core.view.WindowCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import android.content.Intent
-import android.net.Uri
-import android.widget.Toast
-import com.mydrive.app.data.model.BackupState
 import com.mydrive.app.data.model.MediaItem
 import com.mydrive.app.data.model.MediaType
-import com.mydrive.app.ui.components.MediaImage
 import com.mydrive.app.ui.theme.Copper
 import com.mydrive.app.ui.theme.Ink
 import com.mydrive.app.ui.theme.Ivory
-import com.mydrive.app.ui.theme.Sage
 import com.mydrive.app.ui.theme.Spacing
-import com.mydrive.app.ui.theme.StatusAttention
 import com.mydrive.app.ui.theme.StatusIdle
-import com.mydrive.app.ui.theme.StatusSyncing
-import com.mydrive.app.ui.util.formatDuration
+import com.mydrive.app.ui.util.formatPlaybackMs
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MediaViewerScreen(
     viewModel: MediaViewerViewModel,
-    onBack: () -> Unit,
-    onOpenDetails: (String) -> Unit
+    onBack: () -> Unit
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
-    val colors = MaterialTheme.colorScheme
+    val darkTheme = isSystemInDarkTheme()
+    val view = LocalView.current
+
+    DisposableEffect(darkTheme) {
+        val window = (view.context as? Activity)?.window
+        val controller = window?.let { WindowCompat.getInsetsController(it, view) }
+        controller?.isAppearanceLightStatusBars = false
+        controller?.isAppearanceLightNavigationBars = false
+        onDispose {
+            controller?.isAppearanceLightStatusBars = !darkTheme
+            controller?.isAppearanceLightNavigationBars = !darkTheme
+        }
+    }
+
+    BackHandler(onBack = onBack)
+
     if (state.items.isEmpty()) {
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .background(colors.background),
-            contentAlignment = Alignment.Center
+                .background(Color.Black)
         ) {
-            Text("Media not found", color = colors.onBackground)
+            MediaUnavailableState()
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .statusBarsPadding()
+                    .padding(Spacing.md)
+            ) {
+                CircleIcon(Icons.AutoMirrored.Outlined.ArrowBack, "Back", onBack)
+            }
         }
         return
     }
 
     val pagerState = rememberPagerState(
-        initialPage = state.initialIndex,
+        initialPage = state.initialIndex.coerceIn(0, state.items.lastIndex),
         pageCount = { state.items.size }
     )
-    LaunchedEffect(state.initialIndex) {
-        if (pagerState.currentPage != state.initialIndex && state.initialIndex in state.items.indices) {
-            pagerState.scrollToPage(state.initialIndex)
-        }
-    }
+    var zoomed by remember { mutableStateOf(false) }
+    var chromeVisible by remember { mutableStateOf(true) }
+    var showDetails by remember { mutableStateOf(false) }
+    var videoState by remember { mutableStateOf(VideoPlaybackState()) }
+    var seekRequestMs by remember { mutableStateOf<Int?>(null) }
+    var seekNonce by remember { mutableIntStateOf(0) }
+    var playRequest by remember { mutableStateOf<Boolean?>(null) }
+    var playNonce by remember { mutableIntStateOf(0) }
+    var scrubbing by remember { mutableStateOf(false) }
+    var scrubPosition by remember { mutableIntStateOf(0) }
 
     val current = state.items.getOrNull(pagerState.currentPage) ?: state.items.first()
-    val context = LocalContext.current
+    val isVideo = current.type == MediaType.VIDEO
+
+    LaunchedEffect(pagerState.currentPage, current.id) {
+        zoomed = false
+        videoState = VideoPlaybackState(
+            durationMs = current.durationMillis?.toInt()?.coerceAtLeast(0) ?: 0
+        )
+        seekRequestMs = null
+        playRequest = null
+        seekNonce = 0
+        playNonce = 0
+        scrubbing = false
+    }
+
+    LaunchedEffect(showDetails) {
+        if (showDetails && isVideo && videoState.playing) {
+            playRequest = false
+            playNonce += 1
+        }
+    }
 
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(Ink)
+            .background(Color.Black)
     ) {
         HorizontalPager(
             state = pagerState,
-            modifier = Modifier.fillMaxSize()
+            modifier = Modifier.fillMaxSize(),
+            userScrollEnabled = !zoomed,
+            beyondViewportPageCount = 1,
+            key = { page -> state.items.getOrNull(page)?.id ?: page }
         ) { page ->
             val item = state.items[page]
-            ViewerPage(item = item, background = colors.background)
-        }
-
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .align(Alignment.TopCenter)
-                .background(
-                    Brush.verticalGradient(listOf(Ink.copy(alpha = 0.72f), Color.Transparent))
-                )
-                .padding(horizontal = Spacing.md, vertical = Spacing.sm)
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                CircleIcon(Icons.AutoMirrored.Outlined.ArrowBack, "Back", onBack)
-                Spacer(Modifier.weight(1f))
-                CircleIcon(Icons.Outlined.Info, "Details") { onOpenDetails(current.id) }
-                Spacer(Modifier.size(Spacing.xs))
-                CircleIcon(Icons.Outlined.MoreVert, "More") {}
-            }
-        }
-
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .align(Alignment.BottomCenter)
-                .background(
-                    Brush.verticalGradient(listOf(Color.Transparent, Ink.copy(alpha = 0.86f)))
-                )
-                .padding(horizontal = Spacing.md, vertical = Spacing.md)
-        ) {
-            if (current.type == MediaType.VIDEO) {
-                VideoControls(item = current)
-            }
-            Text(current.filename, style = MaterialTheme.typography.titleSmall, color = Ivory, maxLines = 1)
-            Text(
-                backupStatusLabel(current),
-                style = MaterialTheme.typography.labelMedium,
-                color = backupStatusColor(current),
-                modifier = Modifier.padding(top = 4.dp)
+            val active = page == pagerState.currentPage
+            ViewerPage(
+                item = item,
+                active = active,
+                onZoomedChange = { isZoomed ->
+                    if (active) zoomed = isZoomed
+                },
+                onTap = { chromeVisible = !chromeVisible },
+                onVideoState = { playback ->
+                    if (active) videoState = playback
+                },
+                seekRequestMs = if (active) seekRequestMs else null,
+                seekNonce = if (active) seekNonce else 0,
+                playRequest = if (active) playRequest else null,
+                playNonce = if (active) playNonce else 0
             )
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(top = Spacing.md),
-                horizontalArrangement = Arrangement.SpaceEvenly,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                ViewerAction(
-                    icon = if (current.isFavorite) Icons.Outlined.Favorite else Icons.Outlined.FavoriteBorder,
-                    label = "Favorite",
-                    tint = if (current.isFavorite) Copper else Ivory
-                ) { viewModel.toggleFavorite(current.id) }
-                ViewerAction(Icons.Outlined.Share, "Share") { shareMedia(context, current) }
-                ViewerAction(Icons.Outlined.Info, "Info") { onOpenDetails(current.id) }
-            }
         }
-    }
-}
 
-@Composable
-private fun ViewerPage(item: MediaItem, background: Color) {
-    val context = LocalContext.current
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(background)
-            .clickable(enabled = item.type == MediaType.VIDEO) {
-                openMediaExternally(context, item)
-            },
-        contentAlignment = Alignment.Center
-    ) {
-        MediaImage(
-            uri = item.uri,
-            seed = item.thumbnailSeed,
-            type = item.type,
-            modifier = Modifier.fillMaxSize(),
-            contentScale = ContentScale.Fit,
-            sizePx = 720,
-            contentDescription = item.filename,
-            placeholderBitmap = com.mydrive.app.data.media.ThumbnailLoader.peek(item.uri, 256)
-        )
-        if (item.type == MediaType.VIDEO) {
+        AnimatedVisibility(
+            visible = chromeVisible,
+            enter = fadeIn(),
+            exit = fadeOut(),
+            modifier = Modifier.align(Alignment.TopCenter)
+        ) {
             Box(
                 modifier = Modifier
-                    .size(72.dp)
-                    .clip(CircleShape)
-                    .background(Ink.copy(alpha = 0.5f)),
-                contentAlignment = Alignment.Center
+                    .fillMaxWidth()
+                    .background(
+                        Brush.verticalGradient(
+                            listOf(Ink.copy(alpha = 0.72f), Color.Transparent)
+                        )
+                    )
+                    .statusBarsPadding()
+                    .padding(horizontal = Spacing.md, vertical = Spacing.sm)
             ) {
-                Icon(
-                    Icons.Outlined.PlayArrow,
-                    contentDescription = "Play",
-                    tint = Ivory,
-                    modifier = Modifier.size(40.dp)
-                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    CircleIcon(Icons.AutoMirrored.Outlined.ArrowBack, "Back", onBack)
+                    Spacer(Modifier.weight(1f))
+                    Text(
+                        text = "${pagerState.currentPage + 1} / ${state.items.size}",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = Ivory,
+                        modifier = Modifier.semantics {
+                            contentDescription = "Item ${pagerState.currentPage + 1} of ${state.items.size}"
+                        }
+                    )
+                    Spacer(Modifier.weight(1f))
+                    Spacer(Modifier.size(40.dp))
+                }
             }
+        }
+
+        AnimatedVisibility(
+            visible = chromeVisible,
+            enter = fadeIn(),
+            exit = fadeOut(),
+            modifier = Modifier.align(Alignment.BottomCenter)
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(
+                        Brush.verticalGradient(
+                            listOf(Color.Transparent, Ink.copy(alpha = 0.86f))
+                        )
+                    )
+                    .navigationBarsPadding()
+                    .padding(horizontal = Spacing.md, vertical = Spacing.md)
+            ) {
+                if (isVideo) {
+                    VideoPlaybackBar(
+                        state = videoState,
+                        scrubbing = scrubbing,
+                        scrubPosition = scrubPosition,
+                        onScrub = { value ->
+                            scrubbing = true
+                            scrubPosition = value
+                        },
+                        onScrubFinished = { value ->
+                            scrubbing = false
+                            seekRequestMs = value
+                            seekNonce += 1
+                        },
+                        onPlayPause = {
+                            playRequest = !(videoState.playing)
+                            playNonce += 1
+                        }
+                    )
+                }
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = if (isVideo) Spacing.sm else 0.dp),
+                    horizontalArrangement = Arrangement.SpaceEvenly,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    ViewerAction(
+                        icon = if (current.isFavorite) Icons.Outlined.Favorite else Icons.Outlined.FavoriteBorder,
+                        label = "Favorite",
+                        tint = if (current.isFavorite) Copper else Ivory,
+                        contentDescription = if (current.isFavorite) "Remove favorite" else "Add favorite"
+                    ) { viewModel.toggleFavorite(current.id) }
+                    ViewerAction(Icons.Outlined.Info, "Details") { showDetails = true }
+                }
+            }
+        }
+    }
+
+    if (showDetails) {
+        val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+        ModalBottomSheet(
+            onDismissRequest = { showDetails = false },
+            sheetState = sheetState,
+            containerColor = MaterialTheme.colorScheme.surface,
+            contentColor = MaterialTheme.colorScheme.onSurface
+        ) {
+            MediaDetailsSheet(item = current)
         }
     }
 }
 
 @Composable
-private fun VideoControls(item: MediaItem) {
-    val context = LocalContext.current
-    var playing by remember(item.id) { mutableStateOf(false) }
-    var progress by remember(item.id) { mutableFloatStateOf(0.22f) }
-    val duration = item.durationSeconds ?: 0
+private fun ViewerPage(
+    item: MediaItem,
+    active: Boolean,
+    onZoomedChange: (Boolean) -> Unit,
+    onTap: () -> Unit,
+    onVideoState: (VideoPlaybackState) -> Unit,
+    seekRequestMs: Int?,
+    seekNonce: Int,
+    playRequest: Boolean?,
+    playNonce: Int
+) {
+    if (item.type == MediaType.VIDEO) {
+        ViewerVideoPlayer(
+            item = item,
+            active = active,
+            onTap = onTap,
+            onState = onVideoState,
+            seekRequestMs = seekRequestMs,
+            seekNonce = seekNonce,
+            playRequest = playRequest,
+            playNonce = playNonce,
+            modifier = Modifier.fillMaxSize()
+        )
+    } else {
+        ZoomablePhoto(
+            item = item,
+            isCurrent = active,
+            onZoomedChange = onZoomedChange,
+            onSingleTap = onTap,
+            onUnavailable = {},
+            modifier = Modifier.fillMaxSize()
+        )
+    }
+}
+
+@Composable
+private fun VideoPlaybackBar(
+    state: VideoPlaybackState,
+    scrubbing: Boolean,
+    scrubPosition: Int,
+    onScrub: (Int) -> Unit,
+    onScrubFinished: (Int) -> Unit,
+    onPlayPause: () -> Unit
+) {
+    val duration = state.durationMs.coerceAtLeast(0)
+    val position = if (scrubbing) scrubPosition else state.positionMs.coerceIn(0, duration.coerceAtLeast(0))
+    val sliderValue = if (duration > 0) position.toFloat() / duration.toFloat() else 0f
 
     Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(bottom = Spacing.sm),
+        modifier = Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Box(
             modifier = Modifier
-                .size(40.dp)
+                .size(44.dp)
                 .clip(CircleShape)
                 .background(Copper)
-                .clickable {
-                    playing = !playing
-                    if (playing) openMediaExternally(context, item)
+                .clickable(onClick = onPlayPause)
+                .semantics {
+                    contentDescription = if (state.playing) "Pause" else "Play"
                 },
             contentAlignment = Alignment.Center
         ) {
             Icon(
-                if (playing) Icons.Outlined.Pause else Icons.Outlined.PlayArrow,
-                contentDescription = if (playing) "Pause" else "Play",
+                if (state.playing) Icons.Outlined.Pause else Icons.Outlined.PlayArrow,
+                contentDescription = if (state.playing) "Pause" else "Play",
                 tint = Ink
             )
         }
         Slider(
-            value = progress,
-            onValueChange = { progress = it },
+            value = sliderValue.coerceIn(0f, 1f),
+            onValueChange = { value ->
+                val next = ((value * duration).toInt()).coerceIn(0, duration.coerceAtLeast(0))
+                onScrub(next)
+            },
+            onValueChangeFinished = { onScrubFinished(position) },
             modifier = Modifier
                 .weight(1f)
-                .padding(horizontal = Spacing.sm),
+                .padding(horizontal = Spacing.sm)
+                .semantics { contentDescription = "Seek" },
+            enabled = duration > 0 && !state.error,
             colors = SliderDefaults.colors(
                 thumbColor = Copper,
                 activeTrackColor = Copper,
@@ -252,7 +372,7 @@ private fun VideoControls(item: MediaItem) {
             )
         )
         Text(
-            text = "${formatDuration((duration * progress).toInt())} / ${formatDuration(duration)}",
+            text = "${formatPlaybackMs(position)} / ${formatPlaybackMs(duration)}",
             style = MaterialTheme.typography.labelSmall,
             color = Ivory
         )
@@ -263,12 +383,24 @@ private fun VideoControls(item: MediaItem) {
 private fun ViewerAction(
     icon: ImageVector,
     label: String,
-    tint: androidx.compose.ui.graphics.Color = Ivory,
+    tint: Color = Ivory,
+    contentDescription: String = label,
     onClick: () -> Unit
 ) {
-    Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.clickable(onClick = onClick)) {
-        Icon(icon, contentDescription = label, tint = tint, modifier = Modifier.size(22.dp))
-        Text(label, style = MaterialTheme.typography.labelSmall, color = StatusIdle, modifier = Modifier.padding(top = 4.dp))
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        modifier = Modifier
+            .clickable(onClick = onClick)
+            .padding(horizontal = Spacing.md, vertical = Spacing.xs)
+            .semantics { this.contentDescription = contentDescription }
+    ) {
+        Icon(icon, contentDescription = contentDescription, tint = tint, modifier = Modifier.size(24.dp))
+        Text(
+            label,
+            style = MaterialTheme.typography.labelSmall,
+            color = StatusIdle,
+            modifier = Modifier.padding(top = 4.dp)
+        )
     }
 }
 
@@ -280,7 +412,7 @@ private fun CircleIcon(
 ) {
     Box(
         modifier = Modifier
-            .size(40.dp)
+            .size(44.dp)
             .clip(CircleShape)
             .background(Ink.copy(alpha = 0.55f))
             .border(1.dp, Ivory.copy(alpha = 0.18f), CircleShape)
@@ -288,55 +420,5 @@ private fun CircleIcon(
         contentAlignment = Alignment.Center
     ) {
         Icon(icon, contentDescription = contentDescription, tint = Ivory, modifier = Modifier.size(20.dp))
-    }
-}
-
-private fun backupStatusLabel(item: MediaItem): String = when (item.backupState) {
-    BackupState.COMPLETED -> "✓ Backed up"
-    BackupState.NOT_STARTED -> "Backup not started"
-    BackupState.UPLOADING -> "Uploading"
-    BackupState.PROCESSING -> "Processing"
-    BackupState.SENDING_TELEGRAM -> "Telegram sync"
-    BackupState.WAITING -> "Waiting"
-    BackupState.FAILED -> "Backup failed"
-}
-
-private fun backupStatusColor(item: MediaItem) = when (item.backupState) {
-    BackupState.COMPLETED -> Sage
-    BackupState.FAILED -> StatusAttention
-    BackupState.WAITING, BackupState.NOT_STARTED -> StatusIdle
-    else -> StatusSyncing
-}
-
-private fun shareMedia(context: android.content.Context, item: MediaItem) {
-    if (item.uri.isBlank()) return
-    try {
-        val intent = Intent(Intent.ACTION_SEND).apply {
-            type = item.mimeType.ifBlank { if (item.type == MediaType.VIDEO) "video/*" else "image/*" }
-            putExtra(Intent.EXTRA_STREAM, Uri.parse(item.uri))
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        }
-        context.startActivity(Intent.createChooser(intent, item.filename))
-    } catch (_: Exception) {
-        Toast.makeText(context, "Unable to share this item", Toast.LENGTH_SHORT).show()
-    }
-}
-
-private fun openMediaExternally(context: android.content.Context, item: MediaItem) {
-    if (item.uri.isBlank()) {
-        Toast.makeText(context, "This video can't be opened", Toast.LENGTH_SHORT).show()
-        return
-    }
-    try {
-        val intent = Intent(Intent.ACTION_VIEW).apply {
-            setDataAndType(
-                Uri.parse(item.uri),
-                item.mimeType.ifBlank { "video/*" }
-            )
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        }
-        context.startActivity(intent)
-    } catch (_: Exception) {
-        Toast.makeText(context, "This video can't be opened", Toast.LENGTH_SHORT).show()
     }
 }

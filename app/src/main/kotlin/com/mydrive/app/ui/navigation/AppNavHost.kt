@@ -50,8 +50,6 @@ import com.mydrive.app.ui.albums.AlbumsScreen
 import com.mydrive.app.ui.albums.AlbumsViewModel
 import com.mydrive.app.ui.gallery.GalleryScreen
 import com.mydrive.app.ui.gallery.GalleryViewModel
-import com.mydrive.app.ui.media.MediaDetailsScreen
-import com.mydrive.app.ui.media.MediaDetailsViewModel
 import com.mydrive.app.ui.media.MediaViewerScreen
 import com.mydrive.app.ui.media.MediaViewerViewModel
 import com.mydrive.app.ui.settings.SettingsScreen
@@ -87,7 +85,8 @@ fun AppNavHost(
     val navController = rememberNavController()
     val navBackStackEntry by navController.currentBackStackEntryAsState()
     val currentDestination = navBackStackEntry?.destination
-    val showBottomBar = currentDestination?.route in bottomDestinations.map { it.route }
+    val isViewer = currentDestination?.route?.startsWith("viewer") == true
+    val showBottomBar = !isViewer && currentDestination?.route in bottomDestinations.map { it.route }
     val colors = MaterialTheme.colorScheme
 
     Scaffold(
@@ -147,7 +146,7 @@ fun AppNavHost(
             startDestination = galleryTabStore.startRoute(),
             modifier = Modifier
                 .fillMaxSize()
-                .padding(innerPadding),
+                .then(if (isViewer) Modifier else Modifier.padding(innerPadding)),
             enterTransition = { fadeIn(tabFade) },
             exitTransition = { fadeOut(tabFade) },
             popEnterTransition = { fadeIn(tabFade) },
@@ -157,7 +156,10 @@ fun AppNavHost(
                 val vm: GalleryViewModel = viewModel(factory = GalleryViewModel.factory(repository))
                 GalleryScreen(
                     viewModel = vm,
-                    onMediaClick = { id -> navController.navigate(AppDestination.MediaViewer.create(id)) }
+                    onMediaClick = { id ->
+                        repository.beginViewerSession(vm.visibleItemIds())
+                        navController.navigate(AppDestination.MediaViewer.create(id))
+                    }
                 )
             }
             composable(AppDestination.Albums.route) {
@@ -171,7 +173,10 @@ fun AppNavHost(
                 val vm: SyncViewModel = viewModel(factory = SyncViewModel.factory(repository))
                 SyncScreen(
                     viewModel = vm,
-                    onMediaClick = { id -> navController.navigate(AppDestination.MediaViewer.create(id)) }
+                    onMediaClick = { id ->
+                        repository.beginViewerSession(vm.visibleItemIds())
+                        navController.navigate(AppDestination.MediaViewer.create(id))
+                    }
                 )
             }
             composable(AppDestination.Settings.route) {
@@ -185,27 +190,26 @@ fun AppNavHost(
             }
             composable(
                 route = AppDestination.MediaViewer.route,
-                arguments = listOf(navArgument("mediaId") { type = NavType.StringType })
+                arguments = listOf(
+                    navArgument("mediaId") { type = NavType.StringType },
+                    navArgument("albumId") {
+                        type = NavType.StringType
+                        nullable = true
+                        defaultValue = null
+                    }
+                )
             ) { entry ->
-                val mediaId = entry.arguments?.getString("mediaId").orEmpty()
+                val mediaId = android.net.Uri.decode(entry.arguments?.getString("mediaId").orEmpty())
+                val albumId = entry.arguments?.getString("albumId")
+                    ?.let { android.net.Uri.decode(it) }
+                    ?.takeIf { it.isNotBlank() }
                 val vm: MediaViewerViewModel = viewModel(
-                    factory = MediaViewerViewModel.factory(repository, mediaId)
+                    factory = MediaViewerViewModel.factory(repository, mediaId, albumId)
                 )
                 MediaViewerScreen(
                     viewModel = vm,
-                    onBack = { navController.popBackStack() },
-                    onOpenDetails = { id -> navController.navigate(AppDestination.MediaDetails.create(id)) }
+                    onBack = { navController.popBackStack() }
                 )
-            }
-            composable(
-                route = AppDestination.MediaDetails.route,
-                arguments = listOf(navArgument("mediaId") { type = NavType.StringType })
-            ) { entry ->
-                val mediaId = entry.arguments?.getString("mediaId").orEmpty()
-                val vm: MediaDetailsViewModel = viewModel(
-                    factory = MediaDetailsViewModel.factory(repository, mediaId)
-                )
-                MediaDetailsScreen(viewModel = vm, onBack = { navController.popBackStack() })
             }
             composable(
                 route = AppDestination.AlbumDetail.route,
@@ -218,7 +222,10 @@ fun AppNavHost(
                 AlbumDetailScreen(
                     viewModel = vm,
                     onBack = { navController.popBackStack() },
-                    onMediaClick = { id -> navController.navigate(AppDestination.MediaViewer.create(id)) }
+                    onMediaClick = { id ->
+                        repository.beginViewerSession(vm.visibleItemIds())
+                        navController.navigate(AppDestination.MediaViewer.create(id, albumId))
+                    }
                 )
             }
             composable(AppDestination.TelegramSettings.route) {

@@ -70,6 +70,13 @@ class SyncViewModel(
         repository.retryFailed()
     }
 
+    fun visibleItemIds(): List<String> {
+        val state = uiState.value
+        return (state.inProgress + state.waiting + state.completed + state.failed)
+            .map { it.id }
+            .distinct()
+    }
+
     companion object {
         fun factory(repository: MediaRepository): ViewModelProvider.Factory =
             object : ViewModelProvider.Factory {

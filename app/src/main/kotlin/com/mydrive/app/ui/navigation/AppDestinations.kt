@@ -8,11 +8,15 @@ sealed class AppDestination(val route: String) {
     data object Favorites : AppDestination("favorites")
     data object Sync : AppDestination("sync")
     data object Settings : AppDestination("settings")
-    data object MediaViewer : AppDestination("viewer/{mediaId}") {
-        fun create(mediaId: String) = "viewer/$mediaId"
-    }
-    data object MediaDetails : AppDestination("media/{mediaId}") {
-        fun create(mediaId: String) = "media/$mediaId"
+    data object MediaViewer : AppDestination("viewer/{mediaId}?albumId={albumId}") {
+        fun create(mediaId: String, albumId: String? = null): String {
+            val encodedId = Uri.encode(mediaId)
+            return if (albumId.isNullOrBlank()) {
+                "viewer/$encodedId"
+            } else {
+                "viewer/$encodedId?albumId=${Uri.encode(albumId)}"
+            }
+        }
     }
     data object AlbumDetail : AppDestination("album/{albumId}") {
         fun create(albumId: String) = "album/${Uri.encode(albumId)}"

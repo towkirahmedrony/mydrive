@@ -119,6 +119,10 @@ class GalleryViewModel(
         }
     }
 
+    fun visibleItemIds(): List<String> {
+        return uiState.value.groups.flatMap { group -> group.items.map { it.id } }
+    }
+
     companion object {
         fun factory(repository: MediaRepository): ViewModelProvider.Factory =
             object : ViewModelProvider.Factory {

@@ -74,11 +74,37 @@ class MediaRepository(
         permissions.markAsked()
     }
 
+    @Volatile
+    private var viewerSessionIds: List<String>? = null
+
     fun mediaById(id: String): MediaItem? = _media.value.firstOrNull { it.id == id }
 
     fun albumById(id: String): AlbumFolder? = _albums.value.firstOrNull { it.id == id }
 
     fun albums(): List<AlbumFolder> = _albums.value
+
+    fun beginViewerSession(ids: List<String>) {
+        viewerSessionIds = ids
+    }
+
+    fun viewerSessionIds(): List<String>? = viewerSessionIds
+
+    fun mediaForViewer(startId: String, albumId: String?): List<MediaItem> {
+        val current = _media.value
+        val byId = current.associateBy { it.id }
+        val session = viewerSessionIds
+            ?.mapNotNull { byId[it] }
+            ?.takeIf { items -> items.any { it.id == startId } }
+        if (session != null) return session
+        val scoped = if (!albumId.isNullOrBlank()) {
+            current.filter { it.albumId == albumId }
+        } else {
+            current
+        }.sortedByDescending { it.capturedAtMillis }
+        if (scoped.any { it.id == startId }) return scoped
+        val start = byId[startId]
+        return if (start != null) listOf(start) else scoped
+    }
 
     fun toggleFavorite(id: String) {
         favorites.toggle(id)
