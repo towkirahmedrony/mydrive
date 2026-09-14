@@ -48,14 +48,8 @@ private const val MIN_SCALE = 1f
 private const val MAX_SCALE = 5f
 private const val DOUBLE_TAP_SCALE = 2.5f
 private const val ZOOM_LOCK_THRESHOLD = 1.04f
-
-/** How far (seconds) a pan fling projects forward when the gesture ends. */
 private const val FLING_LOOKAHEAD_SECONDS = 0.15f
 
-/**
- * Screen-derived full-resolution decode target shared by the visible viewer
- * page and the neighbor prefetcher, so both request the same cached bitmap.
- */
 internal fun viewerFullResTargetPx(context: Context): Int {
     val configuration = context.resources.configuration
     val density = context.resources.displayMetrics.density
@@ -66,22 +60,6 @@ internal fun viewerFullResTargetPx(context: Context): Int {
     return (longestDp * density * 1.3f).toInt().coerceIn(1080, 2880)
 }
 
-/**
- * Full-screen photo page.
- *
- * Image pipeline (deliberately different from the grid):
- *  1. A small placeholder is shown immediately (grid/system thumbnail) so the
- *     page never flashes empty.
- *  2. The ORIGINAL MediaStore bytes are decoded at screen resolution with zoom
- *     headroom via [FullImageLoader] and swap in when ready. Only the currently
- *     visible page requests the full-resolution decode; neighbors are warmed
- *     by the viewer screen so paging stays instant.
- *
- * Gestures: pinch-to-zoom around the pinch centroid, double-tap to zoom to the
- * tapped point, pan while zoomed (with fling), clamped so the image cannot be
- * dragged out of bounds. While zoomed, horizontal drags are consumed so the
- * pager cannot change pages mid-pan.
- */
 @Composable
 fun ZoomablePhoto(
     item: MediaItem,
@@ -126,8 +104,6 @@ fun ZoomablePhoto(
         )
     }
 
-    // Tier 1: fast placeholder (small system thumbnail). Never shown longer
-    // than it takes the full decode to finish.
     LaunchedEffect(item.id, placeholderPx) {
         if (item.uri.isBlank()) {
             loadFailed = true
@@ -142,8 +118,6 @@ fun ZoomablePhoto(
         }
     }
 
-    // Tier 2: high-resolution decode of the ORIGINAL image. This is what makes
-    // the viewer sharp; the grid keeps its own small thumbnails.
     LaunchedEffect(item.id, fullTargetPx) {
         if (item.uri.isBlank() || fullTargetPx <= 0) return@LaunchedEffect
         val full = FullImageLoader.load(context, item.uri, fullTargetPx)
@@ -176,9 +150,11 @@ fun ZoomablePhoto(
                                 val dest = if (size.width > 0 && size.height > 0) {
                                     val ratio = target / scale.value.coerceAtLeast(0.01f)
                                     val focus = Offset(tap.x, tap.y)
+                                    val center = Offset(size.width / 2f, size.height / 2f)
+                                    // Math corrected for center scaling origin
                                     val next = Offset(
-                                        focus.x - (focus.x - offsetX.value) * ratio,
-                                        focus.y - (focus.y - offsetY.value) * ratio
+                                        offsetX.value * ratio + (focus.x - center.x) * (1f - ratio),
+                                        offsetY.value * ratio + (focus.y - center.y) * (1f - ratio)
                                     )
                                     clampedOffset(next.x, next.y, target, size)
                                 } else {
@@ -213,10 +189,11 @@ fun ZoomablePhoto(
                             scope.launch {
                                 scale.snapTo(newScale)
                                 val next = if (ratio != 1f) {
-                                    // Keep the content under the pinch centroid.
+                                    // Math corrected for center scaling origin
+                                    val center = Offset(containerSize.width / 2f, containerSize.height / 2f)
                                     Offset(
-                                        centroid.x - (centroid.x - offsetX.value) * ratio,
-                                        centroid.y - (centroid.y - offsetY.value) * ratio
+                                        offsetX.value * ratio + (centroid.x - center.x) * (1f - ratio),
+                                        offsetY.value * ratio + (centroid.y - center.y) * (1f - ratio)
                                     )
                                 } else {
                                     Offset(
@@ -257,7 +234,6 @@ fun ZoomablePhoto(
                     } while (event.changes.fastAny { it.pressed })
 
                     if (zooming && scale.value <= ZOOM_LOCK_THRESHOLD) {
-                        // A pinch that ends at ~1x snaps back to identity.
                         val animSpec = spring<Float>(
                             dampingRatio = 0.85f,
                             stiffness = Spring.StiffnessMediumLow
@@ -266,7 +242,6 @@ fun ZoomablePhoto(
                         scope.launch { offsetX.animateTo(0f, animSpec) }
                         scope.launch { offsetY.animateTo(0f, animSpec) }
                     } else if (panning && scale.value > MIN_SCALE) {
-                        // Fling: project the pan velocity forward, clamped.
                         val velocity = tracker.calculateVelocity()
                         val lookahead = FLING_LOOKAHEAD_SECONDS
                         val target = clampedOffset(
