@@ -13,3 +13,9 @@ build
 # Local machine SDK path
 local.properties
 secrets.properties
+
+# Signing keystore and credentials - never commit these
+app/keystore/
+keystore.properties
+*.jks
+*.keystore
