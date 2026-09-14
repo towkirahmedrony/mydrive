@@ -90,13 +90,13 @@ object FullImageLoader {
     private fun decodeWithImageDecoder(context: Context, uri: Uri, want: Int): Bitmap? {
         return try {
             val source = ImageDecoder.createSource(context.contentResolver, uri)
-            ImageDecoder.decodeBitmap(source) { info, _ ->
+            ImageDecoder.decodeBitmap(source) { info, decoder, _ ->
                 val srcMax = maxOf(info.size.width, info.size.height).coerceAtLeast(1)
                 val sample = sampleFor(srcMax, want)
                 if (sample > 1) {
-                    setTargetSampleSize(sample)
+                    decoder.setTargetSampleSize(sample)
                 }
-                allocator = ImageDecoder.ALLOCATOR_HARDWARE
+                decoder.allocator = ImageDecoder.ALLOCATOR_HARDWARE
             }
         } catch (_: OutOfMemoryError) {
             decodeWithImageDecoderSoftware(context, uri, minOf(want, 2880))
@@ -108,11 +108,11 @@ object FullImageLoader {
     private fun decodeWithImageDecoderSoftware(context: Context, uri: Uri, want: Int): Bitmap? {
         return try {
             val source = ImageDecoder.createSource(context.contentResolver, uri)
-            ImageDecoder.decodeBitmap(source) { info, _ ->
+            ImageDecoder.decodeBitmap(source) { info, decoder, _ ->
                 val srcMax = maxOf(info.size.width, info.size.height).coerceAtLeast(1)
                 val sample = sampleFor(srcMax, want)
                 if (sample > 1) {
-                    setTargetSampleSize(sample)
+                    decoder.setTargetSampleSize(sample)
                 }
             }
         } catch (_: Exception) {
