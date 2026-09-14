@@ -19,12 +19,14 @@ import com.mydrive.app.data.model.SyncSummary
 import com.mydrive.app.data.model.TelegramSettings
 import com.mydrive.app.data.model.TodayStats
 import com.mydrive.app.data.model.UserProfile
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 
 class MediaRepository(
     private val mediaStore: MediaStoreDataSource,
@@ -189,6 +191,15 @@ class MediaRepository(
                 val favoriteIds = favorites.ids.value
                 val items = mediaStore.loadMedia().map { item ->
                     item.copy(isFavorite = item.id in favoriteIds)
+                }
+                // Prune references to media that no longer exists. This is only
+                // safe after a complete load with full media access, otherwise a
+                // partial query could wrongly discard still-valid favorites.
+                if (permissions.access() == MediaAccess.GRANTED) {
+                    val presentIds = withContext(Dispatchers.Default) {
+                        items.mapTo(HashSet(items.size)) { it.id }
+                    }
+                    favorites.retainAll(presentIds)
                 }
                 _media.value = items
                 _albums.value = buildAlbums(items)

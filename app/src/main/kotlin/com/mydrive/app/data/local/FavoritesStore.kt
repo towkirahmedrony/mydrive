@@ -24,6 +24,25 @@ class FavoritesStore(context: Context) {
         }
     }
 
+    /**
+     * Drops any stored favorite whose media id is not present in [presentIds].
+     * Used to clean up references to media that has been deleted from the device.
+     * Only call this once a complete MediaStore load has succeeded, so that
+     * temporarily unavailable media is never discarded.
+     */
+    fun retainAll(presentIds: Set<String>) {
+        _ids.update { current ->
+            val stale = current - presentIds
+            if (stale.isEmpty()) {
+                current
+            } else {
+                val next = current - stale
+                prefs.edit().putStringSet(KEY_IDS, HashSet(next)).apply()
+                next
+            }
+        }
+    }
+
     private fun readIds(): Set<String> {
         return prefs.getStringSet(KEY_IDS, emptySet()).orEmpty().toSet()
     }
