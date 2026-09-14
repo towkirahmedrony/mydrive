@@ -4,6 +4,7 @@ import android.app.Application
 import com.mydrive.app.data.local.DeviceIdStore
 import com.mydrive.app.data.local.FavoritesStore
 import com.mydrive.app.data.local.GalleryTabStore
+import com.mydrive.app.data.local.SyncStateStore
 import com.mydrive.app.data.media.MediaPermissions
 import com.mydrive.app.data.media.MediaStoreDataSource
 import com.mydrive.app.data.remote.NetworkMonitor
@@ -24,7 +25,8 @@ class MyDriveApp : Application() {
         MediaRepository(
             mediaStore = MediaStoreDataSource(this),
             favorites = FavoritesStore(this),
-            permissions = MediaPermissions(this)
+            permissions = MediaPermissions(this),
+            syncState = SyncStateStore(this)
         )
     }
 

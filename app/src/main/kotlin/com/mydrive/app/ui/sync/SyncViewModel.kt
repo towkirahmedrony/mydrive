@@ -10,18 +10,26 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.launch
 
 data class SyncUiState(
     val headline: String,
     val inProgress: List<MediaItem>,
     val waiting: List<MediaItem>,
     val completed: List<MediaItem>,
-    val failed: List<MediaItem>
+    val failed: List<MediaItem>,
+    val notStartedCount: Int,
+    val completedCount: Int,
+    val totalMediaCount: Int
 )
 
 class SyncViewModel(
     private val repository: MediaRepository
 ) : ViewModel() {
+
+    init {
+        viewModelScope.launch { repository.refresh(force = false) }
+    }
 
     val uiState: StateFlow<SyncUiState> = repository.media
         .map { media ->
@@ -33,13 +41,14 @@ class SyncViewModel(
             val waiting = media.filter { it.backupState == BackupState.WAITING }
             val failed = media.filter { it.backupState == BackupState.FAILED }
             val completed = media.filter { it.backupState == BackupState.COMPLETED }.take(8)
+            val completedCount = media.count { it.backupState == BackupState.COMPLETED }
+            val notStartedCount = media.count { it.backupState == BackupState.NOT_STARTED }
             val active = inProgress.size + waiting.size
-            val notStarted = media.any { it.backupState == BackupState.NOT_STARTED }
             val headline = when {
                 failed.isNotEmpty() && active > 0 -> "$active items syncing · ${failed.size} failed"
                 failed.isNotEmpty() -> "${failed.size} ${if (failed.size == 1) "item" else "items"} failed"
                 active > 0 -> "$active ${if (active == 1) "item" else "items"} syncing"
-                notStarted -> "Backup not started"
+                notStartedCount > 0 -> "$notStartedCount ${if (notStartedCount == 1) "item is" else "items are"} ready to back up"
                 else -> "Everything is up to date"
             }
             SyncUiState(
@@ -47,7 +56,10 @@ class SyncViewModel(
                 inProgress = inProgress,
                 waiting = waiting,
                 completed = completed,
-                failed = failed
+                failed = failed,
+                notStartedCount = notStartedCount,
+                completedCount = completedCount,
+                totalMediaCount = media.size
             )
         }
         .stateIn(
@@ -58,9 +70,19 @@ class SyncViewModel(
                 inProgress = emptyList(),
                 waiting = emptyList(),
                 completed = emptyList(),
-                failed = emptyList()
+                failed = emptyList(),
+                notStartedCount = 0,
+                completedCount = 0,
+                totalMediaCount = 0
             )
         )
+
+    fun startSync() {
+        viewModelScope.launch {
+            repository.refresh(force = false)
+            repository.queueForBackup()
+        }
+    }
 
     fun retry(id: String) {
         repository.retryBackup(id)

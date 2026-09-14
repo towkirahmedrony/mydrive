@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -19,6 +20,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Refresh
+import androidx.compose.material.icons.outlined.CloudUpload
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -60,7 +62,8 @@ fun SyncScreen(
     val empty = state.inProgress.isEmpty() &&
         state.waiting.isEmpty() &&
         state.failed.isEmpty() &&
-        state.completed.isEmpty()
+        state.completed.isEmpty() &&
+        state.notStartedCount == 0
 
     LazyColumn(
         modifier = Modifier
@@ -78,6 +81,27 @@ fun SyncScreen(
             Text("Sync", style = MaterialTheme.typography.headlineMedium, color = colors.onBackground)
             Spacer(Modifier.height(Spacing.xxs))
             Text(state.headline, style = MaterialTheme.typography.bodyMedium, color = headlineColor)
+        }
+
+        if (state.totalMediaCount > 0) {
+            item {
+                Row(horizontalArrangement = Arrangement.spacedBy(Spacing.xs)) {
+                    SummaryValue("Backed up", state.completedCount)
+                    SummaryValue("Waiting", state.waiting.size + state.notStartedCount)
+                    SummaryValue("Failed", state.failed.size)
+                }
+            }
+        }
+
+        if (state.notStartedCount > 0) {
+            item {
+                PrimaryActionButton(
+                    text = "Start backup",
+                    onClick = viewModel::startSync,
+                    icon = CloudUpload,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
         }
 
         if (state.inProgress.isNotEmpty()) {
@@ -108,8 +132,7 @@ fun SyncScreen(
             items(state.completed, key = { it.id }) { item ->
                 SyncRow(
                     item = item,
-                    onClick = { onMediaClick(item.id) },
-                    extra = if (item.telegramCompleted) "Telegram sync completed" else null
+                    onClick = { onMediaClick(item.id) }
                 )
             }
         }
@@ -137,11 +160,29 @@ fun SyncScreen(
         if (empty) {
             item {
                 EmptyState(
-                    title = "Everything is up to date",
-                    message = "New backups will appear here as they start."
+                    title = if (state.totalMediaCount == 0) "No media found" else "Everything is up to date",
+                    message = if (state.totalMediaCount == 0) {
+                        "Photos and videos will appear here when available."
+                    } else {
+                        "New backups will appear here as they start."
+                    }
                 )
             }
         }
+    }
+}
+
+@Composable
+private fun RowScope.SummaryValue(label: String, value: Int) {
+    Column(
+        modifier = Modifier
+            .weight(1f)
+            .clip(RoundedCornerShape(Radius.md))
+            .background(MaterialTheme.colorScheme.surfaceVariant)
+            .padding(Spacing.sm)
+    ) {
+        Text(value.toString(), style = MaterialTheme.typography.titleLarge, color = MaterialTheme.colorScheme.onBackground)
+        Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
 
