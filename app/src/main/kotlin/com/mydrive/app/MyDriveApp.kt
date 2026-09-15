@@ -13,7 +13,6 @@ import com.mydrive.app.data.remote.NetworkMonitor
 import com.mydrive.app.data.remote.SupabaseConfig
 import com.mydrive.app.data.remote.SupabaseModule
 import com.mydrive.app.data.remote.TelegramApiVerifier
-import com.mydrive.app.data.remote.TelegramUploadService
 import com.mydrive.app.data.repository.AuthRepository
 import com.mydrive.app.data.repository.BackupRepository
 import com.mydrive.app.data.repository.MediaRepository
@@ -58,8 +57,6 @@ class MyDriveApp : Application() {
     val backupRepository: BackupRepository by lazy {
         BackupRepository(
             syncRepository = syncRepository,
-            settingsStore = telegramSettingsStore,
-            uploadService = TelegramUploadService(this, networkMonitor),
             cloudinaryService = cloudinaryService,
             network = networkMonitor,
             mediaLookup = mediaRepository::mediaById,

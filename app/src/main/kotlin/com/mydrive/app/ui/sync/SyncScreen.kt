@@ -374,7 +374,7 @@ private fun SyncActions(
                 color = StatusAttention
             )
         }
-        if (state.hasEligible && state.telegramReady) {
+        if (state.hasEligible) {
             PrimaryActionButton(
                 text = "Start Backup",
                 onClick = viewModel::startBackup,

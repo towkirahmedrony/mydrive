@@ -1,42 +1,32 @@
 package com.mydrive.app.data.repository
 
-import com.mydrive.app.data.local.TelegramSettingsStore
 import com.mydrive.app.data.model.BackupState
 import com.mydrive.app.data.model.MediaItem
 import com.mydrive.app.data.model.MediaType
-import com.mydrive.app.data.model.TelegramConnectionState
 import com.mydrive.app.data.remote.CloudinaryUploadService
 import com.mydrive.app.data.remote.NetworkMonitor
-import com.mydrive.app.data.remote.TelegramPhoto
-import com.mydrive.app.data.remote.TelegramUploadResult
-import com.mydrive.app.data.remote.TelegramUploadService
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
+/**
+ * Backup gate — now checks only network + Cloudinary readiness.
+ * Telegram configuration is preserved for future server-side replication
+ * but does NOT gate the primary Cloudinary backup path.
+ */
 sealed interface BackupGate {
     data object Ready : BackupGate
-    data object Disabled : BackupGate
-    data object NotConfigured : BackupGate
-    data object NotVerified : BackupGate
     data object Offline : BackupGate
-    data object NotAuthenticated : BackupGate
 
     fun message(): String = when (this) {
         Ready -> ""
-        Disabled -> "Telegram backup is turned off. Enable it in Telegram Backup settings."
-        NotConfigured -> "Telegram isn't configured yet. Add your bot token and chat ID."
-        NotVerified -> "Telegram setup isn't verified. Test the connection before backing up."
         Offline -> "You're offline. Connect to the internet to back up photos."
-        NotAuthenticated -> "You're not signed in. Please sign in to back up photos."
     }
 }
 
 class BackupRepository(
     private val syncRepository: SyncRepository,
-    private val settingsStore: TelegramSettingsStore,
-    private val uploadService: TelegramUploadService,
     private val cloudinaryService: CloudinaryUploadService,
     private val network: NetworkMonitor,
     private val mediaLookup: (String) -> MediaItem?,
@@ -46,22 +36,12 @@ class BackupRepository(
     private val workerMutex = Mutex()
 
     /**
-     * Check if the backup pipeline is ready.
-     * Cloudinary requires network + auth; Telegram is optional.
+     * Check if the Cloudinary backup pipeline is ready.
+     * Only requires network connectivity.
+     * Auth check happens at upload-auth request time.
      */
     fun gate(): BackupGate {
         if (!network.isOnline()) return BackupGate.Offline
-
-        // Cloudinary requires authenticated session — check via service
-        // (actual auth check happens when requesting upload auth)
-
-        val settings = settingsStore.settings.value
-        if (!settings.enabled) return BackupGate.Disabled
-        if (!settings.tokenConfigured || settings.chatId.isBlank()) return BackupGate.NotConfigured
-        if (settings.connectionState != TelegramConnectionState.CONNECTED) {
-            return BackupGate.NotVerified
-        }
-        if (settingsStore.credentials() == null) return BackupGate.NotConfigured
         return BackupGate.Ready
     }
 
@@ -273,41 +253,8 @@ class BackupRepository(
             }
         }
 
-        // ── Step 2: Optionally upload to Telegram ───────────────────────
-        // Telegram is a secondary destination; only if configured
-        val telegramSettings = settingsStore.settings.value
-        if (telegramSettings.enabled &&
-            telegramSettings.connected &&
-            settingsStore.credentials() != null
-        ) {
-            syncRepository.updateState(id = id, state = BackupState.SENDING_TELEGRAM)
-
-            val credentials = settingsStore.credentials()!!
-            val telegramResult = uploadService.uploadPhoto(
-                credentials = credentials,
-                photo = TelegramPhoto(
-                    uri = item.uri,
-                    filename = item.filename,
-                    mimeType = item.mimeType,
-                    declaredSizeBytes = item.fileSizeBytes,
-                    width = item.width,
-                    height = item.height
-                )
-            )
-
-            when (telegramResult) {
-                is TelegramUploadResult.Success -> {
-                    syncRepository.updateState(id = id, state = BackupState.COMPLETED)
-                }
-                else -> {
-                    // Cloudinary succeeded, so mark completed even if Telegram fails
-                    // Telegram failure is non-blocking for the primary backup
-                    syncRepository.updateState(id = id, state = BackupState.COMPLETED)
-                }
-            }
-        } else {
-            // No Telegram configured — Cloudinary is the primary destination
-            syncRepository.updateState(id = id, state = BackupState.COMPLETED)
-        }
+        // Cloudinary upload is the primary (and only) destination.
+        // Telegram replication will happen server-side after Supabase media finalization.
+        syncRepository.updateState(id = id, state = BackupState.COMPLETED)
     }
 }
