@@ -8,6 +8,7 @@ import com.mydrive.app.data.local.SyncStateStore
 import com.mydrive.app.data.local.TelegramSettingsStore
 import com.mydrive.app.data.media.MediaPermissions
 import com.mydrive.app.data.media.MediaStoreDataSource
+import com.mydrive.app.data.remote.CloudinaryUploadService
 import com.mydrive.app.data.remote.NetworkMonitor
 import com.mydrive.app.data.remote.SupabaseConfig
 import com.mydrive.app.data.remote.SupabaseModule
@@ -46,11 +47,20 @@ class MyDriveApp : Application() {
         )
     }
 
+    private val supabaseClient by lazy {
+        if (SupabaseConfig.isConfigured) SupabaseModule.create() else null
+    }
+
+    private val cloudinaryService by lazy {
+        CloudinaryUploadService(this, supabaseClient, networkMonitor)
+    }
+
     val backupRepository: BackupRepository by lazy {
         BackupRepository(
             syncRepository = syncRepository,
             settingsStore = telegramSettingsStore,
             uploadService = TelegramUploadService(this, networkMonitor),
+            cloudinaryService = cloudinaryService,
             network = networkMonitor,
             mediaLookup = mediaRepository::mediaById,
             scope = applicationScope
@@ -59,7 +69,7 @@ class MyDriveApp : Application() {
 
     val authRepository: AuthRepository by lazy {
         AuthRepository(
-            client = if (SupabaseConfig.isConfigured) SupabaseModule.create() else null,
+            client = supabaseClient,
             deviceIdStore = DeviceIdStore(this),
             network = networkMonitor,
             scope = applicationScope

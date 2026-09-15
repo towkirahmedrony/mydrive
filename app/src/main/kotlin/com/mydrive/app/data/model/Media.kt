@@ -15,14 +15,19 @@ enum class BackupState {
     WAITING,
     PAUSED,
     FAILED,
-    CANCELLED
+    CANCELLED,
+    REQUESTING_CLOUDINARY_AUTH,
+    UPLOADING_TO_CLOUDINARY,
+    CLOUDINARY_COMPLETED
 }
 
 val BackupState.isActive: Boolean
     get() = this == BackupState.PREPARING ||
         this == BackupState.UPLOADING ||
         this == BackupState.PROCESSING ||
-        this == BackupState.SENDING_TELEGRAM
+        this == BackupState.SENDING_TELEGRAM ||
+        this == BackupState.REQUESTING_CLOUDINARY_AUTH ||
+        this == BackupState.UPLOADING_TO_CLOUDINARY
 
 val BackupState.isQueued: Boolean
     get() = this == BackupState.WAITING || this == BackupState.PAUSED
@@ -62,7 +67,9 @@ data class MediaItem(
     val width: Int = 0,
     val height: Int = 0,
     val durationMillis: Long? = null,
-    val relativePath: String? = null
+    val relativePath: String? = null,
+    val cloudinaryAssetId: String? = null,
+    val cloudinaryPublicId: String? = null
 )
 
 data class AlbumFolder(

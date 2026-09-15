@@ -10,7 +10,9 @@ data class SyncRecord(
     val state: String = BackupState.NOT_STARTED.name,
     val errorMessage: String? = null,
     val queuedAtMillis: Long = 0L,
-    val updatedAtMillis: Long = 0L
+    val updatedAtMillis: Long = 0L,
+    val cloudinaryAssetId: String? = null,
+    val cloudinaryPublicId: String? = null
 )
 
 class SyncStateStore(context: Context) {

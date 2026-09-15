@@ -61,6 +61,19 @@ class SyncRepository(private val store: SyncStateStore) {
     }
 
     @Synchronized
+    fun updateCloudinaryResult(id: String, assetId: String, publicId: String) {
+        val record = _records.value[id] ?: return
+        if (record.cloudinaryAssetId == assetId && record.cloudinaryPublicId == publicId) return
+        val next = HashMap(_records.value)
+        next[id] = record.copy(
+            cloudinaryAssetId = assetId,
+            cloudinaryPublicId = publicId,
+            updatedAtMillis = System.currentTimeMillis()
+        )
+        commit(next)
+    }
+
+    @Synchronized
     fun retryAll(ids: Collection<String>) {
         if (ids.isEmpty()) return
         val now = System.currentTimeMillis()
@@ -123,6 +136,8 @@ fun BackupState.resumeLocally(): BackupState = when (this) {
     BackupState.UPLOADING,
     BackupState.PROCESSING,
     BackupState.SENDING_TELEGRAM,
-    BackupState.PAUSED -> BackupState.WAITING
+    BackupState.PAUSED,
+    BackupState.REQUESTING_CLOUDINARY_AUTH,
+    BackupState.UPLOADING_TO_CLOUDINARY -> BackupState.WAITING
     else -> this
 }

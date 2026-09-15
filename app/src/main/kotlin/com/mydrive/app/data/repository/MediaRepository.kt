@@ -324,7 +324,9 @@ class MediaRepository(
                 backupState = BackupState.NOT_STARTED,
                 backupCompleted = false,
                 progress = 0f,
-                errorMessage = null
+                errorMessage = null,
+                cloudinaryAssetId = null,
+                cloudinaryPublicId = null
             )
         }
         val state = record.state.toBackupState().resumeLocally()
@@ -332,7 +334,9 @@ class MediaRepository(
             backupState = state,
             backupCompleted = state == BackupState.COMPLETED,
             progress = 0f,
-            errorMessage = record.errorMessage
+            errorMessage = record.errorMessage,
+            cloudinaryAssetId = record.cloudinaryAssetId,
+            cloudinaryPublicId = record.cloudinaryPublicId
         )
     }
 
