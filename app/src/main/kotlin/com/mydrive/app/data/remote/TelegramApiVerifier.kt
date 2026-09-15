@@ -11,7 +11,6 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.booleanOrNull
-import kotlinx.serialization.json.content
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -98,11 +97,17 @@ class TelegramApiVerifier(
         if (tokenRequest && (statusCode == HTTP_UNAUTHORIZED || errorCode == HTTP_UNAUTHORIZED)) {
             return TelegramVerificationResult.InvalidBotToken
         }
+        if (errorCode == HTTP_TOO_MANY_REQUESTS) {
+            return TelegramVerificationResult.TelegramUnavailable
+        }
         if (!tokenRequest && errorCode == HTTP_BAD_REQUEST && "chat not found" in normalizedDescription) {
             return TelegramVerificationResult.ChatNotFound
         }
         if (!tokenRequest && errorCode == HTTP_FORBIDDEN) {
             return TelegramVerificationResult.BotCannotAccessChat
+        }
+        if (!tokenRequest && errorCode != null && errorCode in 400..499) {
+            return TelegramVerificationResult.ChatNotFound
         }
         if (statusCode == 0 || statusCode >= HTTP_SERVER_ERROR) {
             return TelegramVerificationResult.TelegramUnavailable
@@ -139,6 +144,7 @@ class TelegramApiVerifier(
         private const val HTTP_BAD_REQUEST = 400
         private const val HTTP_UNAUTHORIZED = 401
         private const val HTTP_FORBIDDEN = 403
+        private const val HTTP_TOO_MANY_REQUESTS = 429
         private const val HTTP_SERVER_ERROR = 500
         private val BOT_TOKEN_FORMAT = Regex("\\d{6,20}:[A-Za-z0-9_-]{20,}")
         private val json = Json { ignoreUnknownKeys = true }
