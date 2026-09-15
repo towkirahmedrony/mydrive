@@ -5,6 +5,7 @@ import com.mydrive.app.data.local.DeviceIdStore
 import com.mydrive.app.data.local.FavoritesStore
 import com.mydrive.app.data.local.GalleryTabStore
 import com.mydrive.app.data.local.SyncStateStore
+import com.mydrive.app.data.local.TelegramSettingsStore
 import com.mydrive.app.data.media.MediaPermissions
 import com.mydrive.app.data.media.MediaStoreDataSource
 import com.mydrive.app.data.remote.NetworkMonitor
@@ -32,6 +33,7 @@ class MyDriveApp : Application() {
             favorites = FavoritesStore(this),
             permissions = MediaPermissions(this),
             syncRepository = syncRepository,
+            telegramSettingsStore = TelegramSettingsStore(this),
             scope = applicationScope
         )
     }

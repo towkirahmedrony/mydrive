@@ -3,6 +3,7 @@ package com.mydrive.app.ui.settings
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import com.mydrive.app.data.local.TelegramSettingsStore
 import com.mydrive.app.data.auth.AuthState
 import com.mydrive.app.data.model.BackupPreferences
 import com.mydrive.app.data.model.TelegramSettings
@@ -10,9 +11,12 @@ import com.mydrive.app.data.model.UserProfile
 import com.mydrive.app.data.repository.AuthRepository
 import com.mydrive.app.data.repository.MediaRepository
 import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
 data class SettingsUiState(
@@ -21,10 +25,28 @@ data class SettingsUiState(
     val telegram: TelegramSettings
 )
 
+data class TelegramSetupFormState(
+    val botToken: String = "",
+    val chatId: String = "",
+    val enabled: Boolean = false,
+    val tokenVisible: Boolean = false
+) {
+    val chatIdValid: Boolean
+        get() = chatId.isBlank() || TelegramSettingsStore.isValidChatId(chatId)
+}
+
 class SettingsViewModel(
     private val repository: MediaRepository,
     private val authRepository: AuthRepository
 ) : ViewModel() {
+
+    private val _telegramForm = MutableStateFlow(
+        TelegramSetupFormState(
+            chatId = repository.telegram.value.chatId,
+            enabled = repository.telegram.value.enabled
+        )
+    )
+    val telegramForm: StateFlow<TelegramSetupFormState> = _telegramForm.asStateFlow()
 
     val uiState: StateFlow<SettingsUiState> = combine(
         authRepository.state,
@@ -54,6 +76,19 @@ class SettingsViewModel(
         )
     )
 
+    init {
+        viewModelScope.launch {
+            repository.telegram.collect { settings ->
+                _telegramForm.update {
+                    it.copy(
+                        chatId = settings.chatId,
+                        enabled = settings.enabled
+                    )
+                }
+            }
+        }
+    }
+
     fun setAutomaticBackup(value: Boolean) {
         repository.updatePreferences { it.copy(automaticBackup = value) }
     }
@@ -74,12 +109,47 @@ class SettingsViewModel(
         repository.updatePreferences { it.copy(uploadWhileCharging = value) }
     }
 
-    fun connectTelegram() {
-        repository.connectTelegram()
+    fun updateTelegramBotToken(value: String) {
+        _telegramForm.update { it.copy(botToken = value) }
     }
 
-    fun disconnectTelegram() {
-        repository.disconnectTelegram()
+    fun updateTelegramChatId(value: String) {
+        _telegramForm.update { it.copy(chatId = value) }
+    }
+
+    fun setTelegramTokenVisible(value: Boolean) {
+        _telegramForm.update { it.copy(tokenVisible = value) }
+    }
+
+    fun setTelegramBackupEnabled(value: Boolean) {
+        val form = _telegramForm.value.copy(enabled = value)
+        _telegramForm.value = form
+        repository.saveTelegramConfiguration(
+            botToken = form.botToken.takeIf { it.isNotBlank() },
+            chatId = form.chatId,
+            enabled = value
+        )
+        _telegramForm.update { it.copy(botToken = "", tokenVisible = false) }
+    }
+
+    fun saveTelegramConfiguration() {
+        val form = _telegramForm.value
+        repository.saveTelegramConfiguration(
+            botToken = form.botToken.takeIf { it.isNotBlank() },
+            chatId = form.chatId,
+            enabled = form.enabled
+        )
+        _telegramForm.update { it.copy(botToken = "", tokenVisible = false) }
+    }
+
+    fun testTelegramConnection() {
+        saveTelegramConfiguration()
+        repository.testTelegramConnection()
+    }
+
+    fun clearTelegramConfiguration() {
+        repository.clearTelegramConfiguration()
+        _telegramForm.value = TelegramSetupFormState()
     }
 
     fun logout() {

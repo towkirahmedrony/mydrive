@@ -33,6 +33,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.mydrive.app.data.model.TelegramConnectionState
 import com.mydrive.app.ui.components.SettingsGroup
 import com.mydrive.app.ui.components.SettingsRow
 import com.mydrive.app.ui.components.SettingsSwitchRow
@@ -146,11 +147,11 @@ fun SettingsScreen(
             SettingsGroup(title = "Telegram") {
                 SettingsRow(
                     title = "Telegram Backup",
-                    subtitle = if (state.telegram.connected) "Connected" else "Not connected",
+                    subtitle = state.telegram.settingsLabel(),
                     onClick = onOpenTelegram,
                     trailing = {
                         Text(
-                            if (state.telegram.connected) "Connected" else "Not connected",
+                            state.telegram.settingsLabel(),
                             style = MaterialTheme.typography.labelMedium,
                             color = if (state.telegram.connected) Sage else colors.onSurfaceVariant
                         )
@@ -200,4 +201,12 @@ fun SettingsScreen(
             }
         }
     }
+}
+
+private fun com.mydrive.app.data.model.TelegramSettings.settingsLabel(): String = when {
+    !enabled -> "Off"
+    connectionState == TelegramConnectionState.CONNECTED -> "Connected"
+    connectionState == TelegramConnectionState.INCOMPLETE -> "Incomplete"
+    tokenConfigured && chatId.isNotBlank() -> "Configured"
+    else -> "Not configured"
 }

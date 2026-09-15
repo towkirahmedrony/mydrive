@@ -35,8 +35,8 @@ object MockMediaData {
     )
 
     val telegramSettings = TelegramSettings(
-        connected = false,
-        botTokenMasked = "",
+        enabled = false,
+        tokenConfigured = false,
         chatId = ""
     )
 

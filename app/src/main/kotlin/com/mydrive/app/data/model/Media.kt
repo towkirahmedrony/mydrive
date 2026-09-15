@@ -110,11 +110,25 @@ data class BackupPreferences(
     val uploadWhileCharging: Boolean
 )
 
+enum class TelegramConnectionState {
+    NOT_CONFIGURED,
+    INCOMPLETE,
+    NOT_TESTED,
+    TESTING,
+    CONNECTED,
+    FAILED
+}
+
 data class TelegramSettings(
-    val connected: Boolean,
-    val botTokenMasked: String,
-    val chatId: String
-)
+    val enabled: Boolean = false,
+    val tokenConfigured: Boolean = false,
+    val botTokenMasked: String = "",
+    val chatId: String = "",
+    val connectionState: TelegramConnectionState = TelegramConnectionState.NOT_CONFIGURED
+) {
+    val connected: Boolean
+        get() = connectionState == TelegramConnectionState.CONNECTED
+}
 
 data class StorageSummary(
     val totalMedia: Int,

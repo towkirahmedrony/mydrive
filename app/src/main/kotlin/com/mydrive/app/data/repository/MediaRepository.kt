@@ -2,6 +2,7 @@ package com.mydrive.app.data.repository
 
 import com.mydrive.app.data.local.FavoritesStore
 import com.mydrive.app.data.local.SyncRecord
+import com.mydrive.app.data.local.TelegramSettingsStore
 import com.mydrive.app.data.media.MediaAccess
 import com.mydrive.app.data.media.MediaPermissions
 import com.mydrive.app.data.media.MediaQueryException
@@ -37,6 +38,7 @@ class MediaRepository(
     private val favorites: FavoritesStore,
     private val permissions: MediaPermissions,
     private val syncRepository: SyncRepository,
+    private val telegramSettingsStore: TelegramSettingsStore,
     scope: CoroutineScope
 ) {
 
@@ -64,8 +66,7 @@ class MediaRepository(
     private val _preferences = MutableStateFlow(MockMediaData.backupPreferences)
     val preferences: StateFlow<BackupPreferences> = _preferences.asStateFlow()
 
-    private val _telegram = MutableStateFlow(MockMediaData.telegramSettings)
-    val telegram: StateFlow<TelegramSettings> = _telegram.asStateFlow()
+    val telegram: StateFlow<TelegramSettings> = telegramSettingsStore.settings
 
     private val _storage = MutableStateFlow(MockMediaData.storageSummary)
     val storage: StateFlow<StorageSummary> = _storage.asStateFlow()
@@ -142,14 +143,25 @@ class MediaRepository(
         _preferences.update(transform)
     }
 
-    fun disconnectTelegram() {
-        _telegram.update { it.copy(connected = false, chatId = "") }
+    fun saveTelegramConfiguration(botToken: String?, chatId: String, enabled: Boolean) {
+        telegramSettingsStore.saveConfiguration(
+            botToken = botToken,
+            chatId = chatId,
+            enabled = enabled
+        )
     }
 
-    fun connectTelegram() {
-        _telegram.update {
-            it.copy(connected = true, chatId = if (it.chatId.isBlank()) "48291037" else it.chatId)
-        }
+    fun setTelegramBackupEnabled(enabled: Boolean) {
+        telegramSettingsStore.setEnabled(enabled)
+    }
+
+    fun testTelegramConnection(): Boolean {
+        telegramSettingsStore.markConnectionFailed()
+        return false
+    }
+
+    fun clearTelegramConfiguration() {
+        telegramSettingsStore.clear()
     }
 
     suspend fun refresh(force: Boolean = false) {
