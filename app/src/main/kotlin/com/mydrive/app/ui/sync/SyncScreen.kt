@@ -584,6 +584,9 @@ private fun stateLabel(state: BackupState): String = when (state) {
     BackupState.PAUSED -> "Paused"
     BackupState.FAILED -> "Failed"
     BackupState.CANCELLED -> "Cancelled"
+    BackupState.REQUESTING_CLOUDINARY_AUTH -> "Requesting auth"
+    BackupState.UPLOADING_TO_CLOUDINARY -> "Cloudinary upload"
+    BackupState.CLOUDINARY_COMPLETED -> "Cloudinary done"
 }
 
 private fun safeError(job: SyncJob): String {

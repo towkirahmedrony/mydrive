@@ -239,6 +239,14 @@ class BackupRepository(
                 )
                 return
             }
+            is com.mydrive.app.data.remote.CloudinaryUploadResult.UnsupportedMedia -> {
+                syncRepository.updateState(
+                    id = id,
+                    state = BackupState.FAILED,
+                    errorMessage = "This file type is not supported for Cloudinary upload."
+                )
+                return
+            }
             is com.mydrive.app.data.remote.CloudinaryUploadResult.MediaUnavailable -> {
                 syncRepository.updateState(
                     id = id,
