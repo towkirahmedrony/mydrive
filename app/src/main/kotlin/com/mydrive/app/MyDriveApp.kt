@@ -11,6 +11,7 @@ import com.mydrive.app.data.media.MediaStoreDataSource
 import com.mydrive.app.data.remote.NetworkMonitor
 import com.mydrive.app.data.remote.SupabaseConfig
 import com.mydrive.app.data.remote.SupabaseModule
+import com.mydrive.app.data.remote.TelegramApiVerifier
 import com.mydrive.app.data.repository.AuthRepository
 import com.mydrive.app.data.repository.MediaRepository
 import com.mydrive.app.data.repository.SyncRepository
@@ -28,12 +29,14 @@ class MyDriveApp : Application() {
     }
 
     val mediaRepository: MediaRepository by lazy {
+        val network = NetworkMonitor(this)
         MediaRepository(
             mediaStore = MediaStoreDataSource(this),
             favorites = FavoritesStore(this),
             permissions = MediaPermissions(this),
             syncRepository = syncRepository,
             telegramSettingsStore = TelegramSettingsStore(this),
+            telegramApiVerifier = TelegramApiVerifier(network),
             scope = applicationScope
         )
     }

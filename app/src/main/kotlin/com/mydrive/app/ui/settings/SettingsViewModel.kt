@@ -6,10 +6,12 @@ import androidx.lifecycle.viewModelScope
 import com.mydrive.app.data.local.TelegramSettingsStore
 import com.mydrive.app.data.auth.AuthState
 import com.mydrive.app.data.model.BackupPreferences
+import com.mydrive.app.data.model.TelegramConnectionState
 import com.mydrive.app.data.model.TelegramSettings
 import com.mydrive.app.data.model.UserProfile
 import com.mydrive.app.data.repository.AuthRepository
 import com.mydrive.app.data.repository.MediaRepository
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -39,6 +41,7 @@ class SettingsViewModel(
     private val repository: MediaRepository,
     private val authRepository: AuthRepository
 ) : ViewModel() {
+    private var telegramTestJob: Job? = null
 
     private val _telegramForm = MutableStateFlow(
         TelegramSetupFormState(
@@ -123,13 +126,18 @@ class SettingsViewModel(
 
     fun setTelegramBackupEnabled(value: Boolean) {
         val form = _telegramForm.value.copy(enabled = value)
+        val currentTelegram = uiState.value.telegram
         _telegramForm.value = form
-        repository.saveTelegramConfiguration(
-            botToken = form.botToken.takeIf { it.isNotBlank() },
-            chatId = form.chatId,
-            enabled = value
-        )
-        _telegramForm.update { it.copy(botToken = "", tokenVisible = false) }
+        if (form.botToken.isBlank() && form.chatId.trim() == currentTelegram.chatId) {
+            repository.setTelegramBackupEnabled(value)
+        } else {
+            repository.saveTelegramConfiguration(
+                botToken = form.botToken.takeIf { it.isNotBlank() },
+                chatId = form.chatId,
+                enabled = value
+            )
+            _telegramForm.update { it.copy(botToken = "", tokenVisible = false) }
+        }
     }
 
     fun saveTelegramConfiguration() {
@@ -143,8 +151,30 @@ class SettingsViewModel(
     }
 
     fun testTelegramConnection() {
+        if (telegramTestJob?.isActive == true) return
+
+        val form = _telegramForm.value
+        val currentTelegram = uiState.value.telegram
+        val hasToken = form.botToken.isNotBlank() || currentTelegram.tokenConfigured
+        val chatId = form.chatId.trim()
+        if (!hasToken) {
+            repository.markTelegramConnectionFailed("Bot Token is required.")
+            return
+        }
+        if (chatId.isBlank()) {
+            repository.markTelegramConnectionFailed("Chat ID is required.")
+            return
+        }
+        if (!TelegramSettingsStore.isValidChatId(chatId)) {
+            repository.markTelegramConnectionFailed("Invalid Chat ID.")
+            return
+        }
+        if (currentTelegram.connectionState == TelegramConnectionState.TESTING) return
+
         saveTelegramConfiguration()
-        repository.testTelegramConnection()
+        telegramTestJob = viewModelScope.launch {
+            repository.testTelegramConnection()
+        }
     }
 
     fun clearTelegramConfiguration() {

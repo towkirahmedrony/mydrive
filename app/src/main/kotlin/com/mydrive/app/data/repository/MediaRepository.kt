@@ -19,9 +19,13 @@ import com.mydrive.app.data.model.MediaType
 import com.mydrive.app.data.model.StorageSummary
 import com.mydrive.app.data.model.SyncSummary
 import com.mydrive.app.data.model.TelegramSettings
+import com.mydrive.app.data.model.TelegramConnectionState
 import com.mydrive.app.data.model.TodayStats
 import com.mydrive.app.data.model.UserProfile
 import com.mydrive.app.data.model.isActive
+import com.mydrive.app.data.remote.TelegramApiVerifier
+import com.mydrive.app.data.remote.TelegramVerificationResult
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -39,6 +43,7 @@ class MediaRepository(
     private val permissions: MediaPermissions,
     private val syncRepository: SyncRepository,
     private val telegramSettingsStore: TelegramSettingsStore,
+    private val telegramApiVerifier: TelegramApiVerifier,
     scope: CoroutineScope
 ) {
 
@@ -155,9 +160,36 @@ class MediaRepository(
         telegramSettingsStore.setEnabled(enabled)
     }
 
-    fun testTelegramConnection(): Boolean {
-        telegramSettingsStore.markConnectionFailed()
-        return false
+    suspend fun testTelegramConnection(): TelegramVerificationResult {
+        if (telegram.value.connectionState == TelegramConnectionState.TESTING) {
+            return TelegramVerificationResult.TelegramUnavailable
+        }
+        val credentials = telegramSettingsStore.credentials()
+        if (credentials == null) {
+            telegramSettingsStore.markConnectionFailed("Configuration incomplete.")
+            return TelegramVerificationResult.InvalidChatId
+        }
+
+        val result = try {
+            telegramSettingsStore.markTesting()
+            telegramApiVerifier.verify(
+                botToken = credentials.botToken,
+                chatId = credentials.chatId
+            )
+        } catch (cancellation: CancellationException) {
+            telegramSettingsStore.markNotTested()
+            throw cancellation
+        }
+
+        when (result) {
+            TelegramVerificationResult.Success -> telegramSettingsStore.markConnected()
+            else -> telegramSettingsStore.markConnectionFailed(result.message())
+        }
+        return result
+    }
+
+    fun markTelegramConnectionFailed(message: String) {
+        telegramSettingsStore.markConnectionFailed(message)
     }
 
     fun clearTelegramConfiguration() {

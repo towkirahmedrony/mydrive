@@ -124,7 +124,8 @@ data class TelegramSettings(
     val tokenConfigured: Boolean = false,
     val botTokenMasked: String = "",
     val chatId: String = "",
-    val connectionState: TelegramConnectionState = TelegramConnectionState.NOT_CONFIGURED
+    val connectionState: TelegramConnectionState = TelegramConnectionState.NOT_CONFIGURED,
+    val connectionMessage: String = ""
 ) {
     val connected: Boolean
         get() = connectionState == TelegramConnectionState.CONNECTED

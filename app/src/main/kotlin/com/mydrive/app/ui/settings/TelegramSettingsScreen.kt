@@ -24,6 +24,7 @@ import androidx.compose.material.icons.outlined.Save
 import androidx.compose.material.icons.outlined.Visibility
 import androidx.compose.material.icons.outlined.VisibilityOff
 import androidx.compose.material.icons.outlined.WifiProtectedSetup
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -62,10 +63,9 @@ fun TelegramSettingsScreen(
     val form by viewModel.telegramForm.collectAsStateWithLifecycle()
     val telegram = state.telegram
     val colors = MaterialTheme.colorScheme
+    val isTesting = telegram.connectionState == TelegramConnectionState.TESTING
     val hasTokenForSave = form.botToken.isNotBlank() || telegram.tokenConfigured
-    val chatIdValid = form.chatId.isBlank() || form.chatId.trim().let {
-        it.matches(Regex("-?\\d{5,20}")) || it.matches(Regex("@[A-Za-z0-9_]{5,32}"))
-    }
+    val chatIdValid = form.chatIdValid
     val configurationComplete = hasTokenForSave && chatIdValid && form.chatId.isNotBlank()
 
     Column(
@@ -130,6 +130,22 @@ fun TelegramSettingsScreen(
                     label = telegram.connectionState.label()
                 )
             }
+            Spacer(Modifier.height(Spacing.sm))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                if (isTesting) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(16.dp),
+                        strokeWidth = 2.dp,
+                        color = Copper
+                    )
+                    Spacer(Modifier.size(Spacing.xs))
+                }
+                Text(
+                    text = telegram.connectionMessage,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = colors.onSurfaceVariant
+                )
+            }
         }
 
         Spacer(Modifier.height(Spacing.lg))
@@ -167,17 +183,17 @@ fun TelegramSettingsScreen(
             text = "Save Configuration",
             onClick = viewModel::saveTelegramConfiguration,
             icon = Icons.Outlined.Save,
-            enabled = chatIdValid && hasTokenForSave,
+            enabled = chatIdValid && hasTokenForSave && !isTesting,
             modifier = Modifier.fillMaxWidth()
         )
 
         Spacer(Modifier.height(Spacing.sm))
 
         PrimaryActionButton(
-            text = "Test Connection",
+            text = if (isTesting) "Testing..." else "Test Connection",
             onClick = viewModel::testTelegramConnection,
             icon = Icons.Outlined.WifiProtectedSetup,
-            enabled = configurationComplete,
+            enabled = configurationComplete && !isTesting,
             modifier = Modifier.fillMaxWidth()
         )
 
@@ -190,14 +206,7 @@ fun TelegramSettingsScreen(
             modifier = Modifier.fillMaxWidth()
         )
 
-        if (telegram.connectionState == TelegramConnectionState.FAILED) {
-            Spacer(Modifier.height(Spacing.md))
-            Text(
-                "Connection test failed. A real Telegram verification endpoint is not available in this build.",
-                style = MaterialTheme.typography.bodySmall,
-                color = colors.onSurfaceVariant
-            )
-        }
+        Spacer(Modifier.height(Spacing.md))
     }
 }
 

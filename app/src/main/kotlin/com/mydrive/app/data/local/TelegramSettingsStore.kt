@@ -16,6 +16,11 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 
+data class TelegramCredentials(
+    val botToken: String,
+    val chatId: String
+)
+
 class TelegramSettingsStore(context: Context) {
 
     private val prefs = context.applicationContext
@@ -41,6 +46,7 @@ class TelegramSettingsStore(context: Context) {
             putBoolean(KEY_ENABLED, enabled)
             putString(KEY_CHAT_ID, encrypt(cleanedChatId))
             putString(KEY_CONNECTION_STATE, state.name)
+            putString(KEY_CONNECTION_MESSAGE, "")
             if (cleanedToken.isNotBlank()) {
                 putString(KEY_BOT_TOKEN, encrypt(cleanedToken))
             }
@@ -60,16 +66,59 @@ class TelegramSettingsStore(context: Context) {
         prefs.edit()
             .putBoolean(KEY_ENABLED, enabled)
             .putString(KEY_CONNECTION_STATE, state.name)
+            .putString(KEY_CONNECTION_MESSAGE, "")
             .apply()
         _settings.value = readSettings()
     }
 
     @Synchronized
-    fun markConnectionFailed() {
+    fun markTesting() {
+        _settings.update {
+            it.copy(
+                connectionState = TelegramConnectionState.TESTING,
+                connectionMessage = "Testing connection..."
+            )
+        }
+    }
+
+    @Synchronized
+    fun markConnected() {
+        prefs.edit()
+            .putString(KEY_CONNECTION_STATE, TelegramConnectionState.CONNECTED.name)
+            .putString(KEY_CONNECTION_MESSAGE, "Telegram connection verified.")
+            .apply()
+        _settings.value = readSettings()
+    }
+
+    @Synchronized
+    fun markNotTested() {
+        prefs.edit()
+            .putString(KEY_CONNECTION_STATE, TelegramConnectionState.NOT_TESTED.name)
+            .putString(KEY_CONNECTION_MESSAGE, "Configuration has not been verified.")
+            .apply()
+        _settings.value = readSettings()
+    }
+
+    @Synchronized
+    fun markConnectionFailed(message: String) {
         prefs.edit()
             .putString(KEY_CONNECTION_STATE, TelegramConnectionState.FAILED.name)
+            .putString(KEY_CONNECTION_MESSAGE, message)
             .apply()
-        _settings.update { it.copy(connectionState = TelegramConnectionState.FAILED) }
+        _settings.update {
+            it.copy(
+                connectionState = TelegramConnectionState.FAILED,
+                connectionMessage = message
+            )
+        }
+    }
+
+    @Synchronized
+    fun credentials(): TelegramCredentials? {
+        val token = decrypt(prefs.getString(KEY_BOT_TOKEN, null)).orEmpty()
+        val chatId = decrypt(prefs.getString(KEY_CHAT_ID, null)).orEmpty()
+        if (token.isBlank() || chatId.isBlank()) return null
+        return TelegramCredentials(botToken = token, chatId = chatId)
     }
 
     @Synchronized
@@ -84,6 +133,7 @@ class TelegramSettingsStore(context: Context) {
         val enabled = prefs.getBoolean(KEY_ENABLED, false)
         val storedState = prefs.getString(KEY_CONNECTION_STATE, null)
             ?.let { runCatching { TelegramConnectionState.valueOf(it) }.getOrNull() }
+        val storedMessage = prefs.getString(KEY_CONNECTION_MESSAGE, "").orEmpty()
         val state = stateFor(
             enabled = enabled,
             tokenConfigured = tokenConfigured,
@@ -95,7 +145,8 @@ class TelegramSettingsStore(context: Context) {
             tokenConfigured = tokenConfigured,
             botTokenMasked = if (tokenConfigured) MASKED_TOKEN else "",
             chatId = chatId,
-            connectionState = state
+            connectionState = state,
+            connectionMessage = messageFor(state, storedMessage)
         )
     }
 
@@ -114,6 +165,18 @@ class TelegramSettingsStore(context: Context) {
             TelegramConnectionState.TESTING -> TelegramConnectionState.NOT_TESTED
             TelegramConnectionState.NOT_CONFIGURED,
             TelegramConnectionState.INCOMPLETE -> TelegramConnectionState.NOT_TESTED
+        }
+    }
+
+    private fun messageFor(state: TelegramConnectionState, storedMessage: String): String {
+        if (storedMessage.isNotBlank()) return storedMessage
+        return when (state) {
+            TelegramConnectionState.NOT_CONFIGURED -> "Add a bot token and chat ID."
+            TelegramConnectionState.INCOMPLETE -> "Configuration is incomplete."
+            TelegramConnectionState.NOT_TESTED -> "Configuration has not been verified."
+            TelegramConnectionState.TESTING -> "Testing connection..."
+            TelegramConnectionState.CONNECTED -> "Telegram connection verified."
+            TelegramConnectionState.FAILED -> "Connection failed."
         }
     }
 
@@ -166,6 +229,7 @@ class TelegramSettingsStore(context: Context) {
         private const val KEY_BOT_TOKEN = "bot_token"
         private const val KEY_CHAT_ID = "chat_id"
         private const val KEY_CONNECTION_STATE = "connection_state"
+        private const val KEY_CONNECTION_MESSAGE = "connection_message"
         private const val ANDROID_KEYSTORE = "AndroidKeyStore"
         private const val TRANSFORMATION = "AES/GCM/NoPadding"
         private const val GCM_TAG_BITS = 128
