@@ -12,6 +12,7 @@ import com.mydrive.app.data.remote.SupabaseConfig
 import com.mydrive.app.data.remote.SupabaseModule
 import com.mydrive.app.data.repository.AuthRepository
 import com.mydrive.app.data.repository.MediaRepository
+import com.mydrive.app.data.repository.SyncRepository
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -21,12 +22,17 @@ class MyDriveApp : Application() {
 
     val galleryTabStore: GalleryTabStore by lazy { GalleryTabStore(this) }
 
+    val syncRepository: SyncRepository by lazy {
+        SyncRepository(SyncStateStore(this))
+    }
+
     val mediaRepository: MediaRepository by lazy {
         MediaRepository(
             mediaStore = MediaStoreDataSource(this),
             favorites = FavoritesStore(this),
             permissions = MediaPermissions(this),
-            syncState = SyncStateStore(this)
+            syncRepository = syncRepository,
+            scope = applicationScope
         )
     }
 

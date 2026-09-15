@@ -2,7 +2,6 @@ package com.mydrive.app.data.repository
 
 import com.mydrive.app.data.local.FavoritesStore
 import com.mydrive.app.data.local.SyncRecord
-import com.mydrive.app.data.local.SyncStateStore
 import com.mydrive.app.data.media.MediaAccess
 import com.mydrive.app.data.media.MediaPermissions
 import com.mydrive.app.data.media.MediaQueryException
@@ -21,11 +20,14 @@ import com.mydrive.app.data.model.SyncSummary
 import com.mydrive.app.data.model.TelegramSettings
 import com.mydrive.app.data.model.TodayStats
 import com.mydrive.app.data.model.UserProfile
+import com.mydrive.app.data.model.isActive
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -34,7 +36,8 @@ class MediaRepository(
     private val mediaStore: MediaStoreDataSource,
     private val favorites: FavoritesStore,
     private val permissions: MediaPermissions,
-    private val syncState: SyncStateStore
+    private val syncRepository: SyncRepository,
+    scope: CoroutineScope
 ) {
 
     private val _media = MutableStateFlow<List<MediaItem>>(emptyList())
@@ -72,6 +75,20 @@ class MediaRepository(
 
     private val refreshMutex = Mutex()
     private var lastRefreshAt = 0L
+
+    init {
+        scope.launch {
+            syncRepository.records.collect { records ->
+                val current = _media.value
+                if (current.isEmpty()) return@collect
+                val updated = current.map { it.withRecord(records[it.id]) }
+                if (updated != current) {
+                    _media.value = updated
+                    updateStorage(updated)
+                }
+            }
+        }
+    }
 
     fun requiredPermissions(): Array<String> = permissions.requiredPermissions()
 
@@ -155,24 +172,24 @@ class MediaRepository(
             try {
                 val favoriteIds = favorites.ids.value
                 val items = mediaStore.loadMedia().map { item ->
-                    item.copy(
-                        isFavorite = item.id in favoriteIds,
-                        backupState = BackupState.NOT_STARTED
-                    )
+                    item.copy(isFavorite = item.id in favoriteIds)
                 }
                 // Prune references to media that no longer exists. This is only
                 // safe after a complete load with full media access, otherwise a
-                // partial query could wrongly discard still-valid favorites.
+                // partial query could wrongly discard still-valid references.
                 if (permissions.access() == MediaAccess.GRANTED) {
                     val presentIds = withContext(Dispatchers.Default) {
                         items.mapTo(HashSet(items.size)) { it.id }
                     }
                     favorites.retainAll(presentIds)
+                    syncRepository.reconcile(presentIds)
                 }
-                _media.value = applySyncState(items)
-                _albums.value = buildAlbums(items)
+                val records = syncRepository.records.value
+                val merged = items.map { it.withRecord(records[it.id]) }
+                _media.value = merged
+                _albums.value = buildAlbums(merged)
                 lastRefreshAt = now
-                updateStorage(items)
+                updateStorage(merged)
                 _loadState.update { it.copy(isLoading = false, errorMessage = null) }
             } catch (_: MediaQueryException) {
                 val keepExisting = _media.value.isNotEmpty()
@@ -252,100 +269,31 @@ class MediaRepository(
 
     private fun refreshSyncSummary() {
         val items = _media.value
-        val inProgress = items.count {
-            it.backupState == BackupState.UPLOADING ||
-                it.backupState == BackupState.PROCESSING ||
-                it.backupState == BackupState.SENDING_TELEGRAM
-        }
+        val inProgress = items.count { it.backupState.isActive }
         _syncSummary.update { it.copy(inProgressCount = inProgress, completedToday = 0) }
     }
 
-    private fun applySyncState(items: List<MediaItem>): List<MediaItem> {
-        val stored = syncState.read()
-        val presentIds = items.mapTo(HashSet(items.size)) { it.id }
-        val activeRecords = stored.filterKeys { it in presentIds }
-        if (activeRecords != stored) syncState.write(activeRecords)
-        return items.map { item ->
-            val record = activeRecords[item.id] ?: return@map item
-            val state = record.state.toBackupState().resumeLocally()
-            item.copy(
-                backupState = state,
-                backupCompleted = state == BackupState.COMPLETED,
+    private fun MediaItem.withRecord(record: SyncRecord?): MediaItem {
+        if (record == null) {
+            if (backupState == BackupState.NOT_STARTED) return this
+            return copy(
+                backupState = BackupState.NOT_STARTED,
+                backupCompleted = false,
                 progress = 0f,
-                errorMessage = record.errorMessage
+                errorMessage = null
             )
         }
-    }
-
-    fun queueForBackup() {
-        val records = syncState.read().toMutableMap()
-        _media.update { items ->
-            items.map { item ->
-                if (item.backupState == BackupState.NOT_STARTED || item.backupState == BackupState.FAILED) {
-                    records[item.id] = SyncRecord(
-                        state = BackupState.WAITING.name,
-                        updatedAtMillis = System.currentTimeMillis()
-                    )
-                    item.copy(
-                        backupState = BackupState.WAITING,
-                        progress = 0f,
-                        errorMessage = null,
-                        backupCompleted = false
-                    )
-                } else {
-                    item
-                }
-            }
-        }
-        syncState.write(records)
-        updateStorage(_media.value)
-        refreshSyncSummary()
+        val state = record.state.toBackupState().resumeLocally()
+        return copy(
+            backupState = state,
+            backupCompleted = state == BackupState.COMPLETED,
+            progress = 0f,
+            errorMessage = record.errorMessage
+        )
     }
 
     fun retryBackup(id: String) {
-        val item = _media.value.firstOrNull { it.id == id } ?: return
-        if (item.backupState != BackupState.FAILED) return
-        updateQueuedState(id)
-    }
-
-    fun retryFailed() {
-        _media.value
-            .filter { it.backupState == BackupState.FAILED }
-            .forEach { updateQueuedState(it.id) }
-    }
-
-    private fun updateQueuedState(id: String) {
-        val records = syncState.read().toMutableMap()
-        records[id] = SyncRecord(
-            state = BackupState.WAITING.name,
-            updatedAtMillis = System.currentTimeMillis()
-        )
-        syncState.write(records)
-        _media.update { items ->
-            items.map {
-                if (it.id == id) it.copy(
-                    backupState = BackupState.WAITING,
-                    progress = 0f,
-                    errorMessage = null,
-                    backupCompleted = false
-                ) else it
-            }
-        }
-        updateStorage(_media.value)
-        refreshSyncSummary()
-    }
-
-    private fun String.toBackupState(): BackupState = try {
-        BackupState.valueOf(this)
-    } catch (_: IllegalArgumentException) {
-        BackupState.NOT_STARTED
-    }
-
-    private fun BackupState.resumeLocally(): BackupState = when (this) {
-        BackupState.UPLOADING,
-        BackupState.PROCESSING,
-        BackupState.SENDING_TELEGRAM -> BackupState.WAITING
-        else -> this
+        syncRepository.retry(id)
     }
 
     companion object {

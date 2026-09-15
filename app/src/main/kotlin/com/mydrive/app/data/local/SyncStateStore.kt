@@ -9,6 +9,7 @@ import kotlinx.serialization.json.Json
 data class SyncRecord(
     val state: String = BackupState.NOT_STARTED.name,
     val errorMessage: String? = null,
+    val queuedAtMillis: Long = 0L,
     val updatedAtMillis: Long = 0L
 )
 
@@ -35,8 +36,17 @@ class SyncStateStore(context: Context) {
             .apply()
     }
 
+    @Synchronized
+    fun readPaused(): Boolean = preferences.getBoolean(KEY_PAUSED, false)
+
+    @Synchronized
+    fun writePaused(paused: Boolean) {
+        preferences.edit().putBoolean(KEY_PAUSED, paused).apply()
+    }
+
     companion object {
         private const val PREFERENCES = "local_sync_state"
         private const val KEY_RECORDS = "records"
+        private const val KEY_PAUSED = "paused"
     }
 }

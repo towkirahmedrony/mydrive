@@ -21,6 +21,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Cancel
 import androidx.compose.material.icons.outlined.CloudDone
 import androidx.compose.material.icons.outlined.CloudQueue
 import androidx.compose.material.icons.outlined.CloudUpload
@@ -281,8 +282,8 @@ fun MediaThumb(
 fun MiniSyncDot(state: BackupState) {
     val color = when (state) {
         BackupState.COMPLETED -> StatusConnected
-        BackupState.FAILED -> StatusAttention
-        BackupState.WAITING, BackupState.NOT_STARTED -> StatusIdle
+        BackupState.FAILED, BackupState.CANCELLED -> StatusAttention
+        BackupState.WAITING, BackupState.NOT_STARTED, BackupState.PAUSED -> StatusIdle
         else -> StatusSyncing
     }
     Box(
@@ -521,12 +522,15 @@ fun stateVisual(state: BackupState): Triple<String, Color, ImageVector> {
     val idle = StatusIdleColor
     return when (state) {
         BackupState.COMPLETED -> Triple("Completed", StatusConnected, Icons.Outlined.CloudDone)
-        BackupState.NOT_STARTED -> Triple("Not synced yet", idle, Icons.Outlined.CloudQueue)
+        BackupState.NOT_STARTED -> Triple("Not backed up", idle, Icons.Outlined.CloudQueue)
+        BackupState.PREPARING -> Triple("Preparing", StatusSyncing, Icons.Outlined.CloudUpload)
         BackupState.UPLOADING -> Triple("Uploading", StatusSyncing, Icons.Outlined.CloudUpload)
         BackupState.PROCESSING -> Triple("Processing", StatusSyncing, Icons.Outlined.CloudQueue)
         BackupState.SENDING_TELEGRAM -> Triple("Telegram sync", StatusSyncing, Icons.Outlined.CloudUpload)
         BackupState.WAITING -> Triple("Waiting", idle, Icons.Outlined.CloudQueue)
+        BackupState.PAUSED -> Triple("Paused", idle, Icons.Outlined.CloudQueue)
         BackupState.FAILED -> Triple("Failed", StatusAttention, Icons.Outlined.ErrorOutline)
+        BackupState.CANCELLED -> Triple("Cancelled", idle, Icons.Outlined.Cancel)
     }
 }
 

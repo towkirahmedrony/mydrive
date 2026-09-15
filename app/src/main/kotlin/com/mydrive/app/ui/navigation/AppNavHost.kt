@@ -44,6 +44,7 @@ import androidx.navigation.navArgument
 import com.mydrive.app.data.local.GalleryTabStore
 import com.mydrive.app.data.repository.AuthRepository
 import com.mydrive.app.data.repository.MediaRepository
+import com.mydrive.app.data.repository.SyncRepository
 import com.mydrive.app.ui.album.AlbumDetailScreen
 import com.mydrive.app.ui.album.AlbumDetailViewModel
 import com.mydrive.app.ui.albums.AlbumsScreen
@@ -79,6 +80,7 @@ private val tabFade = tween<Float>(durationMillis = 160)
 @Composable
 fun AppNavHost(
     repository: MediaRepository,
+    syncRepository: SyncRepository,
     authRepository: AuthRepository,
     galleryTabStore: GalleryTabStore
 ) {
@@ -170,7 +172,9 @@ fun AppNavHost(
                 )
             }
             composable(AppDestination.Sync.route) {
-                val vm: SyncViewModel = viewModel(factory = SyncViewModel.factory(repository))
+                val vm: SyncViewModel = viewModel(
+                    factory = SyncViewModel.factory(repository, syncRepository)
+                )
                 SyncScreen(
                     viewModel = vm,
                     onMediaClick = { id ->

@@ -45,6 +45,7 @@ import android.widget.Toast
 import com.mydrive.app.data.model.BackupState
 import com.mydrive.app.data.model.MediaItem
 import com.mydrive.app.data.model.MediaType
+import com.mydrive.app.data.model.isActive
 import com.mydrive.app.ui.components.AppCard
 import com.mydrive.app.ui.components.BackupStateChip
 import com.mydrive.app.ui.components.EmptyState
@@ -198,14 +199,9 @@ fun MediaDetailsScreen(
                         item.backupCompleted && !item.telegramCompleted
                     }
                 )
-                if (item.backupState != BackupState.COMPLETED &&
-                    item.backupState != BackupState.FAILED &&
-                    item.backupState != BackupState.WAITING &&
-                    item.backupState != BackupState.NOT_STARTED
-                ) {
+                if (item.backupState.isActive) {
                     Spacer(Modifier.height(Spacing.md))
                     LinearProgressIndicator(
-                        progress = { item.progress },
                         modifier = Modifier
                             .fillMaxWidth()
                             .height(4.dp)
@@ -298,7 +294,10 @@ private fun DestinationRow(
     val (label, color) = when {
         completed -> "✓ Backup completed" to StatusConnected
         processingState == BackupState.FAILED -> "Failed" to StatusAttention
+        processingState == BackupState.CANCELLED -> "Cancelled" to IvoryMuted
+        processingState == BackupState.PAUSED -> "Paused" to IvoryMuted
         processingState == BackupState.WAITING -> "Waiting" to StatusIdle
+        processingState == BackupState.PREPARING -> "Preparing" to StatusSyncing
         processingState == BackupState.UPLOADING -> "Uploading" to StatusSyncing
         processingState == BackupState.PROCESSING -> "Processing" to StatusSyncing
         processingState == BackupState.SENDING_TELEGRAM -> "Telegram sync" to StatusSyncing

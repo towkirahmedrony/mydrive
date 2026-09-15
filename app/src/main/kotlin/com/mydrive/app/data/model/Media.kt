@@ -8,12 +8,27 @@ enum class MediaType {
 enum class BackupState {
     NOT_STARTED,
     COMPLETED,
+    PREPARING,
     UPLOADING,
     PROCESSING,
     SENDING_TELEGRAM,
     WAITING,
-    FAILED
+    PAUSED,
+    FAILED,
+    CANCELLED
 }
+
+val BackupState.isActive: Boolean
+    get() = this == BackupState.PREPARING ||
+        this == BackupState.UPLOADING ||
+        this == BackupState.PROCESSING ||
+        this == BackupState.SENDING_TELEGRAM
+
+val BackupState.isQueued: Boolean
+    get() = this == BackupState.WAITING || this == BackupState.PAUSED
+
+val BackupState.isRetryable: Boolean
+    get() = this == BackupState.FAILED || this == BackupState.CANCELLED
 
 enum class ConnectionStatus {
     CONNECTED,
