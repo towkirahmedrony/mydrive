@@ -79,7 +79,8 @@ import com.mydrive.app.ui.util.formatTimeAgo
 @Composable
 fun SyncScreen(
     viewModel: SyncViewModel,
-    onMediaClick: (String) -> Unit
+    onMediaClick: (String) -> Unit,
+    onOpenTelegramSettings: () -> Unit
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val context = LocalContext.current
@@ -136,13 +137,18 @@ fun SyncScreen(
                 SummaryRow(
                     completed = state.completedCount,
                     waiting = state.pendingCount,
+                    uploading = state.activeCount,
                     failed = state.failedCount
                 )
             }
         }
 
         item(key = "actions") {
-            SyncActions(state = state, viewModel = viewModel)
+            SyncActions(
+                state = state,
+                viewModel = viewModel,
+                onOpenTelegramSettings = onOpenTelegramSettings
+            )
         }
 
         if (state.active.isNotEmpty()) {
@@ -262,13 +268,13 @@ private fun StatusCard(state: SyncUiState) {
 }
 
 @Composable
-private fun SummaryRow(completed: Int, waiting: Int, failed: Int) {
+private fun SummaryRow(completed: Int, waiting: Int, uploading: Int, failed: Int) {
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.spacedBy(Spacing.xs)
     ) {
         StatCard(
-            label = "Backed up",
+            label = "Completed",
             value = completed.toString(),
             accent = StatusConnected,
             modifier = Modifier.weight(1f)
@@ -277,6 +283,12 @@ private fun SummaryRow(completed: Int, waiting: Int, failed: Int) {
             label = "Waiting",
             value = waiting.toString(),
             accent = StatusSyncing,
+            modifier = Modifier.weight(1f)
+        )
+        StatCard(
+            label = "Uploading",
+            value = uploading.toString(),
+            accent = Copper,
             modifier = Modifier.weight(1f)
         )
         StatCard(
@@ -289,7 +301,59 @@ private fun SummaryRow(completed: Int, waiting: Int, failed: Int) {
 }
 
 @Composable
-private fun SyncActions(state: SyncUiState, viewModel: SyncViewModel) {
+private fun TelegramNotice(
+    state: SyncUiState,
+    onOpenTelegramSettings: () -> Unit
+) {
+    val colors = MaterialTheme.colorScheme
+    val message = when {
+        !state.telegramEnabled ->
+            "Telegram backup is off. Turn it on to upload photos to your Telegram chat."
+        !state.telegramConfigured ->
+            "Telegram isn't configured yet. Add your bot token and chat ID."
+        !state.telegramConnected ->
+            "Telegram setup isn't verified. Test the connection before backing up."
+        else -> return
+    }
+    AppCard(modifier = Modifier.fillMaxWidth()) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(
+                imageVector = Icons.Outlined.ErrorOutline,
+                contentDescription = null,
+                tint = StatusAttention,
+                modifier = Modifier.size(18.dp)
+            )
+            Spacer(Modifier.width(Spacing.xs))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "Telegram backup unavailable",
+                    style = MaterialTheme.typography.titleSmall,
+                    color = colors.onBackground
+                )
+                Spacer(Modifier.height(2.dp))
+                Text(
+                    text = message,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = colors.onSurfaceVariant
+                )
+            }
+        }
+        Spacer(Modifier.height(Spacing.sm))
+        SecondaryActionButton(
+            text = "Open Telegram Setup",
+            onClick = onOpenTelegramSettings,
+            icon = Icons.Outlined.CloudUpload,
+            modifier = Modifier.fillMaxWidth()
+        )
+    }
+}
+
+@Composable
+private fun SyncActions(
+    state: SyncUiState,
+    viewModel: SyncViewModel,
+    onOpenTelegramSettings: () -> Unit
+) {
     if (!state.hasMedia) {
         SecondaryActionButton(
             text = "Check for new media",
@@ -300,23 +364,40 @@ private fun SyncActions(state: SyncUiState, viewModel: SyncViewModel) {
         return
     }
     Column(verticalArrangement = Arrangement.spacedBy(Spacing.xs)) {
-        if (state.hasEligible) {
+        if (!state.telegramReady) {
+            TelegramNotice(state = state, onOpenTelegramSettings = onOpenTelegramSettings)
+        }
+        state.actionNotice?.let { notice ->
+            Text(
+                text = notice,
+                style = MaterialTheme.typography.bodySmall,
+                color = StatusAttention
+            )
+        }
+        if (state.hasEligible && state.telegramReady) {
             PrimaryActionButton(
-                text = "Back up now",
+                text = "Start Backup",
                 onClick = viewModel::startBackup,
                 icon = Icons.Outlined.CloudUpload,
                 modifier = Modifier.fillMaxWidth()
             )
         }
+        if (state.pendingVideoCount > 0 && state.eligiblePhotoCount == 0) {
+            Text(
+                text = "Video backup isn't available yet. Only photos can be uploaded for now.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
         Row(horizontalArrangement = Arrangement.spacedBy(Spacing.xs)) {
-            if (state.status == SyncStatus.PAUSED) {
+            if (state.status == SyncStatus.PAUSED || state.status == SyncStatus.WAITING) {
                 SecondaryActionButton(
                     text = "Resume",
                     onClick = viewModel::resumeBackup,
                     icon = Icons.Outlined.PlayArrow,
                     modifier = Modifier.weight(1f)
                 )
-            } else if (state.isRunning) {
+            } else if (state.status == SyncStatus.IN_PROGRESS) {
                 SecondaryActionButton(
                     text = "Pause",
                     onClick = viewModel::pauseBackup,

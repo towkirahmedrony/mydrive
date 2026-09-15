@@ -39,6 +39,7 @@ class MainActivity : ComponentActivity() {
                     is AuthState.Authenticated -> AppNavHost(
                         repository = app.mediaRepository,
                         syncRepository = app.syncRepository,
+                        backupRepository = app.backupRepository,
                         authRepository = app.authRepository,
                         galleryTabStore = app.galleryTabStore
                     )

@@ -12,7 +12,9 @@ import com.mydrive.app.data.remote.NetworkMonitor
 import com.mydrive.app.data.remote.SupabaseConfig
 import com.mydrive.app.data.remote.SupabaseModule
 import com.mydrive.app.data.remote.TelegramApiVerifier
+import com.mydrive.app.data.remote.TelegramUploadService
 import com.mydrive.app.data.repository.AuthRepository
+import com.mydrive.app.data.repository.BackupRepository
 import com.mydrive.app.data.repository.MediaRepository
 import com.mydrive.app.data.repository.SyncRepository
 import kotlinx.coroutines.CoroutineScope
@@ -28,15 +30,29 @@ class MyDriveApp : Application() {
         SyncRepository(SyncStateStore(this))
     }
 
+    val telegramSettingsStore: TelegramSettingsStore by lazy { TelegramSettingsStore(this) }
+
+    private val networkMonitor: NetworkMonitor by lazy { NetworkMonitor(this) }
+
     val mediaRepository: MediaRepository by lazy {
-        val network = NetworkMonitor(this)
         MediaRepository(
             mediaStore = MediaStoreDataSource(this),
             favorites = FavoritesStore(this),
             permissions = MediaPermissions(this),
             syncRepository = syncRepository,
-            telegramSettingsStore = TelegramSettingsStore(this),
-            telegramApiVerifier = TelegramApiVerifier(network),
+            telegramSettingsStore = telegramSettingsStore,
+            telegramApiVerifier = TelegramApiVerifier(networkMonitor),
+            scope = applicationScope
+        )
+    }
+
+    val backupRepository: BackupRepository by lazy {
+        BackupRepository(
+            syncRepository = syncRepository,
+            settingsStore = telegramSettingsStore,
+            uploadService = TelegramUploadService(this, networkMonitor),
+            network = networkMonitor,
+            mediaLookup = mediaRepository::mediaById,
             scope = applicationScope
         )
     }
@@ -45,7 +61,7 @@ class MyDriveApp : Application() {
         AuthRepository(
             client = if (SupabaseConfig.isConfigured) SupabaseModule.create() else null,
             deviceIdStore = DeviceIdStore(this),
-            network = NetworkMonitor(this),
+            network = networkMonitor,
             scope = applicationScope
         )
     }

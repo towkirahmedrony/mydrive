@@ -47,6 +47,20 @@ class SyncRepository(private val store: SyncStateStore) {
     }
 
     @Synchronized
+    fun updateState(id: String, state: BackupState, errorMessage: String? = null) {
+        val record = _records.value[id] ?: return
+        val normalizedError = errorMessage?.takeIf { it.isNotBlank() }
+        if (record.state == state.name && record.errorMessage == normalizedError) return
+        val next = HashMap(_records.value)
+        next[id] = record.copy(
+            state = state.name,
+            errorMessage = normalizedError,
+            updatedAtMillis = System.currentTimeMillis()
+        )
+        commit(next)
+    }
+
+    @Synchronized
     fun retryAll(ids: Collection<String>) {
         if (ids.isEmpty()) return
         val now = System.currentTimeMillis()

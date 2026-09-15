@@ -43,6 +43,7 @@ import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import com.mydrive.app.data.local.GalleryTabStore
 import com.mydrive.app.data.repository.AuthRepository
+import com.mydrive.app.data.repository.BackupRepository
 import com.mydrive.app.data.repository.MediaRepository
 import com.mydrive.app.data.repository.SyncRepository
 import com.mydrive.app.ui.album.AlbumDetailScreen
@@ -81,6 +82,7 @@ private val tabFade = tween<Float>(durationMillis = 160)
 fun AppNavHost(
     repository: MediaRepository,
     syncRepository: SyncRepository,
+    backupRepository: BackupRepository,
     authRepository: AuthRepository,
     galleryTabStore: GalleryTabStore
 ) {
@@ -173,13 +175,16 @@ fun AppNavHost(
             }
             composable(AppDestination.Sync.route) {
                 val vm: SyncViewModel = viewModel(
-                    factory = SyncViewModel.factory(repository, syncRepository)
+                    factory = SyncViewModel.factory(repository, syncRepository, backupRepository)
                 )
                 SyncScreen(
                     viewModel = vm,
                     onMediaClick = { id ->
                         repository.beginViewerSession(vm.visibleItemIds())
                         navController.navigate(AppDestination.MediaViewer.create(id))
+                    },
+                    onOpenTelegramSettings = {
+                        navController.navigate(AppDestination.TelegramSettings.route)
                     }
                 )
             }

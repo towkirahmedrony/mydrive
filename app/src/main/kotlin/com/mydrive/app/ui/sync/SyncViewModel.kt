@@ -7,13 +7,19 @@ import com.mydrive.app.data.local.SyncRecord
 import com.mydrive.app.data.model.BackupState
 import com.mydrive.app.data.model.MediaItem
 import com.mydrive.app.data.model.MediaLoadState
+import com.mydrive.app.data.model.MediaType
+import com.mydrive.app.data.model.TelegramConnectionState
+import com.mydrive.app.data.model.TelegramSettings
 import com.mydrive.app.data.model.isActive
 import com.mydrive.app.data.model.isRetryable
+import com.mydrive.app.data.repository.BackupGate
+import com.mydrive.app.data.repository.BackupRepository
 import com.mydrive.app.data.repository.MediaRepository
 import com.mydrive.app.data.repository.SyncRepository
 import com.mydrive.app.data.repository.resumeLocally
 import com.mydrive.app.data.repository.toBackupState
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
@@ -56,31 +62,50 @@ data class SyncUiState(
     val lastUpdatedMillis: Long,
     val isLoading: Boolean,
     val needsPermission: Boolean,
-    val permissionDenied: Boolean
+    val permissionDenied: Boolean,
+    val telegramEnabled: Boolean,
+    val telegramConfigured: Boolean,
+    val telegramConnected: Boolean,
+    val eligiblePhotoCount: Int,
+    val pendingVideoCount: Int,
+    val actionNotice: String?
 ) {
     val pendingCount: Int get() = waitingCount + notStartedCount
+    val activeCount: Int get() = active.size
     val hasMedia: Boolean get() = totalCount > 0
-    val hasEligible: Boolean get() = notStartedCount + failedCount > 0
+    val telegramReady: Boolean get() = telegramEnabled && telegramConfigured && telegramConnected
+    val hasEligible: Boolean get() = eligiblePhotoCount > 0
     val isRunning: Boolean
         get() = status == SyncStatus.WAITING || status == SyncStatus.IN_PROGRESS || status == SyncStatus.PAUSED
 }
 
 class SyncViewModel(
     private val repository: MediaRepository,
-    private val syncRepository: SyncRepository
+    private val syncRepository: SyncRepository,
+    private val backupRepository: BackupRepository
 ) : ViewModel() {
+
+    private val actionNotice = MutableStateFlow<String?>(null)
 
     init {
         refresh(force = false)
     }
 
-    val uiState: StateFlow<SyncUiState> = combine(
+    private val coreState = combine(
         repository.media,
         repository.loadState,
         syncRepository.records,
-        syncRepository.paused
-    ) { media, load, records, paused ->
-        buildState(media, load, records, paused)
+        syncRepository.paused,
+        repository.telegram
+    ) { media, load, records, paused, telegram ->
+        buildState(media, load, records, paused, telegram)
+    }
+
+    val uiState: StateFlow<SyncUiState> = combine(
+        coreState,
+        actionNotice
+    ) { state, notice ->
+        state.copy(actionNotice = notice)
     }.flowOn(Dispatchers.Default).stateIn(
         scope = viewModelScope,
         started = SharingStarted.WhileSubscribed(5_000),
@@ -89,42 +114,69 @@ class SyncViewModel(
 
     fun startBackup() {
         viewModelScope.launch {
+            actionNotice.value = null
+            val gate = backupRepository.gate()
+            if (gate != BackupGate.Ready) {
+                actionNotice.value = gate.message()
+                return@launch
+            }
             val eligible = withContext(Dispatchers.Default) {
                 val records = syncRepository.records.value
                 repository.media.value
                     .filter { item ->
+                        if (item.type != MediaType.PHOTO) return@filter false
                         val state = records[item.id]?.state?.toBackupState()?.resumeLocally()
                             ?: item.backupState
                         state == BackupState.NOT_STARTED || state.isRetryable
                     }
                     .map { it.id }
             }
-            if (eligible.isNotEmpty()) {
-                syncRepository.setPaused(false)
-                syncRepository.enqueue(eligible)
+            if (eligible.isEmpty()) {
+                actionNotice.value = "No photos are ready to back up."
+                return@launch
             }
+            backupRepository.startBackup(eligible)
         }
     }
 
     fun pauseBackup() {
-        syncRepository.setPaused(true)
+        backupRepository.pause()
     }
 
     fun resumeBackup() {
-        syncRepository.setPaused(false)
+        val gate = backupRepository.gate()
+        if (gate != BackupGate.Ready) {
+            actionNotice.value = gate.message()
+            return
+        }
+        backupRepository.resume()
     }
 
     fun retry(id: String) {
-        syncRepository.retry(id)
+        val gate = backupRepository.gate()
+        if (gate != BackupGate.Ready) {
+            actionNotice.value = gate.message()
+            return
+        }
+        backupRepository.retry(id)
     }
 
     fun retryFailed() {
+        val gate = backupRepository.gate()
+        if (gate != BackupGate.Ready) {
+            actionNotice.value = gate.message()
+            return
+        }
         val ids = uiState.value.failed.map { it.media.id }
-        syncRepository.retryAll(ids)
+        backupRepository.retryAll(ids)
     }
 
     fun cancel(id: String) {
-        syncRepository.cancel(id)
+        backupRepository.cancel(id)
+    }
+
+    fun clearNotice() {
+        actionNotice.value = null
     }
 
     fun refresh(force: Boolean = true) {
@@ -147,31 +199,41 @@ class SyncViewModel(
             .distinct()
     }
 
-    private fun emptyState(load: MediaLoadState): SyncUiState = SyncUiState(
-        status = SyncStatus.NO_MEDIA,
-        headline = "Checking your library",
-        description = "Looking for photos and videos to back up.",
-        paused = false,
-        active = emptyList(),
-        waiting = emptyList(),
-        failed = emptyList(),
-        completed = emptyList(),
-        completedCount = 0,
-        waitingCount = 0,
-        failedCount = 0,
-        notStartedCount = 0,
-        totalCount = 0,
-        lastUpdatedMillis = 0L,
-        isLoading = load.isLoading,
-        needsPermission = load.needsPermission,
-        permissionDenied = load.permissionDenied
-    )
+    private fun emptyState(load: MediaLoadState): SyncUiState {
+        val telegram = repository.telegram.value
+        return SyncUiState(
+            status = SyncStatus.NO_MEDIA,
+            headline = "Checking your library",
+            description = "Looking for photos and videos to back up.",
+            paused = false,
+            active = emptyList(),
+            waiting = emptyList(),
+            failed = emptyList(),
+            completed = emptyList(),
+            completedCount = 0,
+            waitingCount = 0,
+            failedCount = 0,
+            notStartedCount = 0,
+            totalCount = 0,
+            lastUpdatedMillis = 0L,
+            isLoading = load.isLoading,
+            needsPermission = load.needsPermission,
+            permissionDenied = load.permissionDenied,
+            telegramEnabled = telegram.enabled,
+            telegramConfigured = telegram.tokenConfigured && telegram.chatId.isNotBlank(),
+            telegramConnected = telegram.connectionState == TelegramConnectionState.CONNECTED,
+            eligiblePhotoCount = 0,
+            pendingVideoCount = 0,
+            actionNotice = null
+        )
+    }
 
     private fun buildState(
         media: List<MediaItem>,
         load: MediaLoadState,
         records: Map<String, SyncRecord>,
-        paused: Boolean
+        paused: Boolean,
+        telegram: TelegramSettings
     ): SyncUiState {
         val jobs = ArrayList<SyncJob>(media.size)
         for (item in media) {
@@ -190,6 +252,13 @@ class SyncViewModel(
         val completed = jobs.filter { it.state == BackupState.COMPLETED }
             .sortedByDescending { it.updatedAtMillis }
         val notStartedCount = jobs.count { it.state == BackupState.NOT_STARTED }
+        val eligiblePhotoCount = jobs.count { job ->
+            job.media.type == MediaType.PHOTO &&
+                (job.state == BackupState.NOT_STARTED || job.state.isRetryable)
+        }
+        val pendingVideoCount = jobs.count {
+            it.media.type == MediaType.VIDEO && it.state == BackupState.NOT_STARTED
+        }
         val lastUpdated = records.values.maxOfOrNull { it.updatedAtMillis } ?: 0L
 
         val status = when {
@@ -225,7 +294,13 @@ class SyncViewModel(
             lastUpdatedMillis = lastUpdated,
             isLoading = load.isLoading,
             needsPermission = load.needsPermission,
-            permissionDenied = load.permissionDenied
+            permissionDenied = load.permissionDenied,
+            telegramEnabled = telegram.enabled,
+            telegramConfigured = telegram.tokenConfigured && telegram.chatId.isNotBlank(),
+            telegramConnected = telegram.connectionState == TelegramConnectionState.CONNECTED,
+            eligiblePhotoCount = eligiblePhotoCount,
+            pendingVideoCount = pendingVideoCount,
+            actionNotice = null
         )
     }
 
@@ -238,8 +313,8 @@ class SyncViewModel(
     ): Pair<String, String> = when (status) {
         SyncStatus.NO_MEDIA -> "Nothing to back up yet" to
             "Photos and videos on this device will appear here."
-        SyncStatus.ALL_BACKED_UP -> "All media backed up" to
-            "Every item on this device has been backed up."
+        SyncStatus.ALL_BACKED_UP -> "All photos backed up" to
+            "Every photo on this device has been backed up."
         SyncStatus.READY -> "Ready to back up" to
             "$notStartedCount ${plural(notStartedCount, "item", "items")} waiting to be added to the queue."
         SyncStatus.WAITING -> "Waiting for backup" to
@@ -258,12 +333,13 @@ class SyncViewModel(
     companion object {
         fun factory(
             repository: MediaRepository,
-            syncRepository: SyncRepository
+            syncRepository: SyncRepository,
+            backupRepository: BackupRepository
         ): ViewModelProvider.Factory =
             object : ViewModelProvider.Factory {
                 @Suppress("UNCHECKED_CAST")
                 override fun <T : ViewModel> create(modelClass: Class<T>): T {
-                    return SyncViewModel(repository, syncRepository) as T
+                    return SyncViewModel(repository, syncRepository, backupRepository) as T
                 }
             }
     }
