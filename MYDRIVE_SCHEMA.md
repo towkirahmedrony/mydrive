@@ -118,24 +118,39 @@ Derived versions of a media asset (thumbnail, telegram-sized, preview).
 ---
 
 ## drive_accounts
-Pool of Google Drive accounts used as replication destinations.
+Pool of Google Drive accounts used as replication destinations. Unbounded — the
+admin can add/manage any number of accounts; no account is hardcoded.
 
 | Column | Type | Notes |
 |---|---|---|
 | id | uuid | PK, default `gen_random_uuid()` |
-| name | text | |
-| google_email | text | unique |
-| refresh_token_secret_id | uuid | (points to a secret store, not stored inline) |
-| root_folder_id | text | nullable |
-| priority | integer | default `100` |
+| name | text | short label |
+| display_name | text | nullable, admin-facing name |
+| google_email | text | unique account identifier |
+| refresh_token_secret_id | uuid | reference to Supabase Vault secret (token NEVER stored inline) |
+| refresh_token_updated_at | timestamptz | nullable |
+| token_expires_at | timestamptz | nullable |
+| root_folder_id | text | nullable; Google Drive archive root folder id |
+| priority | integer | default `100` (lower = preferred) |
+| enabled | boolean | default `true` |
 | status | text | default `'active'`, check: `active` \| `quota_full` \| `reauth_required` \| `disabled` \| `error` |
+| connection_status | text | default `'unknown'`, check: `connected` \| `disconnected` \| `reauth_required` \| `error` \| `unknown` |
+| health_status | text | default `'unknown'`, check: `healthy` \| `degraded` \| `unhealthy` \| `unknown` |
 | storage_limit_bytes | bigint | nullable |
 | storage_used_bytes | bigint | nullable |
 | storage_available_bytes | bigint | nullable |
+| reserved_bytes | bigint | default `0`; per-account safety hold |
 | last_quota_check_at | timestamptz | nullable |
+| last_health_check_at | timestamptz | nullable |
+| last_error | text | nullable |
+| last_error_at | timestamptz | nullable |
+| notes | text | nullable |
 | created_at / updated_at | timestamptz | default `now()` |
 
 **Referenced by:** `replication_jobs.drive_account_id`, `drive_folders.drive_account_id`
+
+**Indexes:** `drive_accounts_routing_idx` (enabled, status, priority, storage_available_bytes),
+`drive_accounts_priority_idx`, `drive_accounts_connection_health_idx` (partial, enabled).
 
 **RLS:**
 - ALL: `is_admin()` only (no direct user access)
@@ -143,18 +158,29 @@ Pool of Google Drive accounts used as replication destinations.
 ---
 
 ## drive_folders
-Folder tree mirrored on each Drive account.
+Authoritative per-user Drive folder mapping. `drive_folder_id`/`google_folder_id`
+is only the external storage mapping; `owner_id`/`media_assets.id` stay
+authoritative.
 
 | Column | Type | Notes |
 |---|---|---|
 | id | uuid | PK, default `gen_random_uuid()` |
 | drive_account_id | uuid | FK → `drive_accounts.id` |
 | parent_folder_id | uuid | nullable, FK → `drive_folders.id` (self-referencing) |
-| owner_id | uuid | nullable, FK → `profiles.id` |
+| owner_id | uuid | nullable, FK → `profiles.id` (NULL for root/archive folders) |
 | folder_name | text | |
-| google_folder_id | text | |
+| google_folder_id | text | nullable until created |
 | folder_type | text | default `'media'`, check: `root` \| `media` \| `user` \| `year` \| `month` \| `custom` |
-| created_at | timestamptz | default `now()` |
+| folder_status | text | default `'active'`, check: `pending` \| `active` \| `error` |
+| create_lease_until | timestamptz | nullable; short creation lease |
+| create_attempts | integer | default `0` |
+| last_error | text | nullable |
+| created_at / updated_at | timestamptz | default `now()` |
+
+**Indexes / constraints:**
+- `drive_folders_user_mapping_key` unique `(drive_account_id, owner_id)` where `folder_type='user'`
+- `drive_folders_root_key` unique `(drive_account_id)` where `folder_type='root' and owner_id is null`
+- `drive_folders_account_owner_idx`, `drive_folders_owner_idx`, `drive_folders_pending_idx`
 
 **Referenced by:** `replication_jobs.drive_folder_id`
 
@@ -204,8 +230,16 @@ Queue of replication tasks (media → Telegram / Google Drive).
 | telegram_message_id | bigint | nullable |
 | telegram_file_id | text | nullable |
 | google_drive_file_id | text | nullable |
+| failed_drive_account_ids | uuid[] | default `'{}'`; Drive accounts already tried (failover exclusion list) |
 | started_at / completed_at | timestamptz | nullable |
 | created_at / updated_at | timestamptz | default `now()` |
+
+**Indexes:**
+- `replication_jobs_media_destination_config_key` unique `(media_id, destination_type, telegram_config_id)`
+- `replication_jobs_media_drive_key` unique `(media_id)` where `destination_type='google_drive'` (one Drive job per media; account can change via failover)
+- `replication_jobs_queue_idx`, `replication_jobs_media_idx`, `replication_jobs_pending_retry_idx`, `replication_jobs_user_idx`
+- `replication_jobs_drive_queue_idx` (status, next_retry_at, created_at) where `destination_type='google_drive'`
+- `replication_jobs_drive_account_idx`, `replication_jobs_drive_folder_idx` (partial, `google_drive`)
 
 **Referenced by:** `sync_logs.replication_job_id`
 
@@ -277,6 +311,40 @@ Single-row global config table (PK is a boolean, effectively a singleton).
 
 **RLS:**
 - ALL: `is_admin()` only
+
+---
+
+## Drive foundation functions & views
+
+All functions below are `SECURITY DEFINER` and `EXECUTE` is revoked from
+`PUBLIC` / granted to `service_role` only — Android clients (`authenticated`,
+`anon`) can never call them.
+
+**Drive Router (server-side, any number of accounts):**
+- `list_eligible_drive_accounts(p_required_bytes, p_exclude_account_ids, p_safety_margin_bytes)` → set of eligible accounts in routing order
+- `select_drive_account(...)` → single best eligible account (read-only)
+- `reserve_drive_account(...)` → atomically selects + reserves quota (`FOR UPDATE SKIP LOCKED`)
+- `release_drive_quota(p_drive_account_id, p_bytes)`
+- `mark_drive_account_result(p_drive_account_id, p_health_status, p_status, p_last_error)`
+
+**Idempotent per-user folder resolution:**
+- `claim_drive_folder(p_drive_account_id, p_owner_id, p_folder_name, p_folder_type, p_parent_folder_id)` → `(folder, acquired)`; advisory-locked + creation lease
+- `complete_drive_folder(p_folder_row_id, p_google_folder_id)`
+- `fail_drive_folder(p_folder_row_id, p_error)`
+
+**Secret access (Supabase Vault):**
+- `worker_lookup_drive_refresh_token(p_secret_id, p_drive_account_id)`
+- `admin_store_drive_refresh_token(p_drive_account_id, p_refresh_token)` → stores in Vault, persists only the secret id
+
+**Drive job lifecycle (state only, no uploads):**
+- `enqueue_drive_replication_job(p_media_id)` → idempotent single Drive job per media
+- `assign_drive_replication_job(p_job_id, p_drive_account_id, p_drive_folder_id)`
+- `failover_drive_replication_job(p_job_id, p_failed_account_id, p_error, p_next_retry_at)` → records excluded account, clears assignment, `RETRYING`
+- `list_media_drive_jobs(p_media_id)`
+
+**Admin aggregation views (`security_invoker = true`):**
+- `admin_user_storage_summary` → per user: media count/size, Telegram job states, Drive job states, distinct Drive account count, Drive stored bytes
+- `admin_user_drive_distribution` → per user × Drive account: media count and stored bytes
 
 ---
 

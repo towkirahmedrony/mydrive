@@ -94,6 +94,44 @@ CLOUDINARY_API_KEY=your_api_key
 CLOUDINARY_API_SECRET=your_api_secret   # NEVER returned to client
 ```
 
+### `drive-admin`
+Admin-only management of the Google Drive archive account pool. Requires a
+valid JWT for a user whose `profiles.role = 'admin'`. Supports any number of
+accounts (no hardcoded limit).
+
+**Actions (POST body):**
+```json
+{ "action": "list" }
+{ "action": "create", "google_email": "...", "display_name": "...", "name": "...", "priority": 100, "enabled": true, "root_folder_id": "...", "notes": "...", "refresh_token": "..." }
+{ "action": "update", "id": "<uuid>", "display_name": "...", "...": "..." }
+{ "action": "set_secret", "id": "<uuid>", "refresh_token": "..." }
+{ "action": "set_enabled", "id": "<uuid>", "enabled": true }
+```
+
+- Refresh tokens are written to Supabase Vault via
+  `admin_store_drive_refresh_token()`; only the secret reference is stored on
+  `drive_accounts`. Tokens are never returned.
+- Never uploads media. The Drive upload worker is not part of this foundation.
+
+**Deployment:**
+```bash
+supabase functions deploy drive-admin
+```
+
+## Drive foundation modules (shared)
+
+These modules are the server-side foundation the future Drive worker will
+compose. They perform **no media upload**.
+
+- `shared/google-drive.ts` — OAuth refresh-token exchange and folder
+  find/create against the Drive v3 API. Requires
+  `GOOGLE_OAUTH_CLIENT_ID` / `GOOGLE_OAUTH_CLIENT_SECRET` Edge Function secrets.
+- `shared/drive-router.ts` — selects/reserves an eligible Drive account across
+  any number of accounts (`list_eligible_drive_accounts`,
+  `reserve_drive_account`), with failover exclusions and health feedback.
+- `shared/drive-folders.ts` — idempotent, concurrency-safe per-user folder
+  resolution backed by `drive_folders` (advisory lock + creation lease).
+
 ## Development
 
 ### Prerequisites
