@@ -39,6 +39,47 @@ export interface DriveFolderClient {
   ): Promise<string>;
 }
 
+/**
+ * Returns the id of an existing NON-folder file with the given name inside
+ * `parentId`, or null. Used as a best-effort duplicate guard before the worker
+ * creates a new Drive file for the same media (idempotency reconciliation).
+ */
+export async function findFileByName(
+  name: string,
+  parentId: string | null,
+  accessToken: string,
+): Promise<string | null> {
+  const clauses = [
+    `name = '${escapeDriveQuery(name)}'`,
+    `mimeType != '${FOLDER_MIME}'`,
+    "trashed = false",
+  ];
+  if (parentId) {
+    clauses.push(`'${escapeDriveQuery(parentId)}' in parents`);
+  }
+
+  const url = new URL(`${DRIVE_API}/files`);
+  url.searchParams.set("q", clauses.join(" and "));
+  url.searchParams.set("fields", "files(id,name)");
+  url.searchParams.set("pageSize", "1");
+  url.searchParams.set("spaces", "drive");
+  url.searchParams.set("supportsAllDrives", "true");
+  url.searchParams.set("includeItemsFromAllDrives", "true");
+
+  const res = await fetch(url.toString(), {
+    headers: { Authorization: `Bearer ${accessToken}` },
+    signal: AbortSignal.timeout(30_000),
+  });
+
+  if (!res.ok) {
+    throw new Error(`Drive files.list failed: HTTP ${res.status}`);
+  }
+
+  const json = await res.json() as { files?: Array<{ id?: string }> };
+  const id = json.files?.[0]?.id;
+  return id ?? null;
+}
+
 export interface AccessTokenResult {
   accessToken: string;
   expiresInSeconds: number;

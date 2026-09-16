@@ -94,6 +94,63 @@ CLOUDINARY_API_KEY=your_api_key
 CLOUDINARY_API_SECRET=your_api_secret   # NEVER returned to client
 ```
 
+### `drive-replicate`
+Server-side Google Drive replication worker. Processes PENDING/RETRYING
+`replication_jobs` with `destination_type = 'google_drive'` and uploads the
+original Cloudinary media to Google Drive via the multi-account Drive Router.
+
+**Architecture:**
+```
+Android → Cloudinary (primary) → Supabase media_assets (READY)
+  → PENDING Drive replication job
+  → this worker picks up the job
+  → Drive Router selects best eligible Drive account (any number of accounts)
+  → per-user Drive folder resolved/created on that account
+  → original media streamed to Google Drive (no buffer in Android or Edge Function memory)
+  → COMPLETED with drive_account_id, drive_folder_id, google_drive_file_id persisted
+```
+
+**Worker behavior:**
+- Atomically claims one job at a time using `SELECT FOR UPDATE SKIP LOCKED` via the `claim_drive_job()` SQL function (also picks up stale PROCESSING rows from crashed workers after a 90-second heartbeat gap)
+- Classifies upload failures (quota, OAuth, 403, 5xx, 429, network) and responds with the right strategy: same-account retry, resumable session restart, or failover to a different Drive account
+- Original media is uploaded as-is (no compression, no resize, no modification)
+- Cloudinary originals are never deleted after Drive success — Telegram and Drive are independent replication paths
+- Idempotent: re-running a completed job never creates a duplicate Drive file; a pre-upload `findFileByName` check also prevents duplicates from uncertain prior runs
+- Persists all state for a future admin panel: account, folder, file, status, retry count, last error, timestamps — no duplicate `media_assets` rows
+
+**Upload strategy:**
+- Files ≤ 20 MB: streamed resumable single PUT (Cloudinary → Drive via `ReadableStream` pipe, never fully buffered in memory)
+- Files > 20 MB: 5 MB chunked resumable upload; session URI + byte progress persisted per-chunk so a worker timeout/crash resumes from where it stopped
+- Each chunk progress call refreshes the job's `started_at` heartbeat, preventing stale reclamation while actively uploading
+
+**Processing limits:**
+- Maximum 2 jobs per invocation (stays within Edge Function timeout)
+- Maximum 3 concurrent in-process workers
+- Per-chunk request timeout: 45 seconds; Cloudinary fetch timeout: 60 seconds
+
+**Trigger modes:**
+- HTTP POST: `supabase functions invoke drive-replicate --body '{}'`
+- Public URL (for cron / manual test): append `?public_url=true`
+- Cron scheduling (recommended): a pg_cron job or external scheduler calling the function periodically
+
+**Required server-side secrets (Supabase Edge Function secrets):**
+```
+SUPABASE_URL=auto-provided
+SUPABASE_SERVICE_ROLE_KEY=auto-provided
+GOOGLE_OAUTH_CLIENT_ID=<OAuth client ID>
+GOOGLE_OAUTH_CLIENT_SECRET=<OAuth client secret>
+```
+
+Plus Drive account refresh tokens stored via `admin_store_drive_refresh_token()`
+(`drive-admin` function or SQL) and retrieved at runtime by
+`worker_lookup_drive_refresh_token()` from Supabase Vault.
+
+**Deployment:**
+```bash
+supabase db push                   # applies migration 20260916000700_drive_worker_rows.sql
+supabase functions deploy drive-replicate
+```
+
 ### `drive-admin`
 Admin-only management of the Google Drive archive account pool. Requires a
 valid JWT for a user whose `profiles.role = 'admin'`. Supports any number of
@@ -120,8 +177,8 @@ supabase functions deploy drive-admin
 
 ## Drive foundation modules (shared)
 
-These modules are the server-side foundation the future Drive worker will
-compose. They perform **no media upload**.
+These modules are the server-side foundation the Drive worker
+(`drive-replicate`) composes. They perform **no media upload**.
 
 - `shared/google-drive.ts` — OAuth refresh-token exchange and folder
   find/create against the Drive v3 API. Requires
