@@ -12,7 +12,12 @@ data class SyncRecord(
     val queuedAtMillis: Long = 0L,
     val updatedAtMillis: Long = 0L,
     val cloudinaryAssetId: String? = null,
-    val cloudinaryPublicId: String? = null
+    val cloudinaryPublicId: String? = null,
+    val cloudinarySecureUrl: String? = null,
+    val cloudinaryVersion: Long? = null,
+    val cloudinaryFormat: String? = null,
+    val cloudinaryResourceType: String? = null,
+    val clientUploadId: String? = null
 )
 
 class SyncStateStore(context: Context) {

@@ -16,6 +16,17 @@ Requires authenticated user (JWT).
 Records backup metadata after files are uploaded. Creates backup and file
 records in the database. Requires authenticated user (JWT).
 
+### `finalize-media`
+Records a successful Cloudinary upload as a `media_assets` row so server-side
+replication jobs can process it later. Authenticates the user, verifies the
+Cloudinary asset is in the user's own folder, verifies `device_id` ownership,
+and is idempotent on `client_upload_id` (retries never duplicate records).
+Requires authenticated user (JWT).
+
+```bash
+supabase functions deploy finalize-media
+```
+
 ### `cloudinary-upload-auth`
 Generates signed Cloudinary upload authorization for authenticated users.
 The API Secret is never exposed to the client. Requires authenticated user (JWT).

@@ -9,6 +9,7 @@ import com.mydrive.app.data.local.TelegramSettingsStore
 import com.mydrive.app.data.media.MediaPermissions
 import com.mydrive.app.data.media.MediaStoreDataSource
 import com.mydrive.app.data.remote.CloudinaryUploadService
+import com.mydrive.app.data.remote.MediaFinalizeService
 import com.mydrive.app.data.remote.NetworkMonitor
 import com.mydrive.app.data.remote.SupabaseConfig
 import com.mydrive.app.data.remote.SupabaseModule
@@ -54,11 +55,17 @@ class MyDriveApp : Application() {
         CloudinaryUploadService(this, supabaseClient, networkMonitor)
     }
 
+    private val mediaFinalizeService by lazy {
+        MediaFinalizeService(this, supabaseClient, networkMonitor)
+    }
+
     val backupRepository: BackupRepository by lazy {
         BackupRepository(
             syncRepository = syncRepository,
             cloudinaryService = cloudinaryService,
+            mediaFinalizeService = mediaFinalizeService,
             network = networkMonitor,
+            deviceIdProvider = { authRepository.ensureDeviceRegistered() },
             mediaLookup = mediaRepository::mediaById,
             scope = applicationScope
         )

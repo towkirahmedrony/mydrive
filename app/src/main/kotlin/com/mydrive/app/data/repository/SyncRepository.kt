@@ -61,13 +61,32 @@ class SyncRepository(private val store: SyncStateStore) {
     }
 
     @Synchronized
-    fun updateCloudinaryResult(id: String, assetId: String, publicId: String) {
+    fun updateCloudinaryResult(
+        id: String,
+        assetId: String,
+        publicId: String,
+        secureUrl: String?,
+        version: Long?,
+        format: String?,
+        resourceType: String?
+    ) {
         val record = _records.value[id] ?: return
-        if (record.cloudinaryAssetId == assetId && record.cloudinaryPublicId == publicId) return
+        val unchanged = record.cloudinaryAssetId == assetId &&
+            record.cloudinaryPublicId == publicId &&
+            record.cloudinarySecureUrl == secureUrl &&
+            record.cloudinaryVersion == version &&
+            record.cloudinaryFormat == format &&
+            record.cloudinaryResourceType == resourceType
+        if (unchanged) return
         val next = HashMap(_records.value)
         next[id] = record.copy(
             cloudinaryAssetId = assetId,
             cloudinaryPublicId = publicId,
+            cloudinarySecureUrl = secureUrl,
+            cloudinaryVersion = version,
+            cloudinaryFormat = format,
+            cloudinaryResourceType = resourceType,
+            clientUploadId = record.clientUploadId ?: java.util.UUID.randomUUID().toString(),
             updatedAtMillis = System.currentTimeMillis()
         )
         commit(next)
@@ -138,6 +157,7 @@ fun BackupState.resumeLocally(): BackupState = when (this) {
     BackupState.SENDING_TELEGRAM,
     BackupState.PAUSED,
     BackupState.REQUESTING_CLOUDINARY_AUTH,
-    BackupState.UPLOADING_TO_CLOUDINARY -> BackupState.WAITING
+    BackupState.UPLOADING_TO_CLOUDINARY,
+    BackupState.FINALIZING_SUPABASE -> BackupState.WAITING
     else -> this
 }

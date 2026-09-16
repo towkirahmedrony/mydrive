@@ -220,6 +220,17 @@ class AuthRepository(
         }
     }
 
+    /**
+     * Ensures this device is registered for the current user and returns the
+     * `devices.id` row id (null when there is no active session). Used by the
+     * backup pipeline when finalizing a Cloudinary upload.
+     */
+    suspend fun ensureDeviceRegistered(): String? {
+        if (registeredDeviceId != null) return registeredDeviceId
+        touchDevice(force = true)
+        return registeredDeviceId
+    }
+
     private fun watchSession() {
         val supabase = client ?: return
         watcherJob?.cancel()

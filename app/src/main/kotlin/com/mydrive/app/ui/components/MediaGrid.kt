@@ -185,7 +185,10 @@ fun compactBackupLabel(items: List<MediaItem>): Pair<Int, Int> {
     val syncing = items.count {
         it.backupState == BackupState.UPLOADING ||
             it.backupState == BackupState.PROCESSING ||
-            it.backupState == BackupState.SENDING_TELEGRAM
+            it.backupState == BackupState.SENDING_TELEGRAM ||
+            it.backupState == BackupState.REQUESTING_CLOUDINARY_AUTH ||
+            it.backupState == BackupState.UPLOADING_TO_CLOUDINARY ||
+            it.backupState == BackupState.FINALIZING_SUPABASE
     }
     val failed = items.count { it.backupState == BackupState.FAILED }
     return syncing to failed

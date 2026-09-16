@@ -301,6 +301,8 @@ private fun DestinationRow(
         processingState == BackupState.UPLOADING -> "Uploading" to StatusSyncing
         processingState == BackupState.PROCESSING -> "Processing" to StatusSyncing
         processingState == BackupState.SENDING_TELEGRAM -> "Telegram sync" to StatusSyncing
+        processingState == BackupState.UPLOADING_TO_CLOUDINARY -> "Cloudinary upload" to StatusSyncing
+        processingState == BackupState.FINALIZING_SUPABASE -> "Finalizing backup" to StatusSyncing
         name == "Telegram" -> "Not synced yet" to IvoryMuted
         else -> "Backup not started" to IvoryMuted
     }

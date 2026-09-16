@@ -18,7 +18,8 @@ enum class BackupState {
     CANCELLED,
     REQUESTING_CLOUDINARY_AUTH,
     UPLOADING_TO_CLOUDINARY,
-    CLOUDINARY_COMPLETED
+    CLOUDINARY_COMPLETED,
+    FINALIZING_SUPABASE
 }
 
 val BackupState.isActive: Boolean
@@ -27,7 +28,8 @@ val BackupState.isActive: Boolean
         this == BackupState.PROCESSING ||
         this == BackupState.SENDING_TELEGRAM ||
         this == BackupState.REQUESTING_CLOUDINARY_AUTH ||
-        this == BackupState.UPLOADING_TO_CLOUDINARY
+        this == BackupState.UPLOADING_TO_CLOUDINARY ||
+        this == BackupState.FINALIZING_SUPABASE
 
 val BackupState.isQueued: Boolean
     get() = this == BackupState.WAITING || this == BackupState.PAUSED

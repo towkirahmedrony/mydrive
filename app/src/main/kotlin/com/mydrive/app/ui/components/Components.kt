@@ -534,6 +534,7 @@ fun stateVisual(state: BackupState): Triple<String, Color, ImageVector> {
         BackupState.REQUESTING_CLOUDINARY_AUTH -> Triple("Requesting auth", StatusSyncing, Icons.Outlined.CloudUpload)
         BackupState.UPLOADING_TO_CLOUDINARY -> Triple("Cloudinary upload", StatusSyncing, Icons.Outlined.CloudUpload)
         BackupState.CLOUDINARY_COMPLETED -> Triple("Cloudinary done", StatusConnected, Icons.Outlined.CloudDone)
+        BackupState.FINALIZING_SUPABASE -> Triple("Finalizing backup", StatusSyncing, Icons.Outlined.CloudUpload)
     }
 }
 
