@@ -4,7 +4,9 @@ import { getSupabaseAdmin, getSupabaseAuth } from "../shared/auth.ts";
 
 /**
  * Finalize Media - Records a successful Cloudinary upload as a Supabase
- * media_assets row so later server-side replication jobs can process it.
+ * media_assets row (status READY) and, when the user has Telegram backup
+ * enabled/configured, queues a PENDING Telegram replication job for a future
+ * server-side worker.
  *
  * The Android client uploads media directly to Cloudinary (signed via
  * `cloudinary-upload-auth`) and then calls this function with only the
@@ -18,6 +20,13 @@ import { getSupabaseAdmin, getSupabaseAuth } from "../shared/auth.ts";
  *     (never from the client), status READY, storage_provider cloudinary
  *   - is idempotent on client_upload_id, so retrying the same request
  *     never creates a duplicate media record
+ *   - when a Telegram destination exists and is enabled, creates a PENDING
+ *     replication_jobs row — idempotent on
+ *     (media_id, destination_type, telegram_config_id), so retried or
+ *     concurrent finalize requests never create duplicate jobs
+ *
+ * This function NEVER uploads media to Telegram and NEVER exposes the
+ * Telegram bot token. Replication is queued for a later server-side worker.
  *
  * The Cloudinary API Secret and Supabase service-role key never appear in
  * the response and are never logged.
@@ -63,6 +72,11 @@ import { getSupabaseAdmin, getSupabaseAuth } from "../shared/auth.ts";
  *       "storage_path": "...",
  *       "storage_url": "...",
  *       "uploaded_at": "..."
+ *     },
+ *     "telegram_job": {                    // null when Telegram is not
+ *       "id": "uuid",                      // enabled/configured
+ *       "destination_type": "telegram",
+ *       "status": "PENDING"
  *     }
  *   }
  */
@@ -71,6 +85,22 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
 const MEDIA_SELECT =
   "id, owner_id, status, client_upload_id, storage_asset_id, storage_path, storage_url, uploaded_at";
+
+const TELEGRAM_JOB_SELECT =
+  "id, media_id, destination_type, status, telegram_config_id, attempt_count, last_error, created_at";
+
+type AdminClient = ReturnType<typeof getSupabaseAdmin>;
+
+type TelegramJobRow = {
+  id: string;
+  media_id: string;
+  destination_type: string;
+  status: string;
+  telegram_config_id: string | null;
+  attempt_count: number;
+  last_error: string | null;
+  created_at: string;
+};
 
 function json(payload: unknown, status: number): Response {
   return new Response(
@@ -93,6 +123,107 @@ function toPositiveInt(value: unknown): number | null {
     return Number.parseInt(value, 10);
   }
   return null;
+}
+
+/**
+ * Creates a PENDING Telegram replication job for a finalized media asset,
+ * entirely server-side. Returns the job row, or null when the user has no
+ * enabled/configured Telegram destination. Idempotent: the unique index on
+ * (media_id, destination_type, telegram_config_id) plus an ignore-duplicates
+ * insert guarantees a retried or concurrent finalize never creates a second
+ * job. Never uploads media to Telegram and never returns the bot token.
+ */
+async function ensureTelegramReplicationJob(
+  admin: AdminClient,
+  userId: string,
+  mediaId: string,
+): Promise<TelegramJobRow | null> {
+  // Only queue work when the user actually has a usable Telegram destination.
+  const { data: config, error: configError } = await admin
+    .from("telegram_configs")
+    .select("id, chat_id, enabled")
+    .eq("user_id", userId)
+    .maybeSingle();
+
+  if (configError) {
+    throw new Error(`Telegram config lookup failed: ${configError.message}`);
+  }
+  if (!config || config.enabled !== true) return null;
+  if (typeof config.chat_id !== "string" || config.chat_id.trim().length === 0) return null;
+
+  // Fast path: the job for this media/config already exists.
+  const { data: existing, error: existingError } = await admin
+    .from("replication_jobs")
+    .select(TELEGRAM_JOB_SELECT)
+    .eq("media_id", mediaId)
+    .eq("destination_type", "telegram")
+    .eq("telegram_config_id", config.id)
+    .maybeSingle();
+
+  if (existingError) {
+    throw new Error(`Telegram job lookup failed: ${existingError.message}`);
+  }
+  if (existing) return existing;
+
+  const now = new Date().toISOString();
+  const { data: created, error: insertError } = await admin
+    .from("replication_jobs")
+    .insert(
+      {
+        media_id: mediaId,
+        destination_type: "telegram",
+        telegram_config_id: config.id,
+        status: "PENDING",
+        attempt_count: 0,
+        created_at: now,
+        updated_at: now,
+      },
+      {
+        onConflict: "media_id,destination_type,telegram_config_id",
+        ignoreDuplicates: true,
+      },
+    )
+    .select(TELEGRAM_JOB_SELECT)
+    .maybeSingle();
+
+  if (insertError) {
+    // 23505 = unique_violation: a concurrent request created the job first.
+    if (insertError.code === "23505") {
+      const { data: raced } = await admin
+        .from("replication_jobs")
+        .select(TELEGRAM_JOB_SELECT)
+        .eq("media_id", mediaId)
+        .eq("destination_type", "telegram")
+        .eq("telegram_config_id", config.id)
+        .maybeSingle();
+      return raced ?? null;
+    }
+    throw new Error(`Failed to create Telegram replication job: ${insertError.message}`);
+  }
+  if (created) return created;
+
+  // Insert was skipped because the job already exists (ignoreDuplicates).
+  const { data: raced } = await admin
+    .from("replication_jobs")
+    .select(TELEGRAM_JOB_SELECT)
+    .eq("media_id", mediaId)
+    .eq("destination_type", "telegram")
+    .eq("telegram_config_id", config.id)
+    .maybeSingle();
+  return raced ?? null;
+}
+
+function successWithJob(media: unknown, job: TelegramJobRow | null): Response {
+  return json(
+    {
+      success: true,
+      media,
+      telegram_job: job
+        ? { id: job.id, destination_type: job.destination_type, status: job.status }
+        : null,
+    },
+    200,
+  );
 }
 
 serve(async (req: Request) => {
@@ -183,7 +314,10 @@ serve(async (req: Request) => {
       if (existing.data.owner_id !== user.id) {
         return json({ error: "client_upload_id is already registered to another user" }, 409);
       }
-      return json({ success: true, media: existing.data }, 200);
+      // Ensure the Telegram job exists even on a retry (self-healing when the
+      // previous attempt failed after the media row was written).
+      const job = await ensureTelegramReplicationJob(admin, user.id, existing.data.id);
+      return successWithJob(existing.data, job);
     }
 
     // ── 6. Create the media record (all identity fields from the JWT) ──
@@ -218,7 +352,8 @@ serve(async (req: Request) => {
       throw new Error(`Failed to record media: ${insertError.message}`);
     }
     if (inserted) {
-      return json({ success: true, media: inserted }, 200);
+      const job = await ensureTelegramReplicationJob(admin, user.id, inserted.id);
+      return successWithJob(inserted, job);
     }
 
     // A concurrent request won the race. Return its row only if it is ours.
@@ -234,7 +369,8 @@ serve(async (req: Request) => {
     if (raced.data.owner_id !== user.id) {
       return json({ error: "client_upload_id is already registered to another user" }, 409);
     }
-    return json({ success: true, media: raced.data }, 200);
+    const racedJob = await ensureTelegramReplicationJob(admin, user.id, raced.data.id);
+    return successWithJob(raced.data, racedJob);
   } catch (error) {
     const message = (error as Error).message;
     const isAuthError =

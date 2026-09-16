@@ -21,9 +21,18 @@ Records a successful Cloudinary upload as a `media_assets` row so server-side
 replication jobs can process it later. Authenticates the user, verifies the
 Cloudinary asset is in the user's own folder, verifies `device_id` ownership,
 and is idempotent on `client_upload_id` (retries never duplicate records).
+
+When the user has a Telegram destination enabled/configured, it also creates a
+`PENDING` row in `replication_jobs` (`destination_type = 'telegram'`) for the
+future server-side Telegram worker. Job creation is server-side only and
+idempotent on `(media_id, destination_type, telegram_config_id)`, so retried or
+concurrent finalize requests never create duplicate jobs. It NEVER uploads
+media to Telegram and NEVER exposes the Telegram bot token.
 Requires authenticated user (JWT).
 
+Deployment applies the queue migration too:
 ```bash
+supabase db push
 supabase functions deploy finalize-media
 ```
 
