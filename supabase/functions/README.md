@@ -36,6 +36,53 @@ supabase db push
 supabase functions deploy finalize-media
 ```
 
+### `telegram-replicate`
+Server-side worker that processes PENDING/RETRYING Telegram replication jobs.
+Automatically called by the `finalize-media` function when Telegram backup is enabled.
+
+**Worker behavior:**
+- Atomically claims one job at a time using `SELECT FOR UPDATE SKIP LOCKED` via the `claim_telegram_job()` SQL function
+- Loads the media's Cloudinary URL and the user's Telegram bot token from the server-side secrets store
+- Downloads media from Cloudinary via server-side fetch (never from Android)
+- Sends the media to Telegram using the appropriate Bot API method (sendPhoto/sendVideo/sendDocument)
+- Handles Telegram rate limits (429) by requeueing with the Telegram-suggested retry-after delay
+- Handles transient failures (5xx, network errors) with exponential backoff
+- Handles permanent failures (401/403/400) by marking the job FAILED
+- Skips files exceeding Telegram's size limits (10 MB photo / 50 MB video+document)
+- Never logs the Telegram Bot Token
+- Never exposes the Bot Token to Android clients
+- Is idempotent — a completed job is never re-processed
+
+**Processing limits:**
+- Maximum 5 jobs per invocation (stays within Edge Function timeout)
+- Maximum 3 concurrent in-process workers
+
+**Required server-side secrets (Supabase Edge Function secrets):**
+```
+SUPABASE_URL=auto-provided
+SUPABASE_SERVICE_ROLE_KEY=auto-provided
+```
+Plus bot tokens stored via the Supabase Vault extension or as individual secrets:
+```
+# Option A: Supabase Vault (recommended)
+# Store bot tokens via the Vault UI or vault.write() SQL function
+# referenced by bot_token_secret_id in telegram_configs
+
+# Option B: Individual secrets (fallback)
+# Set via: supabase secrets set TELEGRAM_BOT_TOKEN_USER_<uuid>=<token>
+```
+
+**Trigger modes:**
+- HTTP POST: `supabase functions invoke telegram-replicate --body '{}'`
+- Public URL (for cron/manual test): append `?public_url=true`
+- Cron scheduling (recommended): set up a pg_cron job or external scheduler to call the function periodically
+
+**Deployment:**
+```bash
+supabase db push                   # applies the worker SQL migration
+supabase functions deploy telegram-replicate
+```
+
 ### `cloudinary-upload-auth`
 Generates signed Cloudinary upload authorization for authenticated users.
 The API Secret is never exposed to the client. Requires authenticated user (JWT).
