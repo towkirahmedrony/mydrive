@@ -1,4 +1,4 @@
-import { serve } from "jsr:@std/http/server";
+import { serve } from "jsr:@std/http";
 import { corsHeaders, handleCors } from "../shared/cors.ts";
 import { getSupabaseAuth } from "../shared/auth.ts";
 
