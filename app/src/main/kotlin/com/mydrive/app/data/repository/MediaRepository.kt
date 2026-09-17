@@ -218,6 +218,7 @@ class MediaRepository(
                 val items = mediaStore.loadMedia().map { item ->
                     item.copy(isFavorite = item.id in favoriteIds)
                 }
+                syncRepository.reconcileMedia(items)
                 // Prune references to media that no longer exists. This is only
                 // safe after a complete load with full media access, otherwise a
                 // partial query could wrongly discard still-valid references.

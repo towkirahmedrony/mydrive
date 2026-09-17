@@ -10,8 +10,7 @@ import com.mydrive.app.data.remote.FinalizeResult
 import com.mydrive.app.data.remote.MediaFinalizeRequest
 import com.mydrive.app.data.remote.MediaFinalizeService
 import com.mydrive.app.data.remote.NetworkMonitor
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.launch
+import com.mydrive.app.data.remote.UploadLog
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
@@ -37,7 +36,7 @@ class BackupRepository(
     private val network: NetworkMonitor,
     private val deviceIdProvider: suspend () -> String?,
     private val mediaLookup: (String) -> MediaItem?,
-    private val scope: CoroutineScope
+    private val scheduleUploadWork: () -> Unit
 ) {
 
     private val workerMutex = Mutex()
@@ -56,7 +55,7 @@ class BackupRepository(
         if (gate() != BackupGate.Ready) return
         syncRepository.setPaused(false)
         syncRepository.enqueue(ids)
-        launchWorker()
+        scheduleUploadWork()
     }
 
     fun retry(id: String) = retryAll(listOf(id))
@@ -66,7 +65,7 @@ class BackupRepository(
         if (gate() != BackupGate.Ready) return
         syncRepository.setPaused(false)
         syncRepository.retryAll(ids)
-        launchWorker()
+        scheduleUploadWork()
     }
 
     fun pause() {
@@ -76,17 +75,15 @@ class BackupRepository(
     fun resume() {
         if (gate() != BackupGate.Ready) return
         syncRepository.setPaused(false)
-        launchWorker()
+        scheduleUploadWork()
     }
 
     fun cancel(id: String) {
         syncRepository.cancel(id)
     }
 
-    private fun launchWorker() {
-        scope.launch {
-            workerMutex.withLock { processQueue() }
-        }
+    suspend fun processPendingQueue() {
+        workerMutex.withLock { processQueue() }
     }
 
     private suspend fun processQueue() {
@@ -105,20 +102,18 @@ class BackupRepository(
         ?.key
 
     private suspend fun processOne(id: String) {
+        UploadLog.itemClaimed(id)
         val record = syncRepository.records.value[id] ?: return
         if (record.state.toBackupState().resumeLocally() != BackupState.WAITING) return
 
         val item = mediaLookup(id)
         if (item == null) {
+            UploadLog.uploadFailed(id, "media_unavailable")
             syncRepository.updateState(
                 id = id,
                 state = BackupState.FAILED,
                 errorMessage = "This photo is no longer available on this device."
             )
-            return
-        }
-        if (item.type != MediaType.PHOTO) {
-            syncRepository.updateState(id = id, state = BackupState.NOT_STARTED)
             return
         }
 
@@ -142,14 +137,16 @@ class BackupRepository(
      */
     private suspend fun uploadToCloudinary(id: String, item: MediaItem): Boolean {
         // ── Step 1: Upload to Cloudinary ────────────────────────────────
+        val resourceType = if (item.type == MediaType.VIDEO) "video" else "image"
         syncRepository.updateState(id = id, state = BackupState.REQUESTING_CLOUDINARY_AUTH)
 
         val authResult = cloudinaryService.requestUploadAuth(
-            resourceType = if (item.type == MediaType.VIDEO) "video" else "image"
+            resourceType = resourceType
         )
 
         when (authResult) {
             is CloudinaryAuthResult.Unauthorized -> {
+                UploadLog.uploadFailed(id, "authorization_unauthorized")
                 syncRepository.updateState(
                     id = id,
                     state = BackupState.FAILED,
@@ -158,6 +155,7 @@ class BackupRepository(
                 return false
             }
             is CloudinaryAuthResult.Misconfigured -> {
+                UploadLog.uploadFailed(id, "authorization_misconfigured")
                 syncRepository.updateState(
                     id = id,
                     state = BackupState.FAILED,
@@ -166,6 +164,7 @@ class BackupRepository(
                 return false
             }
             is CloudinaryAuthResult.NetworkUnavailable -> {
+                UploadLog.uploadFailed(id, "authorization_network_unavailable")
                 syncRepository.updateState(
                     id = id,
                     state = BackupState.FAILED,
@@ -174,6 +173,7 @@ class BackupRepository(
                 return false
             }
             is CloudinaryAuthResult.Timeout -> {
+                UploadLog.uploadFailed(id, "authorization_timeout")
                 syncRepository.updateState(
                     id = id,
                     state = BackupState.FAILED,
@@ -182,6 +182,7 @@ class BackupRepository(
                 return false
             }
             is CloudinaryAuthResult.Error -> {
+                UploadLog.uploadFailed(id, "authorization_error")
                 syncRepository.updateState(
                     id = id,
                     state = BackupState.FAILED,
@@ -190,11 +191,12 @@ class BackupRepository(
                 return false
             }
             is CloudinaryAuthResult.Success -> {
-                // Auth obtained, proceed to upload
+                UploadLog.authObtained(id, resourceType)
             }
         }
 
         syncRepository.updateState(id = id, state = BackupState.UPLOADING_TO_CLOUDINARY)
+        UploadLog.uploadStarted(id, resourceType)
 
         val uploadResult = cloudinaryService.uploadToCloudinary(
             auth = authResult as CloudinaryAuthResult.Success,
@@ -217,9 +219,11 @@ class BackupRepository(
                     resourceType = uploadResult.resourceType
                 )
                 syncRepository.updateState(id = id, state = BackupState.CLOUDINARY_COMPLETED)
+                UploadLog.uploadCompleted(id, uploadResult.assetId, uploadResult.publicId)
                 return true
             }
             is CloudinaryUploadResult.Unauthorized -> {
+                UploadLog.uploadFailed(id, "upload_unauthorized")
                 syncRepository.updateState(
                     id = id,
                     state = BackupState.FAILED,
@@ -228,6 +232,7 @@ class BackupRepository(
                 return false
             }
             is CloudinaryUploadResult.NetworkUnavailable -> {
+                UploadLog.uploadFailed(id, "upload_network_unavailable")
                 syncRepository.updateState(
                     id = id,
                     state = BackupState.FAILED,
@@ -236,6 +241,7 @@ class BackupRepository(
                 return false
             }
             is CloudinaryUploadResult.Timeout -> {
+                UploadLog.uploadFailed(id, "upload_timeout")
                 syncRepository.updateState(
                     id = id,
                     state = BackupState.FAILED,
@@ -244,6 +250,7 @@ class BackupRepository(
                 return false
             }
             is CloudinaryUploadResult.FileTooLarge -> {
+                UploadLog.uploadFailed(id, "file_too_large")
                 syncRepository.updateState(
                     id = id,
                     state = BackupState.FAILED,
@@ -252,6 +259,7 @@ class BackupRepository(
                 return false
             }
             is CloudinaryUploadResult.UnsupportedMedia -> {
+                UploadLog.uploadFailed(id, "unsupported_media")
                 syncRepository.updateState(
                     id = id,
                     state = BackupState.FAILED,
@@ -260,6 +268,7 @@ class BackupRepository(
                 return false
             }
             is CloudinaryUploadResult.MediaUnavailable -> {
+                UploadLog.uploadFailed(id, "media_unavailable")
                 syncRepository.updateState(
                     id = id,
                     state = BackupState.FAILED,
@@ -268,6 +277,7 @@ class BackupRepository(
                 return false
             }
             is CloudinaryUploadResult.UploadFailed -> {
+                UploadLog.uploadFailed(id, "http_${uploadResult.httpStatus}")
                 syncRepository.updateState(
                     id = id,
                     state = BackupState.FAILED,
@@ -276,6 +286,7 @@ class BackupRepository(
                 return false
             }
             is CloudinaryUploadResult.Error -> {
+                UploadLog.uploadFailed(id, "upload_error")
                 syncRepository.updateState(
                     id = id,
                     state = BackupState.FAILED,
@@ -297,6 +308,7 @@ class BackupRepository(
         val publicId = record.cloudinaryPublicId
         val secureUrl = record.cloudinarySecureUrl
         if (assetId.isNullOrBlank() || publicId.isNullOrBlank() || secureUrl.isNullOrBlank()) {
+            UploadLog.finalizeFailed(id, "incomplete_cloudinary_result")
             syncRepository.updateState(
                 id = id,
                 state = BackupState.FAILED,
@@ -307,8 +319,9 @@ class BackupRepository(
 
         syncRepository.updateState(id = id, state = BackupState.FINALIZING_SUPABASE)
 
-        val deviceId = deviceIdProvider()
+        val deviceId = runCatching { deviceIdProvider() }.getOrNull()
         if (deviceId.isNullOrBlank()) {
+            UploadLog.finalizeFailed(id, "device_not_registered")
             syncRepository.updateState(
                 id = id,
                 state = BackupState.FAILED,
@@ -319,7 +332,11 @@ class BackupRepository(
 
         val request = MediaFinalizeRequest(
             clientUploadId = record.clientUploadId
-                ?: java.util.UUID.randomUUID().toString(),
+                ?: return syncRepository.updateState(
+                    id = id,
+                    state = BackupState.FAILED,
+                    errorMessage = "Upload identity is missing. Please retry."
+                ),
             deviceId = deviceId,
             localMediaId = item.mediaStoreId.takeIf { it > 0L },
             fileName = item.filename,
@@ -336,14 +353,19 @@ class BackupRepository(
             resourceType = record.cloudinaryResourceType.orEmpty()
         )
 
+        UploadLog.finalizeStarted(id, request.clientUploadId)
         when (val result = mediaFinalizeService.finalize(request)) {
             is FinalizeResult.Success -> {
                 // Cloudinary upload is the primary (and only) destination.
                 // Telegram replication will happen server-side after Supabase
                 // media finalization.
+                syncRepository.updateFinalizedResult(id, result.mediaId)
                 syncRepository.updateState(id = id, state = BackupState.COMPLETED)
+                UploadLog.finalizeSucceeded(id, result.mediaId)
+                UploadLog.localUpdated(id, BackupState.COMPLETED.name)
             }
             is FinalizeResult.Unauthorized -> {
+                UploadLog.finalizeFailed(id, "unauthorized")
                 syncRepository.updateState(
                     id = id,
                     state = BackupState.FAILED,
@@ -351,6 +373,7 @@ class BackupRepository(
                 )
             }
             is FinalizeResult.NetworkUnavailable -> {
+                UploadLog.finalizeFailed(id, "network_unavailable")
                 syncRepository.updateState(
                     id = id,
                     state = BackupState.FAILED,
@@ -358,6 +381,7 @@ class BackupRepository(
                 )
             }
             is FinalizeResult.Timeout -> {
+                UploadLog.finalizeFailed(id, "timeout")
                 syncRepository.updateState(
                     id = id,
                     state = BackupState.FAILED,
@@ -365,6 +389,7 @@ class BackupRepository(
                 )
             }
             is FinalizeResult.Misconfigured -> {
+                UploadLog.finalizeFailed(id, "misconfigured")
                 syncRepository.updateState(
                     id = id,
                     state = BackupState.FAILED,
@@ -372,6 +397,7 @@ class BackupRepository(
                 )
             }
             is FinalizeResult.Rejected -> {
+                UploadLog.finalizeFailed(id, "rejected")
                 syncRepository.updateState(
                     id = id,
                     state = BackupState.FAILED,
@@ -379,6 +405,7 @@ class BackupRepository(
                 )
             }
             is FinalizeResult.Error -> {
+                UploadLog.finalizeFailed(id, "error")
                 syncRepository.updateState(
                     id = id,
                     state = BackupState.FAILED,

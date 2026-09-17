@@ -232,6 +232,8 @@ class CloudinaryUploadService(
                 CloudinaryUploadResult.MediaUnavailable
             } catch (_: SecurityException) {
                 CloudinaryUploadResult.MediaUnavailable
+            } catch (_: FileTooLargeException) {
+                CloudinaryUploadResult.FileTooLarge
             } catch (_: Exception) {
                 CloudinaryUploadResult.NetworkUnavailable
             } finally {
@@ -330,7 +332,15 @@ class CloudinaryUploadService(
                 folder = root.string("folder").orEmpty(),
                 resourceType = root.string("resource_type").orEmpty(),
                 params = params
-            )
+            ).let { auth ->
+                if (auth.cloudName.isBlank() || auth.apiKey.isBlank() || auth.timestamp <= 0L ||
+                    auth.signature.isBlank() || auth.resourceType !in setOf("image", "video", "raw")
+                ) {
+                    CloudinaryAuthResult.Error("Cloudinary authorization response is incomplete")
+                } else {
+                    auth
+                }
+            }
         } catch (_: Exception) {
             CloudinaryAuthResult.Error("Failed to parse auth response")
         }
@@ -343,15 +353,22 @@ class CloudinaryUploadService(
             if (error != null) {
                 return CloudinaryUploadResult.UploadFailed(400, error)
             }
-            CloudinaryUploadResult.Success(
-                assetId = root.string("asset_id").orEmpty(),
-                publicId = root.string("public_id").orEmpty(),
-                secureUrl = root.string("secure_url").orEmpty(),
-                version = root.long("version") ?: 0L,
-                format = root.string("format").orEmpty(),
-                resourceType = root.string("resource_type").orEmpty(),
-                bytes = root.long("bytes") ?: 0L
-            )
+            val assetId = root.string("asset_id").orEmpty()
+            val publicId = root.string("public_id").orEmpty()
+            val secureUrl = root.string("secure_url").orEmpty()
+            if (assetId.isBlank() || publicId.isBlank() || secureUrl.isBlank()) {
+                CloudinaryUploadResult.Error("Cloudinary upload response is incomplete")
+            } else {
+                CloudinaryUploadResult.Success(
+                    assetId = assetId,
+                    publicId = publicId,
+                    secureUrl = secureUrl,
+                    version = root.long("version") ?: 0L,
+                    format = root.string("format").orEmpty(),
+                    resourceType = root.string("resource_type").orEmpty(),
+                    bytes = root.long("bytes") ?: 0L
+                )
+            }
         } catch (_: Exception) {
             CloudinaryUploadResult.Error("Failed to parse upload response")
         }

@@ -124,7 +124,6 @@ class SyncViewModel(
                 val records = syncRepository.records.value
                 repository.media.value
                     .filter { item ->
-                        if (item.type != MediaType.PHOTO) return@filter false
                         val state = records[item.id]?.state?.toBackupState()?.resumeLocally()
                             ?: item.backupState
                         state == BackupState.NOT_STARTED || state.isRetryable
@@ -132,7 +131,7 @@ class SyncViewModel(
                     .map { it.id }
             }
             if (eligible.isEmpty()) {
-                actionNotice.value = "No photos are ready to back up."
+                actionNotice.value = "No photos or videos are ready to back up."
                 return@launch
             }
             backupRepository.startBackup(eligible)

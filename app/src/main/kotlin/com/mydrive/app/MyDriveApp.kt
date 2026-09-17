@@ -6,6 +6,7 @@ import com.mydrive.app.data.local.FavoritesStore
 import com.mydrive.app.data.local.GalleryTabStore
 import com.mydrive.app.data.local.SyncStateStore
 import com.mydrive.app.data.local.TelegramSettingsStore
+import com.mydrive.app.data.local.UploadQueueDatabase
 import com.mydrive.app.data.media.MediaPermissions
 import com.mydrive.app.data.media.MediaStoreDataSource
 import com.mydrive.app.data.remote.CloudinaryUploadService
@@ -14,6 +15,7 @@ import com.mydrive.app.data.remote.NetworkMonitor
 import com.mydrive.app.data.remote.SupabaseConfig
 import com.mydrive.app.data.remote.SupabaseModule
 import com.mydrive.app.data.remote.TelegramApiVerifier
+import com.mydrive.app.data.worker.UploadWorkScheduler
 import com.mydrive.app.data.repository.AuthRepository
 import com.mydrive.app.data.repository.BackupRepository
 import com.mydrive.app.data.repository.MediaRepository
@@ -28,7 +30,7 @@ class MyDriveApp : Application() {
     val galleryTabStore: GalleryTabStore by lazy { GalleryTabStore(this) }
 
     val syncRepository: SyncRepository by lazy {
-        SyncRepository(SyncStateStore(this))
+        SyncRepository(SyncStateStore(this), UploadQueueDatabase.get(this))
     }
 
     val telegramSettingsStore: TelegramSettingsStore by lazy { TelegramSettingsStore(this) }
@@ -67,7 +69,7 @@ class MyDriveApp : Application() {
             network = networkMonitor,
             deviceIdProvider = { authRepository.ensureDeviceRegistered() },
             mediaLookup = mediaRepository::mediaById,
-            scope = applicationScope
+            scheduleUploadWork = { UploadWorkScheduler.schedule(this) }
         )
     }
 
@@ -78,5 +80,10 @@ class MyDriveApp : Application() {
             network = networkMonitor,
             scope = applicationScope
         )
+    }
+
+    override fun onCreate() {
+        super.onCreate()
+        UploadWorkScheduler.schedule(this)
     }
 }

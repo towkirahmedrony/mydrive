@@ -7,6 +7,8 @@ plugins {
     alias(libs.plugins.kotlin.serialization)
 }
 
+apply(plugin = "org.jetbrains.kotlin.kapt")
+
 /*
  * Permanent release signing configuration for My Drive.
  *
@@ -151,5 +153,9 @@ dependencies {
     implementation(libs.supabase.postgrest.kt)
     implementation(libs.ktor.client.okhttp)
     implementation(libs.kotlinx.serialization.json)
+    implementation(libs.androidx.room.runtime)
+    implementation(libs.androidx.room.ktx)
+    add("kapt", libs.androidx.room.compiler)
+    implementation(libs.androidx.work.runtime.ktx)
     debugImplementation(libs.androidx.compose.ui.tooling)
 }
