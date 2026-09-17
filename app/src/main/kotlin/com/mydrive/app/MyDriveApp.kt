@@ -9,6 +9,7 @@ import com.mydrive.app.data.local.TelegramSettingsStore
 import com.mydrive.app.data.local.UploadQueueDatabase
 import com.mydrive.app.data.media.MediaPermissions
 import com.mydrive.app.data.media.MediaStoreDataSource
+import com.mydrive.app.data.auth.AuthenticatedSessionProvider
 import com.mydrive.app.data.remote.CloudinaryUploadService
 import com.mydrive.app.data.remote.MediaFinalizeService
 import com.mydrive.app.data.remote.NetworkMonitor
@@ -53,12 +54,16 @@ class MyDriveApp : Application() {
         if (SupabaseConfig.isConfigured) SupabaseModule.create() else null
     }
 
+    private val sessionProvider by lazy {
+        AuthenticatedSessionProvider(supabaseClient)
+    }
+
     private val cloudinaryService by lazy {
-        CloudinaryUploadService(this, supabaseClient, networkMonitor)
+        CloudinaryUploadService(this, supabaseClient, sessionProvider, networkMonitor)
     }
 
     private val mediaFinalizeService by lazy {
-        MediaFinalizeService(this, supabaseClient, networkMonitor)
+        MediaFinalizeService(this, supabaseClient, sessionProvider, networkMonitor)
     }
 
     val backupRepository: BackupRepository by lazy {
@@ -67,6 +72,7 @@ class MyDriveApp : Application() {
             cloudinaryService = cloudinaryService,
             mediaFinalizeService = mediaFinalizeService,
             network = networkMonitor,
+            sessionProvider = sessionProvider,
             deviceIdProvider = { authRepository.ensureDeviceRegistered() },
             mediaLookup = mediaRepository::mediaById,
             scheduleUploadWork = { UploadWorkScheduler.schedule(this) }
@@ -76,14 +82,21 @@ class MyDriveApp : Application() {
     val authRepository: AuthRepository by lazy {
         AuthRepository(
             client = supabaseClient,
+            sessionProvider = sessionProvider,
             deviceIdStore = DeviceIdStore(this),
             network = networkMonitor,
-            scope = applicationScope
+            scope = applicationScope,
+            onSignedOut = { userId -> syncRepository.retainOwner(userId) },
+            onAuthenticated = { userId ->
+                syncRepository.bindOwner(userId)
+                UploadWorkScheduler.schedule(this, replace = true)
+            }
         )
     }
 
     override fun onCreate() {
         super.onCreate()
+        authRepository
         UploadWorkScheduler.schedule(this)
     }
 }

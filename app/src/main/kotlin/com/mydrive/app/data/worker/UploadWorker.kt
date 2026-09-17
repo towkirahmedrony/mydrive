@@ -11,17 +11,19 @@ import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import com.mydrive.app.MyDriveApp
 import com.mydrive.app.data.remote.UploadLog
+import com.mydrive.app.data.repository.BackupRepository
 import java.util.concurrent.TimeUnit
 
 object UploadWorkScheduler {
     private const val UNIQUE_WORK_NAME = "mydrive-media-upload-queue"
 
-    fun schedule(context: Context) {
+    fun schedule(context: Context, replace: Boolean = false) {
         val request = OneTimeWorkRequestBuilder<UploadWorker>()
             .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
             .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS)
             .build()
-        WorkManager.getInstance(context).enqueueUniqueWork(UNIQUE_WORK_NAME, ExistingWorkPolicy.KEEP, request)
+        val policy = if (replace) ExistingWorkPolicy.REPLACE else ExistingWorkPolicy.KEEP
+        WorkManager.getInstance(context).enqueueUniqueWork(UNIQUE_WORK_NAME, policy, request)
         UploadLog.workScheduled()
     }
 }
@@ -31,8 +33,18 @@ class UploadWorker(appContext: Context, params: WorkerParameters) : CoroutineWor
         val app = applicationContext as MyDriveApp
         UploadLog.workStarted()
         return try {
-            app.backupRepository.processPendingQueue()
-            Result.success()
+            when (app.backupRepository.processPendingQueue()) {
+                BackupRepository.QueueDrain.Idle -> Result.success()
+                BackupRepository.QueueDrain.AwaitingSession -> Result.success()
+                BackupRepository.QueueDrain.NetworkUnavailable -> {
+                    if (runAttemptCount < 5) {
+                        UploadLog.retryScheduled(runAttemptCount + 1)
+                        Result.retry()
+                    } else {
+                        Result.success()
+                    }
+                }
+            }
         } catch (error: Throwable) {
             if (runAttemptCount < 5) {
                 UploadLog.retryScheduled(runAttemptCount + 1)

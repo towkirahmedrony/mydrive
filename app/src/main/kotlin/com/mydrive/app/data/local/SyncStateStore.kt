@@ -18,7 +18,8 @@ data class SyncRecord(
     val cloudinaryFormat: String? = null,
     val cloudinaryResourceType: String? = null,
     val clientUploadId: String? = null,
-    val remoteMediaId: String? = null
+    val remoteMediaId: String? = null,
+    val ownerUserId: String? = null
 )
 
 class SyncStateStore(context: Context) {

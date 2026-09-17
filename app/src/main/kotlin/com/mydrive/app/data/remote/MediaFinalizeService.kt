@@ -2,8 +2,9 @@ package com.mydrive.app.data.remote
 
 import android.content.Context
 import com.mydrive.app.BuildConfig
+import com.mydrive.app.data.auth.AuthenticatedSessionProvider
+import com.mydrive.app.data.auth.PreparedAuth
 import io.github.jan.supabase.SupabaseClient
-import io.github.jan.supabase.auth.auth
 import java.net.HttpURLConnection
 import java.net.SocketTimeoutException
 import java.net.URL
@@ -61,6 +62,7 @@ data class MediaFinalizeRequest(
 class MediaFinalizeService(
     private val context: Context,
     private val supabaseClient: SupabaseClient?,
+    private val sessionProvider: AuthenticatedSessionProvider,
     private val network: NetworkMonitor
 ) {
 
@@ -71,55 +73,66 @@ class MediaFinalizeService(
             if (!network.isOnline()) return@withContext FinalizeResult.NetworkUnavailable
             if (supabaseClient == null) return@withContext FinalizeResult.Misconfigured
 
-            val session = supabaseClient.auth.currentSessionOrNull()
-                ?: return@withContext FinalizeResult.Unauthorized
-            val accessToken = session.accessToken
-                ?: return@withContext FinalizeResult.Unauthorized
-
             val projectRef = extractProjectRef(BuildConfig.SUPABASE_URL)
             val edgeFunctionUrl =
                 "https://$projectRef.supabase.co/functions/v1/finalize-media"
             val body = buildRequestBody(request)
 
-            val connection = try {
-                (URL(edgeFunctionUrl).openConnection() as HttpURLConnection)
-            } catch (_: Exception) {
-                return@withContext FinalizeResult.NetworkUnavailable
-            }
-
-            return@withContext try {
-                connection.requestMethod = "POST"
-                connection.doOutput = true
-                connection.useCaches = false
-                connection.connectTimeout = CONNECT_TIMEOUT_MS
-                connection.readTimeout = READ_TIMEOUT_MS
-                connection.setRequestProperty("Content-Type", "application/json")
-                connection.setRequestProperty("apikey", BuildConfig.SUPABASE_ANON_KEY)
-                connection.setRequestProperty("Authorization", "Bearer $accessToken")
-
-                connection.outputStream.use { output ->
-                    output.write(body.toByteArray(Charsets.UTF_8))
+            var forceRefresh = false
+            repeat(2) {
+                val prepared = sessionProvider.prepare(forceRefresh)
+                val accessToken = when (prepared) {
+                    is PreparedAuth.Available -> prepared.accessToken
+                    is PreparedAuth.NetworkError -> return@withContext FinalizeResult.NetworkUnavailable
+                    is PreparedAuth.SignedOut -> return@withContext FinalizeResult.Unauthorized
                 }
 
-                val status = connection.responseCode
-                val responseBody = readBody(connection, status)
-
-                when (status) {
-                    200 -> parseSuccess(responseBody)
-                    401 -> FinalizeResult.Unauthorized
-                    400, 403, 409 -> FinalizeResult.Rejected(extractError(responseBody))
-                    500 -> FinalizeResult.Misconfigured
-                    else -> FinalizeResult.Error("Finalization failed: $status")
+                val connection = try {
+                    (URL(edgeFunctionUrl).openConnection() as HttpURLConnection)
+                } catch (_: Exception) {
+                    return@withContext FinalizeResult.NetworkUnavailable
                 }
-            } catch (_: SocketTimeoutException) {
-                FinalizeResult.Timeout
-            } catch (cancellation: CancellationException) {
-                throw cancellation
-            } catch (_: Exception) {
-                FinalizeResult.NetworkUnavailable
-            } finally {
-                connection.disconnect()
+
+                val result = try {
+                    connection.requestMethod = "POST"
+                    connection.doOutput = true
+                    connection.useCaches = false
+                    connection.connectTimeout = CONNECT_TIMEOUT_MS
+                    connection.readTimeout = READ_TIMEOUT_MS
+                    connection.setRequestProperty("Content-Type", "application/json")
+                    connection.setRequestProperty("apikey", BuildConfig.SUPABASE_ANON_KEY)
+                    connection.setRequestProperty("Authorization", "Bearer $accessToken")
+
+                    connection.outputStream.use { output ->
+                        output.write(body.toByteArray(Charsets.UTF_8))
+                    }
+
+                    val status = connection.responseCode
+                    val responseBody = readBody(connection, status)
+                    when (status) {
+                        200 -> parseSuccess(responseBody)
+                        401 -> FinalizeResult.Unauthorized
+                        400, 403, 409 -> FinalizeResult.Rejected(extractError(responseBody))
+                        500 -> FinalizeResult.Misconfigured
+                        else -> FinalizeResult.Error("Finalization failed: $status")
+                    }
+                } catch (_: SocketTimeoutException) {
+                    FinalizeResult.Timeout
+                } catch (cancellation: CancellationException) {
+                    throw cancellation
+                } catch (_: Exception) {
+                    FinalizeResult.NetworkUnavailable
+                } finally {
+                    connection.disconnect()
+                }
+
+                if (result is FinalizeResult.Unauthorized && !forceRefresh) {
+                    forceRefresh = true
+                } else {
+                    return@withContext result
+                }
             }
+            FinalizeResult.Unauthorized
         }
 
     private fun buildRequestBody(request: MediaFinalizeRequest): String =

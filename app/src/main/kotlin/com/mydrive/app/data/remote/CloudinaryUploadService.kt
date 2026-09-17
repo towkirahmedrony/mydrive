@@ -3,8 +3,9 @@ package com.mydrive.app.data.remote
 import android.content.Context
 import android.net.Uri
 import com.mydrive.app.BuildConfig
+import com.mydrive.app.data.auth.AuthenticatedSessionProvider
+import com.mydrive.app.data.auth.PreparedAuth
 import io.github.jan.supabase.SupabaseClient
-import io.github.jan.supabase.auth.auth
 import java.io.FileNotFoundException
 import java.io.InputStream
 import java.io.OutputStream
@@ -77,6 +78,7 @@ sealed class CloudinaryUploadResult {
 class CloudinaryUploadService(
     private val context: Context,
     private val supabaseClient: SupabaseClient?,
+    private val sessionProvider: AuthenticatedSessionProvider,
     private val network: NetworkMonitor
 ) {
 
@@ -92,55 +94,65 @@ class CloudinaryUploadService(
         if (!network.isOnline()) return@withContext CloudinaryAuthResult.NetworkUnavailable
         if (supabaseClient == null) return@withContext CloudinaryAuthResult.Misconfigured
 
-        val session = supabaseClient.auth.currentSessionOrNull()
-            ?: return@withContext CloudinaryAuthResult.Unauthorized
-        val accessToken = session.accessToken
-            ?: return@withContext CloudinaryAuthResult.Unauthorized
-
         val projectRef = extractProjectRef(BuildConfig.SUPABASE_URL)
         val edgeFunctionUrl =
             "https://$projectRef.supabase.co/functions/v1/cloudinary-upload-auth"
-
         val body = """{"resource_type":"$resourceType"}"""
 
-        val connection = try {
-            (URL(edgeFunctionUrl).openConnection() as HttpURLConnection)
-        } catch (_: Exception) {
-            return@withContext CloudinaryAuthResult.NetworkUnavailable
-        }
-
-        return@withContext try {
-            connection.requestMethod = "POST"
-            connection.doOutput = true
-            connection.useCaches = false
-            connection.connectTimeout = CONNECT_TIMEOUT_MS
-            connection.readTimeout = READ_TIMEOUT_MS
-            connection.setRequestProperty("Content-Type", "application/json")
-            connection.setRequestProperty("apikey", BuildConfig.SUPABASE_ANON_KEY)
-            connection.setRequestProperty("Authorization", "Bearer $accessToken")
-
-            connection.outputStream.use { output ->
-                output.write(body.toByteArray(Charsets.UTF_8))
+        var forceRefresh = false
+        repeat(2) {
+            val prepared = sessionProvider.prepare(forceRefresh)
+            val accessToken = when (prepared) {
+                is PreparedAuth.Available -> prepared.accessToken
+                is PreparedAuth.NetworkError -> return@withContext CloudinaryAuthResult.NetworkUnavailable
+                is PreparedAuth.SignedOut -> return@withContext CloudinaryAuthResult.Unauthorized
             }
 
-            val status = connection.responseCode
-            val responseBody = readBody(connection, status)
-
-            when (status) {
-                200 -> parseAuthSuccess(responseBody)
-                401 -> CloudinaryAuthResult.Unauthorized
-                500 -> CloudinaryAuthResult.Misconfigured
-                else -> CloudinaryAuthResult.Error("Auth request failed: $status")
+            val connection = try {
+                (URL(edgeFunctionUrl).openConnection() as HttpURLConnection)
+            } catch (_: Exception) {
+                return@withContext CloudinaryAuthResult.NetworkUnavailable
             }
-        } catch (_: SocketTimeoutException) {
-            CloudinaryAuthResult.Timeout
-        } catch (cancellation: CancellationException) {
-            throw cancellation
-        } catch (_: Exception) {
-            CloudinaryAuthResult.NetworkUnavailable
-        } finally {
-            connection.disconnect()
+
+            val result = try {
+                connection.requestMethod = "POST"
+                connection.doOutput = true
+                connection.useCaches = false
+                connection.connectTimeout = CONNECT_TIMEOUT_MS
+                connection.readTimeout = READ_TIMEOUT_MS
+                connection.setRequestProperty("Content-Type", "application/json")
+                connection.setRequestProperty("apikey", BuildConfig.SUPABASE_ANON_KEY)
+                connection.setRequestProperty("Authorization", "Bearer $accessToken")
+
+                connection.outputStream.use { output ->
+                    output.write(body.toByteArray(Charsets.UTF_8))
+                }
+
+                val status = connection.responseCode
+                val responseBody = readBody(connection, status)
+                when (status) {
+                    200 -> parseAuthSuccess(responseBody)
+                    401 -> CloudinaryAuthResult.Unauthorized
+                    500 -> CloudinaryAuthResult.Misconfigured
+                    else -> CloudinaryAuthResult.Error("Auth request failed: $status")
+                }
+            } catch (_: SocketTimeoutException) {
+                CloudinaryAuthResult.Timeout
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (_: Exception) {
+                CloudinaryAuthResult.NetworkUnavailable
+            } finally {
+                connection.disconnect()
+            }
+
+            if (result is CloudinaryAuthResult.Unauthorized && !forceRefresh) {
+                forceRefresh = true
+            } else {
+                return@withContext result
+            }
         }
+        CloudinaryAuthResult.Unauthorized
     }
 
     /**

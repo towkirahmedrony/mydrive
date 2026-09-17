@@ -3,6 +3,8 @@ package com.mydrive.app.data.repository
 import com.mydrive.app.data.auth.AuthErrorMapper
 import com.mydrive.app.data.auth.AuthState
 import com.mydrive.app.data.auth.AuthUserProfile
+import com.mydrive.app.data.auth.AuthenticatedSessionProvider
+import com.mydrive.app.data.auth.PreparedAuth
 import com.mydrive.app.data.local.DeviceIdStore
 import com.mydrive.app.data.local.DeviceInfoFactory
 import com.mydrive.app.data.remote.NetworkMonitor
@@ -36,9 +38,12 @@ import java.time.Instant
 
 class AuthRepository(
     private val client: SupabaseClient?,
+    private val sessionProvider: AuthenticatedSessionProvider,
     private val deviceIdStore: DeviceIdStore,
     private val network: NetworkMonitor,
-    private val scope: CoroutineScope
+    private val scope: CoroutineScope,
+    private val onSignedOut: (previousUserId: String?) -> Unit = {},
+    private val onAuthenticated: (userId: String) -> Unit = {}
 ) {
 
     private val _state = MutableStateFlow<AuthState>(AuthState.Loading)
@@ -194,9 +199,12 @@ class AuthRepository(
     }
 
     suspend fun logout(): Result<Unit> {
+        val previousUserId = sessionProvider.currentUserIdOrNull()
+            ?: client?.auth?.currentUserOrNull()?.id
         registeredDeviceId = null
         lastSeenAtMillis = 0L
         pendingFullName = null
+        onSignedOut(previousUserId)
         return runCatching {
             client?.auth?.signOut()
             Unit
@@ -216,6 +224,7 @@ class AuthRepository(
         val current = _state.value
         if (current !is AuthState.Authenticated && current !is AuthState.Suspended) return
         scope.launch {
+            runCatching { sessionProvider.prepare() }
             runCatching { touchDevice(force = false) }
         }
     }
@@ -226,6 +235,10 @@ class AuthRepository(
      * backup pipeline when finalizing a Cloudinary upload.
      */
     suspend fun ensureDeviceRegistered(): String? {
+        when (sessionProvider.prepare()) {
+            is PreparedAuth.Available -> Unit
+            else -> return null
+        }
         if (registeredDeviceId != null) return registeredDeviceId
         touchDevice(force = true)
         return registeredDeviceId
@@ -238,11 +251,16 @@ class AuthRepository(
             supabase.auth.sessionStatus.collect { status ->
                 when (status) {
                     is SessionStatus.NotAuthenticated -> {
-                        val current = _state.value
-                        if (current is AuthState.Authenticated || current is AuthState.Suspended) {
+                        val previousUserId = when (val current = _state.value) {
+                            is AuthState.Authenticated -> current.profile.id
+                            is AuthState.Suspended -> current.profile.id
+                            else -> null
+                        }
+                        if (previousUserId != null) {
                             registeredDeviceId = null
                             lastSeenAtMillis = 0L
                             _state.value = AuthState.Unauthenticated
+                            onSignedOut(previousUserId)
                         }
                     }
                     else -> Unit
@@ -252,8 +270,10 @@ class AuthRepository(
     }
 
     private suspend fun completeAuthenticatedSession(pendingFullName: String?) {
+        var resumeUserId: String? = null
         sessionMutex.withLock {
             val supabase = client ?: throw IllegalStateException(notConfiguredMessage())
+            runCatching { supabase.auth.awaitInitialization() }
             val userId = supabase.auth.currentUserOrNull()?.id
                 ?: throw IllegalStateException("Your session expired. Please sign in again.")
             val already = when (val current = _state.value) {
@@ -268,7 +288,9 @@ class AuthRepository(
                 return
             }
             _state.value = AuthState.Authenticated(profile)
+            resumeUserId = userId
         }
+        resumeUserId?.let(onAuthenticated)
         scope.launch {
             runCatching { touchDevice(force = true) }
         }
@@ -318,6 +340,7 @@ class AuthRepository(
     private suspend fun touchDevice(force: Boolean) {
         val supabase = client ?: return
         if (_state.value is AuthState.Suspended) return
+        runCatching { supabase.auth.awaitInitialization() }
         val userId = supabase.auth.currentUserOrNull()?.id ?: return
         val now = System.currentTimeMillis()
         if (!force && now - lastSeenAtMillis < MIN_LAST_SEEN_INTERVAL_MS) return

@@ -47,7 +47,7 @@ class SyncRepository(
     }
 
     @Synchronized
-    fun enqueue(ids: Collection<String>) {
+    fun enqueue(ids: Collection<String>, ownerUserId: String? = null) {
         if (ids.isEmpty()) return
         val now = System.currentTimeMillis()
         val next = HashMap(_records.value)
@@ -55,6 +55,8 @@ class SyncRepository(
             val current = next[id]?.state?.toBackupState()?.resumeLocally()
             if (current != null && (current == BackupState.COMPLETED || current == BackupState.WAITING || current.isActive)) continue
             val previous = next[id]
+            val previousOwner = previous?.ownerUserId
+            if (!previousOwner.isNullOrBlank() && !ownerUserId.isNullOrBlank() && previousOwner != ownerUserId) continue
             val clientUploadId = previous?.clientUploadId ?: UUID.randomUUID().toString()
             next[id] = SyncRecord(
                 state = BackupState.WAITING.name,
@@ -68,7 +70,8 @@ class SyncRepository(
                 cloudinaryFormat = previous?.cloudinaryFormat,
                 cloudinaryResourceType = previous?.cloudinaryResourceType,
                 clientUploadId = clientUploadId,
-                remoteMediaId = previous?.remoteMediaId
+                remoteMediaId = previous?.remoteMediaId,
+                ownerUserId = previousOwner ?: ownerUserId
             )
             runBlocking(Dispatchers.IO) {
                 dao.find(id)?.let { entity ->
@@ -131,6 +134,31 @@ class SyncRepository(
 
     @Synchronized fun cancel(id: String) { val record = _records.value[id] ?: return; if (record.state.toBackupState() == BackupState.COMPLETED) return; updateState(id, BackupState.CANCELLED) }
     fun setPaused(paused: Boolean) { if (_paused.value != paused) { _paused.value = paused; store.writePaused(paused) } }
+
+    @Synchronized
+    fun bindOwner(userId: String?) {
+        if (userId.isNullOrBlank()) return
+        val current = _records.value
+        var changed = false
+        val next = HashMap<String, SyncRecord>(current.size)
+        for ((id, record) in current) {
+            if (record.ownerUserId.isNullOrBlank()) {
+                next[id] = record.copy(ownerUserId = userId)
+                changed = true
+            } else {
+                next[id] = record
+            }
+        }
+        if (changed) commit(next)
+    }
+
+    fun belongsTo(record: SyncRecord, userId: String): Boolean {
+        val owner = record.ownerUserId
+        return !owner.isNullOrBlank() && owner == userId
+    }
+
+    @Synchronized
+    fun retainOwner(userId: String?) = bindOwner(userId)
 
     @Synchronized
     fun reconcile(presentIds: Set<String>) { val current = _records.value; if (current.isNotEmpty() && current.keys.any { it !in presentIds }) commit(current.filterKeys { it in presentIds }) }

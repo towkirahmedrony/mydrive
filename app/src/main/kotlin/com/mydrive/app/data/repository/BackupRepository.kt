@@ -1,5 +1,7 @@
 package com.mydrive.app.data.repository
 
+import com.mydrive.app.data.auth.AuthenticatedSessionProvider
+import com.mydrive.app.data.auth.PreparedAuth
 import com.mydrive.app.data.model.BackupState
 import com.mydrive.app.data.model.MediaItem
 import com.mydrive.app.data.model.MediaType
@@ -34,6 +36,7 @@ class BackupRepository(
     private val cloudinaryService: CloudinaryUploadService,
     private val mediaFinalizeService: MediaFinalizeService,
     private val network: NetworkMonitor,
+    private val sessionProvider: AuthenticatedSessionProvider,
     private val deviceIdProvider: suspend () -> String?,
     private val mediaLookup: (String) -> MediaItem?,
     private val scheduleUploadWork: () -> Unit
@@ -53,8 +56,9 @@ class BackupRepository(
 
     fun startBackup(ids: Collection<String>) {
         if (gate() != BackupGate.Ready) return
+        val ownerUserId = sessionProvider.currentUserIdOrNull() ?: return
         syncRepository.setPaused(false)
-        syncRepository.enqueue(ids)
+        syncRepository.enqueue(ids, ownerUserId)
         scheduleUploadWork()
     }
 
@@ -63,8 +67,14 @@ class BackupRepository(
     fun retryAll(ids: Collection<String>) {
         if (ids.isEmpty()) return
         if (gate() != BackupGate.Ready) return
+        val ownerUserId = sessionProvider.currentUserIdOrNull() ?: return
+        val owned = ids.filter { id ->
+            val record = syncRepository.records.value[id] ?: return@filter false
+            syncRepository.belongsTo(record, ownerUserId)
+        }
+        if (owned.isEmpty()) return
         syncRepository.setPaused(false)
-        syncRepository.retryAll(ids)
+        syncRepository.retryAll(owned)
         scheduleUploadWork()
     }
 
@@ -82,29 +92,45 @@ class BackupRepository(
         syncRepository.cancel(id)
     }
 
-    suspend fun processPendingQueue() {
-        workerMutex.withLock { processQueue() }
-    }
+    suspend fun processPendingQueue(): QueueDrain = workerMutex.withLock { processQueue() }
 
-    private suspend fun processQueue() {
+    private suspend fun processQueue(): QueueDrain {
         while (true) {
-            if (syncRepository.paused.value) break
-            if (gate() != BackupGate.Ready) break
-            val next = nextWaiting() ?: break
-            processOne(next)
+            if (syncRepository.paused.value) return QueueDrain.Idle
+            if (gate() != BackupGate.Ready) return QueueDrain.NetworkUnavailable
+            val prepared = sessionProvider.prepare()
+            val userId = when (prepared) {
+                is PreparedAuth.Available -> prepared.userId
+                is PreparedAuth.NetworkError -> return QueueDrain.NetworkUnavailable
+                is PreparedAuth.SignedOut -> return QueueDrain.AwaitingSession
+            }
+            syncRepository.bindOwner(userId)
+            val next = nextWaiting(userId) ?: return QueueDrain.Idle
+            when (processOne(next, userId)) {
+                ItemOutcome.HaltQueue -> {
+                    return when (sessionProvider.prepare()) {
+                        is PreparedAuth.Available -> QueueDrain.Idle
+                        is PreparedAuth.NetworkError -> QueueDrain.NetworkUnavailable
+                        is PreparedAuth.SignedOut -> QueueDrain.AwaitingSession
+                    }
+                }
+                ItemOutcome.Continue, ItemOutcome.Failed -> Unit
+            }
         }
     }
 
-    private fun nextWaiting(): String? = syncRepository.records.value
+    private fun nextWaiting(userId: String): String? = syncRepository.records.value
         .asSequence()
+        .filter { syncRepository.belongsTo(it.value, userId) }
         .filter { it.value.state.toBackupState().resumeLocally() == BackupState.WAITING }
         .minByOrNull { it.value.queuedAtMillis }
         ?.key
 
-    private suspend fun processOne(id: String) {
+    private suspend fun processOne(id: String, userId: String): ItemOutcome {
         UploadLog.itemClaimed(id)
-        val record = syncRepository.records.value[id] ?: return
-        if (record.state.toBackupState().resumeLocally() != BackupState.WAITING) return
+        val record = syncRepository.records.value[id] ?: return ItemOutcome.Continue
+        if (!syncRepository.belongsTo(record, userId)) return ItemOutcome.Continue
+        if (record.state.toBackupState().resumeLocally() != BackupState.WAITING) return ItemOutcome.Continue
 
         val item = mediaLookup(id)
         if (item == null) {
@@ -114,18 +140,14 @@ class BackupRepository(
                 state = BackupState.FAILED,
                 errorMessage = "This photo is no longer available on this device."
             )
-            return
+            return ItemOutcome.Continue
         }
 
-        // A previous attempt already uploaded this photo to Cloudinary (the
-        // asset identifiers are persisted). Do NOT re-upload it — jump
-        // straight to finalization so Supabase-only failures stay retryable
-        // without burning upload bandwidth.
         val uploaded = record.cloudinaryAssetId != null && record.cloudinaryPublicId != null
-
-        if (!uploaded) {
-            if (uploadToCloudinary(id, item)) {
-                finalizeOnSupabase(id, item)
+        return if (!uploaded) {
+            when (val upload = uploadToCloudinary(id, item)) {
+                ItemOutcome.Continue -> finalizeOnSupabase(id, item)
+                else -> upload
             }
         } else {
             finalizeOnSupabase(id, item)
@@ -135,8 +157,7 @@ class BackupRepository(
     /**
      * Step 1: upload the photo to Cloudinary. Returns true on success.
      */
-    private suspend fun uploadToCloudinary(id: String, item: MediaItem): Boolean {
-        // ── Step 1: Upload to Cloudinary ────────────────────────────────
+    private suspend fun uploadToCloudinary(id: String, item: MediaItem): ItemOutcome {
         val resourceType = if (item.type == MediaType.VIDEO) "video" else "image"
         syncRepository.updateState(id = id, state = BackupState.REQUESTING_CLOUDINARY_AUTH)
 
@@ -147,12 +168,7 @@ class BackupRepository(
         when (authResult) {
             is CloudinaryAuthResult.Unauthorized -> {
                 UploadLog.uploadFailed(id, "authorization_unauthorized")
-                syncRepository.updateState(
-                    id = id,
-                    state = BackupState.FAILED,
-                    errorMessage = "Your session has expired. Please sign in again."
-                )
-                return false
+                return deferForSession(id)
             }
             is CloudinaryAuthResult.Misconfigured -> {
                 UploadLog.uploadFailed(id, "authorization_misconfigured")
@@ -161,7 +177,7 @@ class BackupRepository(
                     state = BackupState.FAILED,
                     errorMessage = "Cloudinary is not configured. Please check server settings."
                 )
-                return false
+                return ItemOutcome.Failed
             }
             is CloudinaryAuthResult.NetworkUnavailable -> {
                 UploadLog.uploadFailed(id, "authorization_network_unavailable")
@@ -170,7 +186,7 @@ class BackupRepository(
                     state = BackupState.FAILED,
                     errorMessage = "No internet connection. This photo will stay in the queue."
                 )
-                return false
+                return ItemOutcome.Failed
             }
             is CloudinaryAuthResult.Timeout -> {
                 UploadLog.uploadFailed(id, "authorization_timeout")
@@ -179,7 +195,7 @@ class BackupRepository(
                     state = BackupState.FAILED,
                     errorMessage = "Request timed out. Try again."
                 )
-                return false
+                return ItemOutcome.Failed
             }
             is CloudinaryAuthResult.Error -> {
                 UploadLog.uploadFailed(id, "authorization_error")
@@ -188,7 +204,7 @@ class BackupRepository(
                     state = BackupState.FAILED,
                     errorMessage = authResult.message
                 )
-                return false
+                return ItemOutcome.Failed
             }
             is CloudinaryAuthResult.Success -> {
                 UploadLog.authObtained(id, resourceType)
@@ -205,10 +221,8 @@ class BackupRepository(
             filename = item.filename
         )
 
-        when (uploadResult) {
+        return when (uploadResult) {
             is CloudinaryUploadResult.Success -> {
-                // Persist the full Cloudinary asset result so retries after a
-                // finalize failure can reuse it without a re-upload.
                 syncRepository.updateCloudinaryResult(
                     id = id,
                     assetId = uploadResult.assetId,
@@ -220,7 +234,7 @@ class BackupRepository(
                 )
                 syncRepository.updateState(id = id, state = BackupState.CLOUDINARY_COMPLETED)
                 UploadLog.uploadCompleted(id, uploadResult.assetId, uploadResult.publicId)
-                return true
+                ItemOutcome.Continue
             }
             is CloudinaryUploadResult.Unauthorized -> {
                 UploadLog.uploadFailed(id, "upload_unauthorized")
@@ -229,7 +243,7 @@ class BackupRepository(
                     state = BackupState.FAILED,
                     errorMessage = "Cloudinary rejected the upload authorization."
                 )
-                return false
+                ItemOutcome.Failed
             }
             is CloudinaryUploadResult.NetworkUnavailable -> {
                 UploadLog.uploadFailed(id, "upload_network_unavailable")
@@ -238,7 +252,7 @@ class BackupRepository(
                     state = BackupState.FAILED,
                     errorMessage = "Upload failed due to network error. Will retry."
                 )
-                return false
+                ItemOutcome.Failed
             }
             is CloudinaryUploadResult.Timeout -> {
                 UploadLog.uploadFailed(id, "upload_timeout")
@@ -247,7 +261,7 @@ class BackupRepository(
                     state = BackupState.FAILED,
                     errorMessage = "Upload timed out. Will retry."
                 )
-                return false
+                ItemOutcome.Failed
             }
             is CloudinaryUploadResult.FileTooLarge -> {
                 UploadLog.uploadFailed(id, "file_too_large")
@@ -256,7 +270,7 @@ class BackupRepository(
                     state = BackupState.FAILED,
                     errorMessage = "This file is too large for Cloudinary."
                 )
-                return false
+                ItemOutcome.Failed
             }
             is CloudinaryUploadResult.UnsupportedMedia -> {
                 UploadLog.uploadFailed(id, "unsupported_media")
@@ -265,7 +279,7 @@ class BackupRepository(
                     state = BackupState.FAILED,
                     errorMessage = "This file type is not supported for Cloudinary upload."
                 )
-                return false
+                ItemOutcome.Failed
             }
             is CloudinaryUploadResult.MediaUnavailable -> {
                 UploadLog.uploadFailed(id, "media_unavailable")
@@ -274,7 +288,7 @@ class BackupRepository(
                     state = BackupState.FAILED,
                     errorMessage = "This photo is no longer available on this device."
                 )
-                return false
+                ItemOutcome.Failed
             }
             is CloudinaryUploadResult.UploadFailed -> {
                 UploadLog.uploadFailed(id, "http_${uploadResult.httpStatus}")
@@ -283,7 +297,7 @@ class BackupRepository(
                     state = BackupState.FAILED,
                     errorMessage = "Cloudinary upload failed (${uploadResult.httpStatus})."
                 )
-                return false
+                ItemOutcome.Failed
             }
             is CloudinaryUploadResult.Error -> {
                 UploadLog.uploadFailed(id, "upload_error")
@@ -292,7 +306,7 @@ class BackupRepository(
                     state = BackupState.FAILED,
                     errorMessage = uploadResult.message
                 )
-                return false
+                ItemOutcome.Failed
             }
         }
     }
@@ -302,8 +316,8 @@ class BackupRepository(
      * local item is COMPLETED; on failure it stays retryable with the
      * Cloudinary identifier preserved for a safe retry.
      */
-    private suspend fun finalizeOnSupabase(id: String, item: MediaItem) {
-        val record = syncRepository.records.value[id] ?: return
+    private suspend fun finalizeOnSupabase(id: String, item: MediaItem): ItemOutcome {
+        val record = syncRepository.records.value[id] ?: return ItemOutcome.Failed
         val assetId = record.cloudinaryAssetId
         val publicId = record.cloudinaryPublicId
         val secureUrl = record.cloudinarySecureUrl
@@ -314,7 +328,7 @@ class BackupRepository(
                 state = BackupState.FAILED,
                 errorMessage = "Cloudinary upload result is incomplete. Please retry."
             )
-            return
+            return ItemOutcome.Failed
         }
 
         syncRepository.updateState(id = id, state = BackupState.FINALIZING_SUPABASE)
@@ -322,21 +336,31 @@ class BackupRepository(
         val deviceId = runCatching { deviceIdProvider() }.getOrNull()
         if (deviceId.isNullOrBlank()) {
             UploadLog.finalizeFailed(id, "device_not_registered")
+            return when (sessionProvider.prepare()) {
+                is PreparedAuth.Available -> {
+                    syncRepository.updateState(
+                        id = id,
+                        state = BackupState.FAILED,
+                        errorMessage = "Couldn't register this device. Will retry."
+                    )
+                    ItemOutcome.Failed
+                }
+                else -> deferForSession(id)
+            }
+        }
+
+        val clientUploadId = record.clientUploadId
+        if (clientUploadId.isNullOrBlank()) {
             syncRepository.updateState(
                 id = id,
                 state = BackupState.FAILED,
-                errorMessage = "Your session has expired. Please sign in again."
+                errorMessage = "Upload identity is missing. Please retry."
             )
-            return
+            return ItemOutcome.Failed
         }
 
         val request = MediaFinalizeRequest(
-            clientUploadId = record.clientUploadId
-                ?: return syncRepository.updateState(
-                    id = id,
-                    state = BackupState.FAILED,
-                    errorMessage = "Upload identity is missing. Please retry."
-                ),
+            clientUploadId = clientUploadId,
             deviceId = deviceId,
             localMediaId = item.mediaStoreId.takeIf { it > 0L },
             fileName = item.filename,
@@ -354,23 +378,17 @@ class BackupRepository(
         )
 
         UploadLog.finalizeStarted(id, request.clientUploadId)
-        when (val result = mediaFinalizeService.finalize(request)) {
+        return when (val result = mediaFinalizeService.finalize(request)) {
             is FinalizeResult.Success -> {
-                // Cloudinary upload is the primary (and only) destination.
-                // Telegram replication will happen server-side after Supabase
-                // media finalization.
                 syncRepository.updateFinalizedResult(id, result.mediaId)
                 syncRepository.updateState(id = id, state = BackupState.COMPLETED)
                 UploadLog.finalizeSucceeded(id, result.mediaId)
                 UploadLog.localUpdated(id, BackupState.COMPLETED.name)
+                ItemOutcome.Continue
             }
             is FinalizeResult.Unauthorized -> {
                 UploadLog.finalizeFailed(id, "unauthorized")
-                syncRepository.updateState(
-                    id = id,
-                    state = BackupState.FAILED,
-                    errorMessage = "Your session has expired. Please sign in again."
-                )
+                deferForSession(id)
             }
             is FinalizeResult.NetworkUnavailable -> {
                 UploadLog.finalizeFailed(id, "network_unavailable")
@@ -379,6 +397,7 @@ class BackupRepository(
                     state = BackupState.FAILED,
                     errorMessage = "Couldn't save the backup record. Will retry."
                 )
+                ItemOutcome.Failed
             }
             is FinalizeResult.Timeout -> {
                 UploadLog.finalizeFailed(id, "timeout")
@@ -387,6 +406,7 @@ class BackupRepository(
                     state = BackupState.FAILED,
                     errorMessage = "Saving the backup record timed out. Will retry."
                 )
+                ItemOutcome.Failed
             }
             is FinalizeResult.Misconfigured -> {
                 UploadLog.finalizeFailed(id, "misconfigured")
@@ -395,6 +415,7 @@ class BackupRepository(
                     state = BackupState.FAILED,
                     errorMessage = "Backup service is not configured. Please check server settings."
                 )
+                ItemOutcome.Failed
             }
             is FinalizeResult.Rejected -> {
                 UploadLog.finalizeFailed(id, "rejected")
@@ -403,6 +424,7 @@ class BackupRepository(
                     state = BackupState.FAILED,
                     errorMessage = result.message
                 )
+                ItemOutcome.Failed
             }
             is FinalizeResult.Error -> {
                 UploadLog.finalizeFailed(id, "error")
@@ -411,7 +433,50 @@ class BackupRepository(
                     state = BackupState.FAILED,
                     errorMessage = result.message
                 )
+                ItemOutcome.Failed
             }
         }
+    }
+
+    private suspend fun deferForSession(id: String): ItemOutcome {
+        val prepared = sessionProvider.prepare(forceRefresh = true)
+        return when (prepared) {
+            is PreparedAuth.Available -> {
+                syncRepository.updateState(
+                    id = id,
+                    state = BackupState.FAILED,
+                    errorMessage = "Couldn't authorize the upload. Will retry."
+                )
+                ItemOutcome.Failed
+            }
+            is PreparedAuth.NetworkError -> {
+                syncRepository.updateState(
+                    id = id,
+                    state = BackupState.WAITING,
+                    errorMessage = "Waiting for a valid session. Will retry."
+                )
+                ItemOutcome.HaltQueue
+            }
+            is PreparedAuth.SignedOut -> {
+                syncRepository.updateState(
+                    id = id,
+                    state = BackupState.WAITING,
+                    errorMessage = "Sign in to continue this backup."
+                )
+                ItemOutcome.HaltQueue
+            }
+        }
+    }
+
+    private enum class ItemOutcome {
+        Continue,
+        Failed,
+        HaltQueue
+    }
+
+    enum class QueueDrain {
+        Idle,
+        AwaitingSession,
+        NetworkUnavailable
     }
 }
