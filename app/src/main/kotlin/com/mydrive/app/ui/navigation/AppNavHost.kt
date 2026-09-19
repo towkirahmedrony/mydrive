@@ -5,8 +5,11 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -18,6 +21,8 @@ import androidx.compose.material.icons.outlined.Photo
 import androidx.compose.material.icons.outlined.PhotoLibrary
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.Sync
+import androidx.compose.material.icons.outlined.BugReport
+import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
@@ -27,10 +32,16 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -65,6 +76,7 @@ import com.mydrive.app.ui.sync.SyncScreen
 import com.mydrive.app.ui.sync.SyncViewModel
 import com.mydrive.app.ui.theme.Copper
 import com.mydrive.app.ui.theme.Radius
+import kotlin.math.roundToInt
 
 private data class TabItem(
     val destination: AppDestination,
@@ -97,6 +109,7 @@ fun AppNavHost(
     val isDeveloperConsole = currentDestination?.route == AppDestination.DeveloperConsole.route
     val showBottomBar = !isViewer && !isDeveloperConsole && currentDestination?.route in bottomDestinations.map { it.route }
     val colors = MaterialTheme.colorScheme
+    var developerFabOffset by remember { mutableStateOf(Offset.Zero) }
 
     Scaffold(
         containerColor = colors.background,
@@ -150,17 +163,18 @@ fun AppNavHost(
             }
         }
     ) { innerPadding ->
-        NavHost(
-            navController = navController,
-            startDestination = galleryTabStore.startRoute(),
-            modifier = Modifier
-                .fillMaxSize()
-                .then(if (isViewer) Modifier else Modifier.padding(innerPadding)),
-            enterTransition = { fadeIn(tabFade) },
-            exitTransition = { fadeOut(tabFade) },
-            popEnterTransition = { fadeIn(tabFade) },
-            popExitTransition = { fadeOut(tabFade) }
-        ) {
+        Box(modifier = Modifier.fillMaxSize()) {
+            NavHost(
+                navController = navController,
+                startDestination = galleryTabStore.startRoute(),
+                modifier = Modifier
+                    .fillMaxSize()
+                    .then(if (isViewer) Modifier else Modifier.padding(innerPadding)),
+                enterTransition = { fadeIn(tabFade) },
+                exitTransition = { fadeOut(tabFade) },
+                popEnterTransition = { fadeIn(tabFade) },
+                popExitTransition = { fadeOut(tabFade) }
+            ) {
             composable(AppDestination.Photos.route) {
                 val vm: GalleryViewModel = viewModel(factory = GalleryViewModel.factory(repository))
                 GalleryScreen(
@@ -250,7 +264,7 @@ fun AppNavHost(
                 )
                 TelegramSettingsScreen(viewModel = vm, onBack = { navController.popBackStack() })
             }
-            composable(AppDestination.DeveloperConsole.route) {
+                composable(AppDestination.DeveloperConsole.route) {
                 val app = LocalContext.current.applicationContext as MyDriveApp
                 val vm: DeveloperConsoleViewModel = viewModel(
                     factory = DeveloperConsoleViewModel.factory(
@@ -265,6 +279,35 @@ fun AppNavHost(
                     viewModel = vm,
                     onBack = { navController.popBackStack() }
                 )
+                }
+            }
+            if (!isDeveloperConsole) {
+                FloatingActionButton(
+                    onClick = { navController.navigate(AppDestination.DeveloperConsole.route) },
+                    modifier = Modifier
+                        .align(androidx.compose.ui.Alignment.BottomEnd)
+                        .navigationBarsPadding()
+                        .padding(end = 20.dp, bottom = 20.dp)
+                        .offset {
+                            IntOffset(
+                                developerFabOffset.x.roundToInt(),
+                                developerFabOffset.y.roundToInt()
+                            )
+                        }
+                        .pointerInput(Unit) {
+                            detectDragGestures { change, dragAmount ->
+                                change.consume()
+                                developerFabOffset += Offset(dragAmount.x, dragAmount.y)
+                            }
+                        },
+                    containerColor = Copper,
+                    contentColor = colors.onPrimary
+                ) {
+                    Icon(
+                        imageVector = Icons.Outlined.BugReport,
+                        contentDescription = "Open Developer Logs"
+                    )
+                }
             }
         }
     }
