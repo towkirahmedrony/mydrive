@@ -54,7 +54,7 @@ object SecretRedactor {
 
     fun text(value: String?): String {
         if (value.isNullOrEmpty()) return value.orEmpty()
-        var result = value
+        var result: String = value
         for (pattern in patterns) {
             result = pattern.replace(result) { match ->
                 when (match.groupValues.size) {
@@ -114,3 +114,4 @@ object SecretRedactor {
         return if (userId.length <= 8) userId.take(4) + "…" else userId.take(8) + "…"
     }
 }
+

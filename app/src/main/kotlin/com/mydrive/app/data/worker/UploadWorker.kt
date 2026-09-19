@@ -68,7 +68,6 @@ class UploadWorker(appContext: Context, params: WorkerParameters) : CoroutineWor
                         event = "WORKER_SUCCEEDED",
                         message = "Upload worker finished idle",
                         workerId = workerId,
-                        retryCount = runAttemptCount,
                         metadata = mapOf("drain" to drain.name)
                     )
                     Result.success()
@@ -101,8 +100,7 @@ class UploadWorker(appContext: Context, params: WorkerParameters) : CoroutineWor
                             category = LogCategory.WORKMANAGER,
                             event = "WORKER_STOPPED",
                             message = "Upload worker stopped after network retries",
-                            workerId = workerId,
-                            retryCount = runAttemptCount
+                            workerId = workerId
                         )
                         Result.success()
                     }
@@ -135,3 +133,4 @@ class UploadWorker(appContext: Context, params: WorkerParameters) : CoroutineWor
         }
     }
 }
+
