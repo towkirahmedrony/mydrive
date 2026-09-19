@@ -8,9 +8,9 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Photo
@@ -22,7 +22,7 @@ import androidx.compose.material.icons.outlined.PhotoLibrary
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.Sync
 import androidx.compose.material.icons.outlined.BugReport
-import androidx.compose.material3.FloatingActionButton
+import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
@@ -282,12 +282,12 @@ fun AppNavHost(
                 }
             }
             if (!isDeveloperConsole) {
-                FloatingActionButton(
+                ExtendedFloatingActionButton(
                     onClick = { navController.navigate(AppDestination.DeveloperConsole.route) },
                     modifier = Modifier
-                        .align(androidx.compose.ui.Alignment.BottomEnd)
-                        .navigationBarsPadding()
-                        .padding(end = 20.dp, bottom = 20.dp)
+                        .align(androidx.compose.ui.Alignment.TopEnd)
+                        .statusBarsPadding()
+                        .padding(top = 12.dp, end = 16.dp)
                         .offset {
                             IntOffset(
                                 developerFabOffset.x.roundToInt(),
@@ -307,6 +307,7 @@ fun AppNavHost(
                         imageVector = Icons.Outlined.BugReport,
                         contentDescription = "Open Developer Logs"
                     )
+                    Text("Logs")
                 }
             }
         }
