@@ -26,7 +26,6 @@ import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -202,11 +201,7 @@ fun AppNavHost(
                 SettingsScreen(
                     viewModel = vm,
                     onOpenTelegram = { navController.navigate(AppDestination.TelegramSettings.route) },
-                    onOpenDeveloperConsole = {
-                        if (app.developerModeStore.isEnabled()) {
-                            navController.navigate(AppDestination.DeveloperConsole.route)
-                        }
-                    }
+                    onOpenDeveloperConsole = { navController.navigate(AppDestination.DeveloperConsole.route) }
                 )
             }
             composable(
@@ -257,25 +252,19 @@ fun AppNavHost(
             }
             composable(AppDestination.DeveloperConsole.route) {
                 val app = LocalContext.current.applicationContext as MyDriveApp
-                val allowed = app.developerModeStore.isEnabled()
-                LaunchedEffect(allowed) {
-                    if (!allowed) navController.popBackStack()
-                }
-                if (allowed) {
-                    val vm: DeveloperConsoleViewModel = viewModel(
-                        factory = DeveloperConsoleViewModel.factory(
-                            application = app,
-                            authRepository = authRepository,
-                            syncRepository = syncRepository,
-                            mediaRepository = repository,
-                            supabaseClient = app.supabaseClient
-                        )
+                val vm: DeveloperConsoleViewModel = viewModel(
+                    factory = DeveloperConsoleViewModel.factory(
+                        application = app,
+                        authRepository = authRepository,
+                        syncRepository = syncRepository,
+                        mediaRepository = repository,
+                        supabaseClient = app.supabaseClient
                     )
-                    DeveloperConsoleScreen(
-                        viewModel = vm,
-                        onBack = { navController.popBackStack() }
-                    )
-                }
+                )
+                DeveloperConsoleScreen(
+                    viewModel = vm,
+                    onBack = { navController.popBackStack() }
+                )
             }
         }
     }

@@ -204,19 +204,17 @@ fun SettingsScreen(
             }
         }
 
-        if (state.developerConsoleVisible) {
-            item {
-                SettingsGroup(title = "Developer") {
-                    SettingsRow(
-                        title = "Developer Console",
-                        subtitle = "Diagnose backup pipeline on this device",
-                        leading = Icons.Outlined.BugReport,
-                        onClick = onOpenDeveloperConsole,
-                        trailing = {
-                            Icon(Icons.AutoMirrored.Outlined.KeyboardArrowRight, contentDescription = null, tint = colors.onSurfaceVariant)
-                        }
-                    )
-                }
+        item {
+            SettingsGroup(title = "Developer") {
+                SettingsRow(
+                    title = "Developer Logs",
+                    subtitle = "Inspect local backup and upload diagnostics",
+                    leading = Icons.Outlined.BugReport,
+                    onClick = onOpenDeveloperConsole,
+                    trailing = {
+                        Icon(Icons.AutoMirrored.Outlined.KeyboardArrowRight, contentDescription = null, tint = colors.onSurfaceVariant)
+                    }
+                )
             }
         }
     }

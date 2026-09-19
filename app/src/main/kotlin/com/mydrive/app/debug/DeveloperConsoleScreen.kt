@@ -39,6 +39,7 @@ import androidx.compose.material.icons.outlined.FilterList
 import androidx.compose.material.icons.outlined.IosShare
 import androidx.compose.material.icons.outlined.Pause
 import androidx.compose.material.icons.outlined.PlayArrow
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -48,6 +49,7 @@ import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -93,6 +95,7 @@ fun DeveloperConsoleScreen(
     val colors = MaterialTheme.colorScheme
     val context = LocalContext.current
     var showInvestigatePicker by remember { mutableStateOf(false) }
+    var showClearConfirmation by remember { mutableStateOf(false) }
 
     LaunchedEffect(state.copyText) {
         val text = state.copyText ?: return@LaunchedEffect
@@ -113,7 +116,7 @@ fun DeveloperConsoleScreen(
         ConsoleTopBar(
             live = state.live,
             onBack = onBack,
-            onClear = viewModel::clearLogs,
+            onClear = { showClearConfirmation = true },
             onToggleLive = { viewModel.setLive(!state.live) },
             onExport = viewModel::exportDiagnostics,
             onFilters = { viewModel.setShowFilters(true) }
@@ -152,7 +155,7 @@ fun DeveloperConsoleScreen(
                     )
                 }
             } else {
-                items(state.events, key = { it.id }) { event ->
+                items(state.events.asReversed(), key = { it.id }) { event ->
                     LogEventRow(
                         event = event,
                         modifier = Modifier.padding(horizontal = Spacing.md),
@@ -223,6 +226,26 @@ fun DeveloperConsoleScreen(
                 }
             )
         }
+    }
+    if (showClearConfirmation) {
+        AlertDialog(
+            onDismissRequest = { showClearConfirmation = false },
+            title = { Text("Clear developer logs?") },
+            text = { Text("This only deletes local developer logs. Upload queue and application data will not be changed.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    showClearConfirmation = false
+                    viewModel.clearLogs()
+                }) {
+                    Text("Clear")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showClearConfirmation = false }) {
+                    Text("Cancel")
+                }
+            }
+        )
     }
 }
 

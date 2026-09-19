@@ -25,8 +25,7 @@ import kotlinx.coroutines.launch
 data class SettingsUiState(
     val profile: UserProfile,
     val preferences: BackupPreferences,
-    val telegram: TelegramSettings,
-    val developerConsoleVisible: Boolean = false
+    val telegram: TelegramSettings
 )
 
 data class TelegramSetupFormState(
@@ -69,8 +68,7 @@ class SettingsViewModel(
                 else -> UserProfile()
             },
             preferences = preferences,
-            telegram = telegram,
-            developerConsoleVisible = developerEnabled
+            telegram = telegram
         )
     }.stateIn(
         scope = viewModelScope,
@@ -82,8 +80,7 @@ class SettingsViewModel(
                 else -> UserProfile()
             },
             preferences = repository.preferences.value,
-            telegram = repository.telegram.value,
-            developerConsoleVisible = developerModeStore?.isEnabled() == true
+            telegram = repository.telegram.value
         )
     )
 

@@ -232,7 +232,6 @@ class DeveloperConsoleViewModel(
 
     fun clearLogs() {
         DeveloperLogger.clear()
-        DeveloperLogger.info(LogCategory.SYSTEM, "LOGS_CLEARED", "Developer console logs cleared")
     }
 
     fun injectVerificationSamples() {
