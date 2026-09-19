@@ -153,6 +153,10 @@ object DeveloperLogger {
         localMediaId: String? = null,
         clientUploadId: String? = null,
         workerId: String? = null,
+        httpStatus: Int? = null,
+        durationMs: Long? = null,
+        throwable: Throwable? = null,
+        retryCount: Int? = null,
         metadata: Map<String, String?> = emptyMap()
     ) = log(
         level = LogLevel.INFO,
@@ -163,6 +167,10 @@ object DeveloperLogger {
         localMediaId = localMediaId,
         clientUploadId = clientUploadId,
         workerId = workerId,
+        httpStatus = httpStatus,
+        durationMs = durationMs,
+        throwable = throwable,
+        retryCount = retryCount,
         metadata = metadata
     )
 
@@ -176,6 +184,7 @@ object DeveloperLogger {
         workerId: String? = null,
         httpStatus: Int? = null,
         retryCount: Int? = null,
+        throwable: Throwable? = null,
         metadata: Map<String, String?> = emptyMap()
     ) = log(
         level = LogLevel.WARNING,
@@ -187,6 +196,7 @@ object DeveloperLogger {
         clientUploadId = clientUploadId,
         workerId = workerId,
         httpStatus = httpStatus,
+        throwable = throwable,
         retryCount = retryCount,
         metadata = metadata
     )
