@@ -11,6 +11,7 @@ import com.mydrive.app.data.model.TelegramSettings
 import com.mydrive.app.data.model.UserProfile
 import com.mydrive.app.data.repository.AuthRepository
 import com.mydrive.app.data.repository.MediaRepository
+import com.mydrive.app.debug.DeveloperModeStore
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -24,7 +25,8 @@ import kotlinx.coroutines.launch
 data class SettingsUiState(
     val profile: UserProfile,
     val preferences: BackupPreferences,
-    val telegram: TelegramSettings
+    val telegram: TelegramSettings,
+    val developerConsoleVisible: Boolean = false
 )
 
 data class TelegramSetupFormState(
@@ -39,9 +41,12 @@ data class TelegramSetupFormState(
 
 class SettingsViewModel(
     private val repository: MediaRepository,
-    private val authRepository: AuthRepository
+    private val authRepository: AuthRepository,
+    private val developerModeStore: DeveloperModeStore? = null
 ) : ViewModel() {
     private var telegramTestJob: Job? = null
+    private var aboutTapCount = 0
+    private var lastAboutTapAt = 0L
 
     private val _telegramForm = MutableStateFlow(
         TelegramSetupFormState(
@@ -54,8 +59,9 @@ class SettingsViewModel(
     val uiState: StateFlow<SettingsUiState> = combine(
         authRepository.state,
         repository.preferences,
-        repository.telegram
-    ) { authState, preferences, telegram ->
+        repository.telegram,
+        developerModeStore?.enabled ?: MutableStateFlow(false)
+    ) { authState, preferences, telegram, developerEnabled ->
         SettingsUiState(
             profile = when (authState) {
                 is AuthState.Authenticated -> authState.profile.toUserProfile()
@@ -63,7 +69,8 @@ class SettingsViewModel(
                 else -> UserProfile()
             },
             preferences = preferences,
-            telegram = telegram
+            telegram = telegram,
+            developerConsoleVisible = developerEnabled
         )
     }.stateIn(
         scope = viewModelScope,
@@ -75,7 +82,8 @@ class SettingsViewModel(
                 else -> UserProfile()
             },
             preferences = repository.preferences.value,
-            telegram = repository.telegram.value
+            telegram = repository.telegram.value,
+            developerConsoleVisible = developerModeStore?.isEnabled() == true
         )
     )
 
@@ -188,15 +196,27 @@ class SettingsViewModel(
         }
     }
 
+    fun onAboutTapped() {
+        val now = System.currentTimeMillis()
+        if (now - lastAboutTapAt > 2_000L) aboutTapCount = 0
+        lastAboutTapAt = now
+        aboutTapCount += 1
+        if (aboutTapCount >= 7) {
+            aboutTapCount = 0
+            developerModeStore?.enable()
+        }
+    }
+
     companion object {
         fun factory(
             repository: MediaRepository,
-            authRepository: AuthRepository
+            authRepository: AuthRepository,
+            developerModeStore: DeveloperModeStore? = null
         ): ViewModelProvider.Factory =
             object : ViewModelProvider.Factory {
                 @Suppress("UNCHECKED_CAST")
                 override fun <T : ViewModel> create(modelClass: Class<T>): T {
-                    return SettingsViewModel(repository, authRepository) as T
+                    return SettingsViewModel(repository, authRepository, developerModeStore) as T
                 }
             }
     }

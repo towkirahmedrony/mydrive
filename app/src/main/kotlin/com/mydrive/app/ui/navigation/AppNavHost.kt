@@ -26,12 +26,14 @@ import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavDestination.Companion.hierarchy
 import androidx.navigation.NavGraph.Companion.findStartDestination
@@ -41,11 +43,14 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
+import com.mydrive.app.MyDriveApp
 import com.mydrive.app.data.local.GalleryTabStore
 import com.mydrive.app.data.repository.AuthRepository
 import com.mydrive.app.data.repository.BackupRepository
 import com.mydrive.app.data.repository.MediaRepository
 import com.mydrive.app.data.repository.SyncRepository
+import com.mydrive.app.debug.DeveloperConsoleScreen
+import com.mydrive.app.debug.DeveloperConsoleViewModel
 import com.mydrive.app.ui.album.AlbumDetailScreen
 import com.mydrive.app.ui.album.AlbumDetailViewModel
 import com.mydrive.app.ui.albums.AlbumsScreen
@@ -90,7 +95,8 @@ fun AppNavHost(
     val navBackStackEntry by navController.currentBackStackEntryAsState()
     val currentDestination = navBackStackEntry?.destination
     val isViewer = currentDestination?.route?.startsWith("viewer") == true
-    val showBottomBar = !isViewer && currentDestination?.route in bottomDestinations.map { it.route }
+    val isDeveloperConsole = currentDestination?.route == AppDestination.DeveloperConsole.route
+    val showBottomBar = !isViewer && !isDeveloperConsole && currentDestination?.route in bottomDestinations.map { it.route }
     val colors = MaterialTheme.colorScheme
 
     Scaffold(
@@ -189,12 +195,18 @@ fun AppNavHost(
                 )
             }
             composable(AppDestination.Settings.route) {
+                val app = LocalContext.current.applicationContext as MyDriveApp
                 val vm: SettingsViewModel = viewModel(
-                    factory = SettingsViewModel.factory(repository, authRepository)
+                    factory = SettingsViewModel.factory(repository, authRepository, app.developerModeStore)
                 )
                 SettingsScreen(
                     viewModel = vm,
-                    onOpenTelegram = { navController.navigate(AppDestination.TelegramSettings.route) }
+                    onOpenTelegram = { navController.navigate(AppDestination.TelegramSettings.route) },
+                    onOpenDeveloperConsole = {
+                        if (app.developerModeStore.isEnabled()) {
+                            navController.navigate(AppDestination.DeveloperConsole.route)
+                        }
+                    }
                 )
             }
             composable(
@@ -242,6 +254,28 @@ fun AppNavHost(
                     factory = SettingsViewModel.factory(repository, authRepository)
                 )
                 TelegramSettingsScreen(viewModel = vm, onBack = { navController.popBackStack() })
+            }
+            composable(AppDestination.DeveloperConsole.route) {
+                val app = LocalContext.current.applicationContext as MyDriveApp
+                val allowed = app.developerModeStore.isEnabled()
+                LaunchedEffect(allowed) {
+                    if (!allowed) navController.popBackStack()
+                }
+                if (allowed) {
+                    val vm: DeveloperConsoleViewModel = viewModel(
+                        factory = DeveloperConsoleViewModel.factory(
+                            application = app,
+                            authRepository = authRepository,
+                            syncRepository = syncRepository,
+                            mediaRepository = repository,
+                            supabaseClient = app.supabaseClient
+                        )
+                    )
+                    DeveloperConsoleScreen(
+                        viewModel = vm,
+                        onBack = { navController.popBackStack() }
+                    )
+                }
             }
         }
     }

@@ -9,6 +9,9 @@ import com.mydrive.app.data.local.DeviceIdStore
 import com.mydrive.app.data.local.DeviceInfoFactory
 import com.mydrive.app.data.remote.NetworkMonitor
 import com.mydrive.app.data.remote.SupabaseConfig
+import com.mydrive.app.debug.DeveloperLogger
+import com.mydrive.app.debug.LogCategory
+import com.mydrive.app.debug.SecretRedactor
 import com.mydrive.app.data.remote.dto.DeviceInsert
 import com.mydrive.app.data.remote.dto.DeviceLastSeenUpdate
 import com.mydrive.app.data.remote.dto.DeviceRow
@@ -84,6 +87,12 @@ class AuthRepository(
                 when (val resolved = client.auth.sessionStatus.value) {
                     is SessionStatus.Authenticated -> completeAuthenticatedSession(pendingFullName = null)
                     is SessionStatus.RefreshFailure -> {
+                        DeveloperLogger.warn(
+                            category = LogCategory.AUTH,
+                            event = "SESSION_REFRESH_FAILED",
+                            message = "Session restore hit refresh failure",
+                            metadata = mapOf("error_source" to "supabase_client")
+                        )
                         if (shouldClearRefreshFailure(resolved.cause)) {
                             runCatching { client.auth.signOut() }
                         }
@@ -205,6 +214,12 @@ class AuthRepository(
         lastSeenAtMillis = 0L
         pendingFullName = null
         onSignedOut(previousUserId)
+        DeveloperLogger.info(
+            category = LogCategory.AUTH,
+            event = "SIGNED_OUT",
+            message = "User signed out",
+            metadata = mapOf("user_id" to SecretRedactor.maskUserId(previousUserId).orEmpty())
+        )
         return runCatching {
             client?.auth?.signOut()
             Unit
@@ -260,6 +275,15 @@ class AuthRepository(
                             registeredDeviceId = null
                             lastSeenAtMillis = 0L
                             _state.value = AuthState.Unauthenticated
+                            DeveloperLogger.info(
+                                category = LogCategory.AUTH,
+                                event = "SIGNED_OUT",
+                                message = "Supabase reported NotAuthenticated",
+                                metadata = mapOf(
+                                    "user_id" to SecretRedactor.maskUserId(previousUserId).orEmpty(),
+                                    "error_source" to "supabase_client"
+                                )
+                            )
                             onSignedOut(previousUserId)
                         }
                     }
@@ -289,6 +313,16 @@ class AuthRepository(
             }
             _state.value = AuthState.Authenticated(profile)
             resumeUserId = userId
+            DeveloperLogger.info(
+                category = LogCategory.AUTH,
+                event = "SIGNED_IN",
+                message = "Authenticated session established",
+                metadata = mapOf(
+                    "user_id" to SecretRedactor.maskUserId(userId).orEmpty(),
+                    "role" to profile.role,
+                    "status" to profile.status
+                )
+            )
         }
         resumeUserId?.let(onAuthenticated)
         scope.launch {

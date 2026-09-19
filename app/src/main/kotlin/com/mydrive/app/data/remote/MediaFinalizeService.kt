@@ -4,6 +4,9 @@ import android.content.Context
 import com.mydrive.app.BuildConfig
 import com.mydrive.app.data.auth.AuthenticatedSessionProvider
 import com.mydrive.app.data.auth.PreparedAuth
+import com.mydrive.app.debug.DeveloperLogger
+import com.mydrive.app.debug.LogCategory
+import com.mydrive.app.debug.LogLevel
 import io.github.jan.supabase.SupabaseClient
 import java.net.HttpURLConnection
 import java.net.SocketTimeoutException
@@ -68,31 +71,111 @@ class MediaFinalizeService(
 
     private val appContext = context.applicationContext
 
-    suspend fun finalize(request: MediaFinalizeRequest): FinalizeResult =
+    suspend fun finalize(
+        request: MediaFinalizeRequest,
+        operationId: String? = null,
+        localMediaId: String? = null
+    ): FinalizeResult =
         withContext(Dispatchers.IO) {
-            if (!network.isOnline()) return@withContext FinalizeResult.NetworkUnavailable
-            if (supabaseClient == null) return@withContext FinalizeResult.Misconfigured
+            val path = "/functions/v1/finalize-media"
+            if (!network.isOnline()) {
+                DeveloperLogger.error(
+                    category = LogCategory.FINALIZE,
+                    event = "FINALIZE_FAILED",
+                    message = "No network for finalize-media",
+                    operationId = operationId,
+                    localMediaId = localMediaId,
+                    clientUploadId = request.clientUploadId,
+                    urlPath = path,
+                    metadata = mapOf("error_source" to "network")
+                )
+                return@withContext FinalizeResult.NetworkUnavailable
+            }
+            if (supabaseClient == null) {
+                DeveloperLogger.error(
+                    category = LogCategory.FINALIZE,
+                    event = "FINALIZE_FAILED",
+                    message = "Supabase client is not configured",
+                    operationId = operationId,
+                    localMediaId = localMediaId,
+                    clientUploadId = request.clientUploadId,
+                    urlPath = path,
+                    metadata = mapOf("error_source" to "local_session")
+                )
+                return@withContext FinalizeResult.Misconfigured
+            }
 
             val projectRef = extractProjectRef(BuildConfig.SUPABASE_URL)
             val edgeFunctionUrl =
                 "https://$projectRef.supabase.co/functions/v1/finalize-media"
             val body = buildRequestBody(request)
 
+            DeveloperLogger.info(
+                category = LogCategory.FINALIZE,
+                event = "FINALIZE_REQUEST_STARTED",
+                message = "finalize-media request started",
+                operationId = operationId,
+                localMediaId = localMediaId,
+                clientUploadId = request.clientUploadId,
+                metadata = mapOf(
+                    "file_name" to request.fileName,
+                    "resource_type" to request.resourceType,
+                    "has_asset_id" to request.assetId.isNotBlank().toString()
+                )
+            )
+
             var forceRefresh = false
             repeat(2) {
                 val prepared = sessionProvider.prepare(forceRefresh)
                 val accessToken = when (prepared) {
                     is PreparedAuth.Available -> prepared.accessToken
-                    is PreparedAuth.NetworkError -> return@withContext FinalizeResult.NetworkUnavailable
-                    is PreparedAuth.SignedOut -> return@withContext FinalizeResult.Unauthorized
+                    is PreparedAuth.NetworkError -> {
+                        DeveloperLogger.error(
+                            category = LogCategory.FINALIZE,
+                            event = "FINALIZE_FAILED",
+                            message = "Session prepare failed due to network",
+                            operationId = operationId,
+                            localMediaId = localMediaId,
+                            clientUploadId = request.clientUploadId,
+                            urlPath = path,
+                            metadata = mapOf("error_source" to "supabase_client")
+                        )
+                        return@withContext FinalizeResult.NetworkUnavailable
+                    }
+                    is PreparedAuth.SignedOut -> {
+                        DeveloperLogger.error(
+                            category = LogCategory.FINALIZE,
+                            event = "FINALIZE_FAILED",
+                            message = "No local session for finalize-media",
+                            operationId = operationId,
+                            localMediaId = localMediaId,
+                            clientUploadId = request.clientUploadId,
+                            httpStatus = 401,
+                            urlPath = path,
+                            metadata = mapOf("error_source" to "local_session")
+                        )
+                        return@withContext FinalizeResult.Unauthorized
+                    }
                 }
 
                 val connection = try {
                     (URL(edgeFunctionUrl).openConnection() as HttpURLConnection)
-                } catch (_: Exception) {
+                } catch (error: Exception) {
+                    DeveloperLogger.error(
+                        category = LogCategory.FINALIZE,
+                        event = "FINALIZE_FAILED",
+                        message = "Could not open finalize-media connection",
+                        operationId = operationId,
+                        localMediaId = localMediaId,
+                        clientUploadId = request.clientUploadId,
+                        urlPath = path,
+                        throwable = error,
+                        metadata = mapOf("error_source" to "network")
+                    )
                     return@withContext FinalizeResult.NetworkUnavailable
                 }
 
+                val startedAt = System.currentTimeMillis()
                 val result = try {
                     connection.requestMethod = "POST"
                     connection.doOutput = true
@@ -109,29 +192,104 @@ class MediaFinalizeService(
 
                     val status = connection.responseCode
                     val responseBody = readBody(connection, status)
-                    when (status) {
+                    val duration = System.currentTimeMillis() - startedAt
+                    val parsed = when (status) {
                         200 -> parseSuccess(responseBody)
                         401 -> FinalizeResult.Unauthorized
                         400, 403, 409 -> FinalizeResult.Rejected(extractError(responseBody))
                         500 -> FinalizeResult.Misconfigured
                         else -> FinalizeResult.Error("Finalization failed: $status")
                     }
+                    val success = parsed is FinalizeResult.Success
+                    DeveloperLogger.network(
+                        category = LogCategory.FINALIZE,
+                        event = if (success) "FINALIZE_RESPONSE" else "FINALIZE_FAILED",
+                        message = when {
+                            success -> "finalize-media succeeded"
+                            status == 401 -> "HTTP 401 from finalize-media"
+                            status == 500 -> "HTTP 500 finalize-media Edge Function failure"
+                            else -> "finalize-media failed: $status"
+                        },
+                        method = "POST",
+                        urlPath = path,
+                        status = status,
+                        durationMs = duration,
+                        level = if (success) LogLevel.INFO else LogLevel.ERROR,
+                        operationId = operationId,
+                        localMediaId = localMediaId,
+                        clientUploadId = request.clientUploadId,
+                        responseBody = if (success) null else responseBody,
+                        errorSource = when {
+                            status == 401 -> "edge_function"
+                            status >= 400 -> "backend_response"
+                            else -> null
+                        },
+                        extra = mapOf(
+                            "refresh_attempted" to forceRefresh.toString(),
+                            "validation" to if (success) "ok" else "failed",
+                            "returned_media_id" to ((parsed as? FinalizeResult.Success)?.mediaId ?: "")
+                        )
+                    )
+                    parsed
                 } catch (_: SocketTimeoutException) {
+                    DeveloperLogger.error(
+                        category = LogCategory.FINALIZE,
+                        event = "FINALIZE_FAILED",
+                        message = "finalize-media timed out",
+                        operationId = operationId,
+                        localMediaId = localMediaId,
+                        clientUploadId = request.clientUploadId,
+                        urlPath = path,
+                        durationMs = System.currentTimeMillis() - startedAt,
+                        metadata = mapOf("error_source" to "network")
+                    )
                     FinalizeResult.Timeout
                 } catch (cancellation: CancellationException) {
                     throw cancellation
-                } catch (_: Exception) {
+                } catch (error: Exception) {
+                    DeveloperLogger.error(
+                        category = LogCategory.FINALIZE,
+                        event = "FINALIZE_FAILED",
+                        message = "finalize-media network error",
+                        operationId = operationId,
+                        localMediaId = localMediaId,
+                        clientUploadId = request.clientUploadId,
+                        urlPath = path,
+                        throwable = error,
+                        durationMs = System.currentTimeMillis() - startedAt,
+                        metadata = mapOf("error_source" to "network")
+                    )
                     FinalizeResult.NetworkUnavailable
                 } finally {
                     connection.disconnect()
                 }
 
                 if (result is FinalizeResult.Unauthorized && !forceRefresh) {
+                    DeveloperLogger.warn(
+                        category = LogCategory.AUTH,
+                        event = "SESSION_REFRESH_ATTEMPTED",
+                        message = "Retrying finalize-media after HTTP 401 with forced session refresh",
+                        operationId = operationId,
+                        localMediaId = localMediaId,
+                        clientUploadId = request.clientUploadId,
+                        httpStatus = 401
+                    )
                     forceRefresh = true
                 } else {
                     return@withContext result
                 }
             }
+            DeveloperLogger.error(
+                category = LogCategory.FINALIZE,
+                event = "FINALIZE_FAILED",
+                message = "finalize-media still unauthorized after refresh",
+                operationId = operationId,
+                localMediaId = localMediaId,
+                clientUploadId = request.clientUploadId,
+                httpStatus = 401,
+                urlPath = path,
+                metadata = mapOf("error_source" to "edge_function")
+            )
             FinalizeResult.Unauthorized
         }
 

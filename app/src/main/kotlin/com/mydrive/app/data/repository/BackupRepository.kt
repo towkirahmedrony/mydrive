@@ -13,6 +13,9 @@ import com.mydrive.app.data.remote.MediaFinalizeRequest
 import com.mydrive.app.data.remote.MediaFinalizeService
 import com.mydrive.app.data.remote.NetworkMonitor
 import com.mydrive.app.data.remote.UploadLog
+import com.mydrive.app.debug.DeveloperLogger
+import com.mydrive.app.debug.LogCategory
+import com.mydrive.app.debug.OperationTrace
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
@@ -55,8 +58,23 @@ class BackupRepository(
     }
 
     fun startBackup(ids: Collection<String>) {
-        if (gate() != BackupGate.Ready) return
-        val ownerUserId = sessionProvider.currentUserIdOrNull() ?: return
+        if (gate() != BackupGate.Ready) {
+            DeveloperLogger.warn(
+                category = LogCategory.SYSTEM,
+                event = "BACKUP_BLOCKED",
+                message = "Backup start blocked: ${gate().message()}"
+            )
+            return
+        }
+        val ownerUserId = sessionProvider.currentUserIdOrNull() ?: run {
+            DeveloperLogger.warn(
+                category = LogCategory.AUTH,
+                event = "BACKUP_BLOCKED",
+                message = "Backup start blocked: no authenticated user"
+            )
+            return
+        }
+        ids.forEach { OperationTrace.idFor(it) }
         syncRepository.setPaused(false)
         syncRepository.enqueue(ids, ownerUserId)
         scheduleUploadWork()
@@ -97,12 +115,43 @@ class BackupRepository(
     private suspend fun processQueue(): QueueDrain {
         while (true) {
             if (syncRepository.paused.value) return QueueDrain.Idle
-            if (gate() != BackupGate.Ready) return QueueDrain.NetworkUnavailable
+            if (gate() != BackupGate.Ready) {
+                DeveloperLogger.warn(
+                    category = LogCategory.NETWORK,
+                    event = "QUEUE_HALTED",
+                    message = "Upload queue halted: network unavailable"
+                )
+                return QueueDrain.NetworkUnavailable
+            }
             val prepared = sessionProvider.prepare()
             val userId = when (prepared) {
-                is PreparedAuth.Available -> prepared.userId
-                is PreparedAuth.NetworkError -> return QueueDrain.NetworkUnavailable
-                is PreparedAuth.SignedOut -> return QueueDrain.AwaitingSession
+                is PreparedAuth.Available -> {
+                    DeveloperLogger.info(
+                        category = LogCategory.AUTH,
+                        event = "SESSION_CHECKED",
+                        message = "Auth session available",
+                        metadata = mapOf("error_source" to "local_session")
+                    )
+                    prepared.userId
+                }
+                is PreparedAuth.NetworkError -> {
+                    DeveloperLogger.warn(
+                        category = LogCategory.AUTH,
+                        event = "QUEUE_HALTED",
+                        message = "Upload queue halted: session network error",
+                        metadata = mapOf("error_source" to "supabase_client")
+                    )
+                    return QueueDrain.NetworkUnavailable
+                }
+                is PreparedAuth.SignedOut -> {
+                    DeveloperLogger.warn(
+                        category = LogCategory.AUTH,
+                        event = "QUEUE_HALTED",
+                        message = "Upload queue halted: signed out",
+                        metadata = mapOf("error_source" to "local_session")
+                    )
+                    return QueueDrain.AwaitingSession
+                }
             }
             syncRepository.bindOwner(userId)
             val next = nextWaiting(userId) ?: return QueueDrain.Idle
@@ -127,13 +176,37 @@ class BackupRepository(
         ?.key
 
     private suspend fun processOne(id: String, userId: String): ItemOutcome {
+        val operationId = OperationTrace.idFor(id)
         UploadLog.itemClaimed(id)
         val record = syncRepository.records.value[id] ?: return ItemOutcome.Continue
         if (!syncRepository.belongsTo(record, userId)) return ItemOutcome.Continue
         if (record.state.toBackupState().resumeLocally() != BackupState.WAITING) return ItemOutcome.Continue
 
         val item = mediaLookup(id)
+        if (item != null) {
+            DeveloperLogger.info(
+                category = LogCategory.MEDIASTORE,
+                event = "MEDIA_DETECTED",
+                message = "Media available for upload",
+                operationId = operationId,
+                localMediaId = id,
+                clientUploadId = record.clientUploadId,
+                metadata = mapOf(
+                    "file_name" to item.filename,
+                    "mime_type" to item.mimeType,
+                    "file_size" to item.fileSizeBytes.toString()
+                )
+            )
+        }
         if (item == null) {
+            DeveloperLogger.error(
+                category = LogCategory.MEDIASTORE,
+                event = "MEDIA_UNAVAILABLE",
+                message = "Media is no longer available on this device",
+                operationId = operationId,
+                localMediaId = id,
+                clientUploadId = record.clientUploadId
+            )
             UploadLog.uploadFailed(id, "media_unavailable")
             syncRepository.updateState(
                 id = id,
@@ -159,10 +232,28 @@ class BackupRepository(
      */
     private suspend fun uploadToCloudinary(id: String, item: MediaItem): ItemOutcome {
         val resourceType = if (item.type == MediaType.VIDEO) "video" else "image"
+        val operationId = OperationTrace.idFor(id)
+        val clientUploadId = syncRepository.records.value[id]?.clientUploadId
+        DeveloperLogger.info(
+            category = LogCategory.CLOUDINARY_AUTH,
+            event = "UPLOAD_PIPELINE_START",
+            message = "Upload pipeline started",
+            operationId = operationId,
+            localMediaId = id,
+            clientUploadId = clientUploadId,
+            metadata = mapOf(
+                "file_name" to item.filename,
+                "resource_type" to resourceType,
+                "file_size" to item.fileSizeBytes.toString()
+            )
+        )
         syncRepository.updateState(id = id, state = BackupState.REQUESTING_CLOUDINARY_AUTH)
 
         val authResult = cloudinaryService.requestUploadAuth(
-            resourceType = resourceType
+            resourceType = resourceType,
+            operationId = operationId,
+            localMediaId = id,
+            clientUploadId = clientUploadId
         )
 
         when (authResult) {
@@ -218,7 +309,12 @@ class BackupRepository(
             auth = authResult as CloudinaryAuthResult.Success,
             mediaUri = item.uri,
             mimeType = item.mimeType,
-            filename = item.filename
+            filename = item.filename,
+            resourceType = resourceType,
+            operationId = operationId,
+            localMediaId = id,
+            clientUploadId = clientUploadId,
+            fileSize = item.fileSizeBytes
         )
 
         return when (uploadResult) {
@@ -378,12 +474,26 @@ class BackupRepository(
         )
 
         UploadLog.finalizeStarted(id, request.clientUploadId)
-        return when (val result = mediaFinalizeService.finalize(request)) {
+        val operationId = OperationTrace.idFor(id)
+        return when (val result = mediaFinalizeService.finalize(
+            request = request,
+            operationId = operationId,
+            localMediaId = id
+        )) {
             is FinalizeResult.Success -> {
                 syncRepository.updateFinalizedResult(id, result.mediaId)
                 syncRepository.updateState(id = id, state = BackupState.COMPLETED)
                 UploadLog.finalizeSucceeded(id, result.mediaId)
                 UploadLog.localUpdated(id, BackupState.COMPLETED.name)
+                DeveloperLogger.info(
+                    category = LogCategory.REPLICATION,
+                    event = "MEDIA_ASSETS_RECORDED",
+                    message = "media_assets row recorded; backend may enqueue replication jobs",
+                    operationId = OperationTrace.idFor(id),
+                    localMediaId = id,
+                    clientUploadId = request.clientUploadId,
+                    metadata = mapOf("remote_media_id" to result.mediaId)
+                )
                 ItemOutcome.Continue
             }
             is FinalizeResult.Unauthorized -> {

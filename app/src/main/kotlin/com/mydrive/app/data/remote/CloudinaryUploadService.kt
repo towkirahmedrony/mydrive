@@ -5,6 +5,9 @@ import android.net.Uri
 import com.mydrive.app.BuildConfig
 import com.mydrive.app.data.auth.AuthenticatedSessionProvider
 import com.mydrive.app.data.auth.PreparedAuth
+import com.mydrive.app.debug.DeveloperLogger
+import com.mydrive.app.debug.LogCategory
+import com.mydrive.app.debug.LogLevel
 import io.github.jan.supabase.SupabaseClient
 import java.io.FileNotFoundException
 import java.io.InputStream
@@ -89,31 +92,106 @@ class CloudinaryUploadService(
      * Requires an authenticated user session.
      */
     suspend fun requestUploadAuth(
-        resourceType: String = "auto"
+        resourceType: String = "auto",
+        operationId: String? = null,
+        localMediaId: String? = null,
+        clientUploadId: String? = null
     ): CloudinaryAuthResult = withContext(Dispatchers.IO) {
-        if (!network.isOnline()) return@withContext CloudinaryAuthResult.NetworkUnavailable
-        if (supabaseClient == null) return@withContext CloudinaryAuthResult.Misconfigured
+        val path = "/functions/v1/cloudinary-upload-auth"
+        if (!network.isOnline()) {
+            DeveloperLogger.error(
+                category = LogCategory.CLOUDINARY_AUTH,
+                event = "AUTH_REQUEST_FAILED",
+                message = "No network for Cloudinary authorization",
+                operationId = operationId,
+                localMediaId = localMediaId,
+                clientUploadId = clientUploadId,
+                urlPath = path,
+                metadata = mapOf("error_source" to "network", "resource_type" to resourceType)
+            )
+            return@withContext CloudinaryAuthResult.NetworkUnavailable
+        }
+        if (supabaseClient == null) {
+            DeveloperLogger.error(
+                category = LogCategory.CLOUDINARY_AUTH,
+                event = "AUTH_REQUEST_FAILED",
+                message = "Supabase client is not configured",
+                operationId = operationId,
+                localMediaId = localMediaId,
+                clientUploadId = clientUploadId,
+                urlPath = path,
+                metadata = mapOf("error_source" to "local_session")
+            )
+            return@withContext CloudinaryAuthResult.Misconfigured
+        }
 
         val projectRef = extractProjectRef(BuildConfig.SUPABASE_URL)
         val edgeFunctionUrl =
             "https://$projectRef.supabase.co/functions/v1/cloudinary-upload-auth"
         val body = """{"resource_type":"$resourceType"}"""
 
+        DeveloperLogger.info(
+            category = LogCategory.CLOUDINARY_AUTH,
+            event = "AUTH_REQUEST_STARTED",
+            message = "Cloudinary authorization request started",
+            operationId = operationId,
+            localMediaId = localMediaId,
+            clientUploadId = clientUploadId,
+            metadata = mapOf("resource_type" to resourceType, "endpoint" to path)
+        )
+
         var forceRefresh = false
         repeat(2) {
             val prepared = sessionProvider.prepare(forceRefresh)
             val accessToken = when (prepared) {
                 is PreparedAuth.Available -> prepared.accessToken
-                is PreparedAuth.NetworkError -> return@withContext CloudinaryAuthResult.NetworkUnavailable
-                is PreparedAuth.SignedOut -> return@withContext CloudinaryAuthResult.Unauthorized
+                is PreparedAuth.NetworkError -> {
+                    DeveloperLogger.error(
+                        category = LogCategory.CLOUDINARY_AUTH,
+                        event = "AUTH_REQUEST_FAILED",
+                        message = "Session prepare failed due to network",
+                        operationId = operationId,
+                        localMediaId = localMediaId,
+                        clientUploadId = clientUploadId,
+                        urlPath = path,
+                        metadata = mapOf("error_source" to "supabase_client")
+                    )
+                    return@withContext CloudinaryAuthResult.NetworkUnavailable
+                }
+                is PreparedAuth.SignedOut -> {
+                    DeveloperLogger.error(
+                        category = LogCategory.CLOUDINARY_AUTH,
+                        event = "AUTH_REQUEST_FAILED",
+                        message = "No local session for Cloudinary authorization",
+                        operationId = operationId,
+                        localMediaId = localMediaId,
+                        clientUploadId = clientUploadId,
+                        httpStatus = 401,
+                        urlPath = path,
+                        metadata = mapOf("error_source" to "local_session")
+                    )
+                    return@withContext CloudinaryAuthResult.Unauthorized
+                }
             }
 
             val connection = try {
                 (URL(edgeFunctionUrl).openConnection() as HttpURLConnection)
-            } catch (_: Exception) {
+            } catch (error: Exception) {
+                DeveloperLogger.error(
+                    category = LogCategory.CLOUDINARY_AUTH,
+                    event = "AUTH_REQUEST_FAILED",
+                    message = "Could not open Cloudinary auth connection",
+                    operationId = operationId,
+                    localMediaId = localMediaId,
+                    clientUploadId = clientUploadId,
+                    urlPath = path,
+                    throwable = error,
+                    metadata = mapOf("error_source" to "network")
+                )
                 return@withContext CloudinaryAuthResult.NetworkUnavailable
             }
 
+            val startedAt = System.currentTimeMillis()
             val result = try {
                 connection.requestMethod = "POST"
                 connection.doOutput = true
@@ -130,28 +208,103 @@ class CloudinaryUploadService(
 
                 val status = connection.responseCode
                 val responseBody = readBody(connection, status)
-                when (status) {
+                val duration = System.currentTimeMillis() - startedAt
+                val parsed = when (status) {
                     200 -> parseAuthSuccess(responseBody)
                     401 -> CloudinaryAuthResult.Unauthorized
                     500 -> CloudinaryAuthResult.Misconfigured
                     else -> CloudinaryAuthResult.Error("Auth request failed: $status")
                 }
+                val errorSource = when (status) {
+                    401 -> "edge_function"
+                    500 -> "edge_function"
+                    else -> if (status >= 400) "backend_response" else null
+                }
+                DeveloperLogger.network(
+                    category = LogCategory.CLOUDINARY_AUTH,
+                    event = if (status in 200..299) "AUTH_RESPONSE" else "AUTH_REQUEST_FAILED",
+                    message = when (status) {
+                        200 -> "Cloudinary authorization succeeded"
+                        401 -> "HTTP 401 from cloudinary-upload-auth"
+                        500 -> "HTTP 500 Cloudinary auth Edge Function failure"
+                        else -> "Cloudinary auth request failed: $status"
+                    },
+                    method = "POST",
+                    urlPath = path,
+                    status = status,
+                    durationMs = duration,
+                    level = if (status in 200..299 && parsed is CloudinaryAuthResult.Success) LogLevel.INFO else LogLevel.ERROR,
+                    operationId = operationId,
+                    localMediaId = localMediaId,
+                    clientUploadId = clientUploadId,
+                    responseBody = if (status in 200..299) null else responseBody,
+                    errorSource = errorSource,
+                    extra = mapOf(
+                        "resource_type" to resourceType,
+                        "refresh_attempted" to forceRefresh.toString(),
+                        "auth_valid" to (parsed is CloudinaryAuthResult.Success).toString()
+                    )
+                )
+                parsed
             } catch (_: SocketTimeoutException) {
+                DeveloperLogger.error(
+                    category = LogCategory.CLOUDINARY_AUTH,
+                    event = "AUTH_REQUEST_FAILED",
+                    message = "Cloudinary authorization timed out",
+                    operationId = operationId,
+                    localMediaId = localMediaId,
+                    clientUploadId = clientUploadId,
+                    urlPath = path,
+                    durationMs = System.currentTimeMillis() - startedAt,
+                    metadata = mapOf("error_source" to "network")
+                )
                 CloudinaryAuthResult.Timeout
             } catch (cancellation: CancellationException) {
                 throw cancellation
-            } catch (_: Exception) {
+            } catch (error: Exception) {
+                DeveloperLogger.error(
+                    category = LogCategory.CLOUDINARY_AUTH,
+                    event = "AUTH_REQUEST_FAILED",
+                    message = "Cloudinary authorization network error",
+                    operationId = operationId,
+                    localMediaId = localMediaId,
+                    clientUploadId = clientUploadId,
+                    urlPath = path,
+                    throwable = error,
+                    durationMs = System.currentTimeMillis() - startedAt,
+                    metadata = mapOf("error_source" to "network")
+                )
                 CloudinaryAuthResult.NetworkUnavailable
             } finally {
                 connection.disconnect()
             }
 
             if (result is CloudinaryAuthResult.Unauthorized && !forceRefresh) {
+                DeveloperLogger.warn(
+                    category = LogCategory.AUTH,
+                    event = "SESSION_REFRESH_ATTEMPTED",
+                    message = "Retrying Cloudinary auth after HTTP 401 with forced session refresh",
+                    operationId = operationId,
+                    localMediaId = localMediaId,
+                    clientUploadId = clientUploadId,
+                    httpStatus = 401
+                )
                 forceRefresh = true
             } else {
                 return@withContext result
             }
         }
+        DeveloperLogger.error(
+            category = LogCategory.CLOUDINARY_AUTH,
+            event = "AUTH_REQUEST_FAILED",
+            message = "Cloudinary authorization still unauthorized after refresh",
+            operationId = operationId,
+            localMediaId = localMediaId,
+            clientUploadId = clientUploadId,
+            httpStatus = 401,
+            urlPath = path,
+            metadata = mapOf("error_source" to "edge_function")
+        )
         CloudinaryAuthResult.Unauthorized
     }
 
@@ -164,9 +317,26 @@ class CloudinaryUploadService(
         mediaUri: String,
         mimeType: String,
         filename: String,
-        resourceType: String = "auto"
+        resourceType: String = "auto",
+        operationId: String? = null,
+        localMediaId: String? = null,
+        clientUploadId: String? = null,
+        fileSize: Long? = null
     ): CloudinaryUploadResult = withContext(Dispatchers.IO) {
-        if (!network.isOnline()) return@withContext CloudinaryUploadResult.NetworkUnavailable
+        val path = "/v1_1/${auth.cloudName}/${auth.resourceType}/upload"
+        if (!network.isOnline()) {
+            DeveloperLogger.error(
+                category = LogCategory.CLOUDINARY_UPLOAD,
+                event = "UPLOAD_FAILED",
+                message = "No network for Cloudinary upload",
+                operationId = operationId,
+                localMediaId = localMediaId,
+                clientUploadId = clientUploadId,
+                urlPath = path,
+                metadata = mapOf("error_source" to "network")
+            )
+            return@withContext CloudinaryUploadResult.NetworkUnavailable
+        }
         if (mediaUri.isBlank()) return@withContext CloudinaryUploadResult.MediaUnavailable
 
         val uri = try {
@@ -189,6 +359,20 @@ class CloudinaryUploadService(
                 return@withContext CloudinaryUploadResult.NetworkUnavailable
             }
 
+            DeveloperLogger.info(
+                category = LogCategory.CLOUDINARY_UPLOAD,
+                event = "UPLOAD_REQUEST_STARTED",
+                message = "Uploading ${auth.resourceType} to Cloudinary",
+                operationId = operationId,
+                localMediaId = localMediaId,
+                clientUploadId = clientUploadId,
+                metadata = mapOf(
+                    "resource_type" to auth.resourceType,
+                    "file_size" to (fileSize?.toString() ?: ""),
+                    "mime_type" to mimeType
+                )
+            )
+            val startedAt = System.currentTimeMillis()
             return@withContext try {
                 connection.requestMethod = "POST"
                 connection.doOutput = true
@@ -225,8 +409,8 @@ class CloudinaryUploadService(
 
                 val status = connection.responseCode
                 val responseBody = readBody(connection, status)
-
-                when (status) {
+                val duration = System.currentTimeMillis() - startedAt
+                val parsed = when (status) {
                     200 -> parseUploadSuccess(responseBody)
                     400 -> CloudinaryUploadResult.UploadFailed(status, "Invalid upload parameters")
                     401 -> CloudinaryUploadResult.Unauthorized
@@ -236,7 +420,45 @@ class CloudinaryUploadService(
                         "Upload failed with status $status"
                     )
                 }
+                val success = parsed is CloudinaryUploadResult.Success
+                DeveloperLogger.network(
+                    category = LogCategory.CLOUDINARY_UPLOAD,
+                    event = if (success) "UPLOAD_RESPONSE" else "UPLOAD_FAILED",
+                    message = when {
+                        success -> "Cloudinary upload succeeded"
+                        status == 401 -> "Cloudinary rejected upload authorization"
+                        else -> "Cloudinary upload failed"
+                    },
+                    method = "POST",
+                    urlPath = path,
+                    status = status,
+                    durationMs = duration,
+                    level = if (success) LogLevel.INFO else LogLevel.ERROR,
+                    operationId = operationId,
+                    localMediaId = localMediaId,
+                    clientUploadId = clientUploadId,
+                    responseBody = if (success) null else responseBody,
+                    extra = mapOf(
+                        "resource_type" to auth.resourceType,
+                        "file_size" to (fileSize?.toString() ?: ""),
+                        "duration_ms" to duration.toString(),
+                        "asset_id_present" to ((parsed as? CloudinaryUploadResult.Success)?.assetId.isNullOrBlank().not().toString()),
+                        "public_id_present" to ((parsed as? CloudinaryUploadResult.Success)?.publicId.isNullOrBlank().not().toString()),
+                        "validation" to if (success) "ok" else "failed"
+                    )
+                )
+                parsed
             } catch (_: SocketTimeoutException) {
+                DeveloperLogger.error(
+                    category = LogCategory.CLOUDINARY_UPLOAD,
+                    event = "UPLOAD_FAILED",
+                    message = "Cloudinary upload timed out",
+                    operationId = operationId,
+                    localMediaId = localMediaId,
+                    clientUploadId = clientUploadId,
+                    urlPath = path,
+                    durationMs = System.currentTimeMillis() - startedAt
+                )
                 CloudinaryUploadResult.Timeout
             } catch (cancellation: CancellationException) {
                 throw cancellation
@@ -245,8 +467,26 @@ class CloudinaryUploadService(
             } catch (_: SecurityException) {
                 CloudinaryUploadResult.MediaUnavailable
             } catch (_: FileTooLargeException) {
+                DeveloperLogger.error(
+                    category = LogCategory.CLOUDINARY_UPLOAD,
+                    event = "UPLOAD_FAILED",
+                    message = "File exceeds Cloudinary size limit",
+                    operationId = operationId,
+                    localMediaId = localMediaId,
+                    clientUploadId = clientUploadId
+                )
                 CloudinaryUploadResult.FileTooLarge
-            } catch (_: Exception) {
+            } catch (error: Exception) {
+                DeveloperLogger.error(
+                    category = LogCategory.CLOUDINARY_UPLOAD,
+                    event = "UPLOAD_FAILED",
+                    message = "Cloudinary upload network error",
+                    operationId = operationId,
+                    localMediaId = localMediaId,
+                    clientUploadId = clientUploadId,
+                    urlPath = path,
+                    throwable = error
+                )
                 CloudinaryUploadResult.NetworkUnavailable
             } finally {
                 connection.disconnect()

@@ -22,6 +22,7 @@ sealed class AppDestination(val route: String) {
         fun create(albumId: String) = "album/${Uri.encode(albumId)}"
     }
     data object TelegramSettings : AppDestination("settings/telegram")
+    data object DeveloperConsole : AppDestination("settings/developer-console")
 }
 
 val bottomDestinations = listOf(

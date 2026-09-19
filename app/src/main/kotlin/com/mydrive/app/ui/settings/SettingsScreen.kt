@@ -18,6 +18,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.outlined.Logout
+import androidx.compose.material.icons.outlined.BugReport
 import androidx.compose.material.icons.outlined.Description
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.NotificationsNone
@@ -44,7 +45,8 @@ import com.mydrive.app.ui.theme.Spacing
 @Composable
 fun SettingsScreen(
     viewModel: SettingsViewModel,
-    onOpenTelegram: () -> Unit
+    onOpenTelegram: () -> Unit,
+    onOpenDeveloperConsole: () -> Unit = {}
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val colors = MaterialTheme.colorScheme
@@ -194,10 +196,27 @@ fun SettingsScreen(
                 SettingsRow(
                     title = "About Albums",
                     leading = Icons.Outlined.Info,
+                    onClick = viewModel::onAboutTapped,
                     trailing = {
                         Icon(Icons.AutoMirrored.Outlined.KeyboardArrowRight, contentDescription = null, tint = colors.onSurfaceVariant)
                     }
                 )
+            }
+        }
+
+        if (state.developerConsoleVisible) {
+            item {
+                SettingsGroup(title = "Developer") {
+                    SettingsRow(
+                        title = "Developer Console",
+                        subtitle = "Diagnose backup pipeline on this device",
+                        leading = Icons.Outlined.BugReport,
+                        onClick = onOpenDeveloperConsole,
+                        trailing = {
+                            Icon(Icons.AutoMirrored.Outlined.KeyboardArrowRight, contentDescription = null, tint = colors.onSurfaceVariant)
+                        }
+                    )
+                }
             }
         }
     }

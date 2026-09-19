@@ -9,6 +9,9 @@ import com.mydrive.app.data.model.MediaItem
 import com.mydrive.app.data.model.isActive
 import com.mydrive.app.data.model.isRetryable
 import com.mydrive.app.data.remote.UploadLog
+import com.mydrive.app.debug.DeveloperLogger
+import com.mydrive.app.debug.LogCategory
+import com.mydrive.app.debug.OperationTrace
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -73,11 +76,21 @@ class SyncRepository(
                 remoteMediaId = previous?.remoteMediaId,
                 ownerUserId = previousOwner ?: ownerUserId
             )
+            val previousQueue = queueState(previous?.state?.toBackupState() ?: BackupState.NOT_STARTED)
             runBlocking(Dispatchers.IO) {
                 dao.find(id)?.let { entity ->
                     dao.upsert(entity.copy(uploadState = "QUEUED", lastError = null, clientUploadId = clientUploadId, updatedAt = now))
                 }
             }
+            DeveloperLogger.info(
+                category = LogCategory.ROOM,
+                event = "QUEUE_STATE",
+                message = "Queue $previousQueue → QUEUED",
+                operationId = OperationTrace.idFor(id),
+                localMediaId = id,
+                clientUploadId = clientUploadId,
+                metadata = mapOf("previous_state" to previousQueue, "new_state" to "QUEUED", "reason" to "enqueue")
+            )
             UploadLog.queueCreated(id, clientUploadId)
         }
         commit(next)
@@ -90,12 +103,30 @@ class SyncRepository(
         if (record.state == state.name && record.errorMessage == normalizedError) return
         val next = HashMap(_records.value)
         val updatedAt = System.currentTimeMillis()
+        val previousState = queueState(record.state.toBackupState())
+        val newState = queueState(state)
         next[id] = record.copy(state = state.name, errorMessage = normalizedError, updatedAtMillis = updatedAt)
         runBlocking(Dispatchers.IO) {
             val entity = dao.find(id)
-            if (entity != null) dao.upsert(entity.copy(uploadState = queueState(state), retryCount = if (state.isRetryable) entity.retryCount + 1 else entity.retryCount, lastError = normalizedError, updatedAt = updatedAt))
+            if (entity != null) dao.upsert(entity.copy(uploadState = newState, retryCount = if (state.isRetryable) entity.retryCount + 1 else entity.retryCount, lastError = normalizedError, updatedAt = updatedAt))
         }
         commit(next)
+        DeveloperLogger.log(
+            level = if (state == BackupState.FAILED) com.mydrive.app.debug.LogLevel.ERROR else com.mydrive.app.debug.LogLevel.INFO,
+            category = LogCategory.ROOM,
+            event = "QUEUE_STATE",
+            message = "Queue $previousState → $newState",
+            operationId = OperationTrace.idFor(id),
+            localMediaId = id,
+            clientUploadId = record.clientUploadId,
+            retryCount = if (state.isRetryable) 1 else null,
+            metadata = mapOf(
+                "previous_state" to previousState,
+                "new_state" to newState,
+                "backup_state" to state.name,
+                "reason" to (normalizedError ?: "state_change")
+            )
+        )
         UploadLog.localUpdated(id, state.name)
     }
 
@@ -128,6 +159,19 @@ class SyncRepository(
             if (!record.state.toBackupState().isRetryable) return@forEach
             next[id] = record.copy(state = BackupState.WAITING.name, errorMessage = null, updatedAtMillis = now)
             runBlocking(Dispatchers.IO) { dao.find(id)?.let { dao.upsert(it.copy(uploadState = "RETRYING", lastError = null, updatedAt = now)) } }
+            DeveloperLogger.warn(
+                category = LogCategory.ROOM,
+                event = "QUEUE_STATE",
+                message = "Queue ${queueState(record.state.toBackupState())} → RETRYING",
+                operationId = OperationTrace.idFor(id),
+                localMediaId = id,
+                clientUploadId = record.clientUploadId,
+                metadata = mapOf(
+                    "previous_state" to queueState(record.state.toBackupState()),
+                    "new_state" to "RETRYING",
+                    "reason" to "retry"
+                )
+            )
         }
         commit(next)
     }

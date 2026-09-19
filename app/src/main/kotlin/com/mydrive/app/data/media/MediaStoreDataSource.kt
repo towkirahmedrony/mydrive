@@ -7,6 +7,8 @@ import android.os.Build
 import android.provider.MediaStore
 import com.mydrive.app.data.model.MediaItem
 import com.mydrive.app.data.model.MediaType
+import com.mydrive.app.debug.DeveloperLogger
+import com.mydrive.app.debug.LogCategory
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -28,8 +30,26 @@ class MediaStoreDataSource(context: Context) {
             failures += 1
             emptyList()
         }
-        if (failures == 2) throw MediaQueryException()
-        (photos + videos).sortedByDescending { it.capturedAtMillis }
+        if (failures == 2) {
+            DeveloperLogger.error(
+                category = LogCategory.MEDIASTORE,
+                event = "MEDIASTORE_QUERY_FAILED",
+                message = "MediaStore photo and video queries both failed"
+            )
+            throw MediaQueryException()
+        }
+        val items = (photos + videos).sortedByDescending { it.capturedAtMillis }
+        DeveloperLogger.info(
+            category = LogCategory.MEDIASTORE,
+            event = "MEDIASTORE_SCAN",
+            message = "MediaStore scan completed",
+            metadata = mapOf(
+                "photos" to photos.size.toString(),
+                "videos" to videos.size.toString(),
+                "total" to items.size.toString()
+            )
+        )
+        items
     }
 
     private fun imageCollection(): Uri = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {

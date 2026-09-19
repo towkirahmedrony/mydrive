@@ -21,6 +21,10 @@ import com.mydrive.app.data.repository.AuthRepository
 import com.mydrive.app.data.repository.BackupRepository
 import com.mydrive.app.data.repository.MediaRepository
 import com.mydrive.app.data.repository.SyncRepository
+import com.mydrive.app.debug.DeveloperLogDatabase
+import com.mydrive.app.debug.DeveloperLogger
+import com.mydrive.app.debug.DeveloperModeStore
+import com.mydrive.app.debug.LogCategory
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -50,11 +54,13 @@ class MyDriveApp : Application() {
         )
     }
 
-    private val supabaseClient by lazy {
+    val developerModeStore: DeveloperModeStore by lazy { DeveloperModeStore(this) }
+
+    val supabaseClient by lazy {
         if (SupabaseConfig.isConfigured) SupabaseModule.create() else null
     }
 
-    private val sessionProvider by lazy {
+    val sessionProvider by lazy {
         AuthenticatedSessionProvider(supabaseClient)
     }
 
@@ -96,6 +102,12 @@ class MyDriveApp : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        DeveloperLogger.attach(DeveloperLogDatabase.get(this))
+        DeveloperLogger.info(
+            category = LogCategory.SYSTEM,
+            event = "APP_STARTED",
+            message = "My Drive started"
+        )
         authRepository
         UploadWorkScheduler.schedule(this)
     }

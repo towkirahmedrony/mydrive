@@ -1,5 +1,7 @@
 package com.mydrive.app.data.auth
 
+import com.mydrive.app.debug.DeveloperLogger
+import com.mydrive.app.debug.LogCategory
 import io.github.jan.supabase.SupabaseClient
 import io.github.jan.supabase.auth.auth
 import io.github.jan.supabase.auth.status.RefreshFailureCause
@@ -60,6 +62,16 @@ class AuthenticatedSessionProvider(
             remainingSeconds <= REFRESH_SKEW_SECONDS ||
             session.user?.id.isNullOrBlank()
         if (needsRefresh) {
+            DeveloperLogger.info(
+                category = LogCategory.AUTH,
+                event = "SESSION_REFRESH_ATTEMPTED",
+                message = if (forceRefresh) "Forced session refresh" else "Session refresh near expiry",
+                metadata = mapOf(
+                    "force_refresh" to forceRefresh.toString(),
+                    "remaining_seconds" to remainingSeconds.toString(),
+                    "expires_at" to session.expiresAt.toString()
+                )
+            )
             val refresh = runCatching { auth.refreshCurrentSession() }
             if (refresh.isFailure) {
                 val error = refresh.exceptionOrNull()
@@ -68,13 +80,39 @@ class AuthenticatedSessionProvider(
                 val recovered = sessionFrom(session)
                 val recoveredSeconds = session.expiresAt.epochSeconds - Clock.System.now().epochSeconds
                 if (recovered is PreparedAuth.Available && recoveredSeconds > REFRESH_SKEW_SECONDS) {
+                    DeveloperLogger.warn(
+                        category = LogCategory.AUTH,
+                        event = "SESSION_REFRESH_FAILED",
+                        message = "Refresh failed but a valid local session was recovered",
+                        throwable = error,
+                        metadata = mapOf("error_source" to "supabase_client")
+                    )
                     return@withLock recovered
                 }
                 if (error != null && AuthErrorMapper.isSessionExpired(error)) {
+                    DeveloperLogger.error(
+                        category = LogCategory.AUTH,
+                        event = "SESSION_EXPIRED",
+                        message = "Session expired during refresh",
+                        throwable = error,
+                        metadata = mapOf("error_source" to "supabase_client")
+                    )
                     return@withLock PreparedAuth.SignedOut
                 }
+                DeveloperLogger.error(
+                    category = LogCategory.AUTH,
+                    event = "SESSION_REFRESH_FAILED",
+                    message = "Session refresh failed",
+                    throwable = error,
+                    metadata = mapOf("error_source" to "supabase_client")
+                )
                 return@withLock recovered ?: PreparedAuth.NetworkError
             }
+            DeveloperLogger.info(
+                category = LogCategory.AUTH,
+                event = "SESSION_REFRESH_SUCCEEDED",
+                message = "Session refresh succeeded"
+            )
             session = auth.currentSessionOrNull() ?: return@withLock PreparedAuth.SignedOut
         }
 
