@@ -1,4 +1,3 @@
-import { serve } from "jsr:@std/http";
 import { corsHeaders, handleCors } from "../shared/cors.ts";
 import { getSupabaseAdmin, getSupabaseAuth } from "../shared/auth.ts";
 
@@ -226,7 +225,7 @@ function successWithJob(media: unknown, job: TelegramJobRow | null): Response {
   );
 }
 
-serve(async (req: Request) => {
+Deno.serve(async (req: Request) => {
   const corsResponse = handleCors(req);
   if (corsResponse) return corsResponse;
 
