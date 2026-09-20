@@ -1,5 +1,5 @@
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
-import { getSupabaseAdmin, getSupabaseAuth } from "../shared/auth.ts";
+import { createClient } from "jsr:@supabase/supabase-js@2";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -18,6 +18,27 @@ type AdminClient = ReturnType<typeof getSupabaseAdmin>;
 
 type MediaRow = Record<string, unknown> & { id: string };
 type JobRow = { id: string; media_id: string; destination_type: "telegram" | "google_drive"; status: string; last_error: string | null; completed_at: string | null };
+
+function getSupabaseAdmin() {
+  return createClient(
+    Deno.env.get("SUPABASE_URL")!,
+    Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
+    { auth: { autoRefreshToken: false, persistSession: false } },
+  );
+}
+
+async function getSupabaseAuth(req: Request) {
+  const authHeader = req.headers.get("Authorization");
+  if (!authHeader) throw new Error("Missing Authorization header");
+  const supabase = createClient(
+    Deno.env.get("SUPABASE_URL")!,
+    Deno.env.get("SUPABASE_ANON_KEY")!,
+    { global: { headers: { Authorization: authHeader } } },
+  );
+  const { data: { user }, error } = await supabase.auth.getUser();
+  if (error || !user) throw new Error("Invalid or expired token");
+  return { user };
+}
 
 function json(payload: unknown, status = 200) {
   return new Response(JSON.stringify(payload), { status, headers: { ...corsHeaders, "Content-Type": "application/json" } });
