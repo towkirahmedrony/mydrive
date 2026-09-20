@@ -72,6 +72,8 @@ class MyDriveApp : Application() {
         MediaFinalizeService(this, supabaseClient, sessionProvider, networkMonitor)
     }
 
+    private val mediaStoreDataSource by lazy { MediaStoreDataSource(this) }
+
     val backupRepository: BackupRepository by lazy {
         BackupRepository(
             syncRepository = syncRepository,
@@ -81,6 +83,9 @@ class MyDriveApp : Application() {
             sessionProvider = sessionProvider,
             deviceIdProvider = { authRepository.ensureDeviceRegistered() },
             mediaLookup = mediaRepository::mediaById,
+            queueLookup = syncRepository::queueEntity,
+            queuedMediaResolver = mediaStoreDataSource::resolveQueuedMedia,
+            uriProbe = mediaStoreDataSource::probeUri,
             scheduleUploadWork = { UploadWorkScheduler.schedule(this) }
         )
     }

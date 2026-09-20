@@ -2,6 +2,8 @@ package com.mydrive.app.data.repository
 
 import com.mydrive.app.data.auth.AuthenticatedSessionProvider
 import com.mydrive.app.data.auth.PreparedAuth
+import com.mydrive.app.data.local.UploadQueueEntity
+import com.mydrive.app.data.media.MediaUriProbe
 import com.mydrive.app.data.model.BackupState
 import com.mydrive.app.data.model.MediaItem
 import com.mydrive.app.data.model.MediaType
@@ -42,6 +44,9 @@ class BackupRepository(
     private val sessionProvider: AuthenticatedSessionProvider,
     private val deviceIdProvider: suspend () -> String?,
     private val mediaLookup: (String) -> MediaItem?,
+    private val queueLookup: suspend (String) -> UploadQueueEntity?,
+    private val queuedMediaResolver: suspend (UploadQueueEntity) -> MediaItem?,
+    private val uriProbe: (String) -> MediaUriProbe,
     private val scheduleUploadWork: () -> Unit
 ) {
 
@@ -182,7 +187,23 @@ class BackupRepository(
         if (!syncRepository.belongsTo(record, userId)) return ItemOutcome.Continue
         if (record.state.toBackupState().resumeLocally() != BackupState.WAITING) return ItemOutcome.Continue
 
-        val item = mediaLookup(id)
+        val queueEntity = queueLookup(id)
+        val storedProbe = queueEntity?.contentUri?.let(uriProbe)
+        if (queueEntity != null) {
+            DeveloperLogger.info(
+                category = LogCategory.MEDIASTORE,
+                event = "MEDIA_URI_PROBE",
+                message = "Checked persisted media URI before upload",
+                operationId = operationId,
+                localMediaId = id,
+                clientUploadId = record.clientUploadId,
+                metadata = uriMetadata(queueEntity, storedProbe)
+            )
+        }
+        // The gallery StateFlow can be stale or temporarily partial. Room's
+        // persisted URI is the queue source of truth; re-scan MediaStore only
+        // when the in-memory lookup cannot find the item.
+        val item = mediaLookup(id) ?: queueEntity?.let { queuedMediaResolver(it) }
         if (item != null) {
             DeveloperLogger.info(
                 category = LogCategory.MEDIASTORE,
@@ -199,13 +220,24 @@ class BackupRepository(
             )
         }
         if (item == null) {
+            val event = if (queueEntity == null || storedProbe?.queryFound != true) {
+                "MEDIASTORE_ITEM_NOT_FOUND"
+            } else {
+                "MEDIA_OPEN_FAILED"
+            }
             DeveloperLogger.error(
                 category = LogCategory.MEDIASTORE,
-                event = "MEDIA_UNAVAILABLE",
-                message = "Media is no longer available on this device",
+                event = event,
+                message = if (event == "MEDIASTORE_ITEM_NOT_FOUND") {
+                    "MediaStore row was not found for queued media"
+                } else {
+                    "Persisted media URI could not be opened"
+                },
                 operationId = operationId,
                 localMediaId = id,
-                clientUploadId = record.clientUploadId
+                clientUploadId = record.clientUploadId,
+                throwable = storedProbe?.errorType?.let { IllegalStateException(storedProbe.errorMessage) },
+                metadata = uriMetadata(queueEntity, storedProbe)
             )
             UploadLog.uploadFailed(id, "media_unavailable")
             syncRepository.updateState(
@@ -213,6 +245,36 @@ class BackupRepository(
                 state = BackupState.FAILED,
                 errorMessage = "This photo is no longer available on this device."
             )
+            return ItemOutcome.Continue
+        }
+
+        if (queueEntity != null && queueEntity.contentUri != item.uri) {
+            syncRepository.updateQueueMedia(id, item)
+            DeveloperLogger.info(
+                category = LogCategory.ROOM,
+                event = "QUEUE_MEDIA_URI_REFRESHED",
+                message = "Updated queued media metadata after MediaStore re-resolution",
+                operationId = operationId,
+                localMediaId = id,
+                clientUploadId = record.clientUploadId,
+                metadata = uriMetadata(item, uriProbe(item.uri))
+            )
+        }
+
+        val uploadProbe = uriProbe(item.uri)
+        if (!uploadProbe.inputStreamOpened || !uploadProbe.fileDescriptorOpened) {
+            DeveloperLogger.error(
+                category = LogCategory.MEDIASTORE,
+                event = "MEDIA_OPEN_FAILED",
+                message = "Media item was found but its upload URI could not be opened",
+                operationId = operationId,
+                localMediaId = id,
+                clientUploadId = record.clientUploadId,
+                throwable = uploadProbe.errorType?.let { IllegalStateException(uploadProbe.errorMessage) },
+                metadata = uriMetadata(item, uploadProbe)
+            )
+            UploadLog.uploadFailed(id, "media_open_failed")
+            syncRepository.updateState(id, BackupState.FAILED, "This media could not be opened for upload.")
             return ItemOutcome.Continue
         }
 
@@ -577,6 +639,34 @@ class BackupRepository(
             }
         }
     }
+
+    private fun uriMetadata(entity: UploadQueueEntity?, probe: MediaUriProbe?): Map<String, String?> = mapOf(
+        "content_uri" to entity?.contentUri,
+        "uri_authority" to probe?.authority,
+        "uri_scheme" to probe?.scheme,
+        "media_store_id" to (probe?.mediaStoreId ?: entity?.localMediaId)?.toString(),
+        "display_name" to entity?.fileName,
+        "mime_type" to entity?.mimeType,
+        "expected_size" to entity?.fileSize?.toString(),
+        "actual_readable_size" to probe?.readableSize?.toString(),
+        "query_found" to probe?.queryFound?.toString(),
+        "input_stream_opened" to probe?.inputStreamOpened?.toString(),
+        "file_descriptor_opened" to probe?.fileDescriptorOpened?.toString()
+    )
+
+    private fun uriMetadata(item: MediaItem, probe: MediaUriProbe): Map<String, String?> = mapOf(
+        "content_uri" to item.uri,
+        "uri_authority" to probe.authority,
+        "uri_scheme" to probe.scheme,
+        "media_store_id" to (probe.mediaStoreId ?: item.mediaStoreId).toString(),
+        "display_name" to item.filename,
+        "mime_type" to item.mimeType,
+        "expected_size" to item.fileSizeBytes.toString(),
+        "actual_readable_size" to probe.readableSize?.toString(),
+        "query_found" to probe.queryFound.toString(),
+        "input_stream_opened" to probe.inputStreamOpened.toString(),
+        "file_descriptor_opened" to probe.fileDescriptorOpened.toString()
+    )
 
     private enum class ItemOutcome {
         Continue,

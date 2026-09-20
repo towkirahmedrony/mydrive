@@ -4,7 +4,9 @@ import android.content.ContentUris
 import android.content.Context
 import android.net.Uri
 import android.os.Build
+import android.os.ParcelFileDescriptor
 import android.provider.MediaStore
+import com.mydrive.app.data.local.UploadQueueEntity
 import com.mydrive.app.data.model.MediaItem
 import com.mydrive.app.data.model.MediaType
 import com.mydrive.app.debug.DeveloperLogger
@@ -50,6 +52,71 @@ class MediaStoreDataSource(context: Context) {
             )
         )
         items
+    }
+
+    /**
+     * Re-resolve a queued item without trusting the current in-memory gallery list.
+     * The original URI is preferred; the MediaStore scan is only a fallback for a
+     * stale URI or a refresh that temporarily omitted the item.
+     */
+    suspend fun resolveQueuedMedia(entity: UploadQueueEntity): MediaItem? = withContext(Dispatchers.IO) {
+        val current = loadMedia()
+        current.firstOrNull { it.uri == entity.contentUri }
+            ?: current.firstOrNull {
+                it.id == entity.mediaId ||
+                    (entity.fileName.isNotBlank() && it.filename == entity.fileName &&
+                        (entity.fileSize <= 0L || it.fileSizeBytes == entity.fileSize) &&
+                        (entity.mimeType.isBlank() || it.mimeType == entity.mimeType))
+            }
+    }
+
+    fun probeUri(rawUri: String): MediaUriProbe {
+        if (rawUri.isBlank()) return MediaUriProbe(rawUri, errorType = "BlankUri", errorMessage = "URI is blank")
+        val uri = try {
+            Uri.parse(rawUri)
+        } catch (error: Exception) {
+            return MediaUriProbe(rawUri, errorType = error.javaClass.name, errorMessage = error.message)
+        }
+        var queryFound = false
+        var queryError: Throwable? = null
+        var inputOpened = false
+        var inputError: Throwable? = null
+        var descriptorOpened = false
+        var descriptorSize: Long? = null
+        var descriptorError: Throwable? = null
+        try {
+            appContext.contentResolver.query(uri, arrayOf(MediaStore.MediaColumns._ID), null, null, null)?.use {
+                queryFound = it.moveToFirst()
+            }
+        } catch (error: Throwable) {
+            queryError = error
+        }
+        try {
+            appContext.contentResolver.openInputStream(uri)?.use { inputOpened = true }
+        } catch (error: Throwable) {
+            inputError = error
+        }
+        try {
+            appContext.contentResolver.openFileDescriptor(uri, "r")?.use { descriptor: ParcelFileDescriptor ->
+                descriptorOpened = true
+                descriptorSize = descriptor.statSize.takeIf { it >= 0L }
+            }
+        } catch (error: Throwable) {
+            descriptorError = error
+        }
+        val error = queryError ?: inputError ?: descriptorError
+        return MediaUriProbe(
+            rawUri = rawUri,
+            authority = uri.authority,
+            scheme = uri.scheme,
+            mediaStoreId = uri.lastPathSegment?.toLongOrNull(),
+            queryFound = queryFound,
+            inputStreamOpened = inputOpened,
+            fileDescriptorOpened = descriptorOpened,
+            readableSize = descriptorSize,
+            errorType = error?.javaClass?.name,
+            errorMessage = error?.message
+        )
     }
 
     private fun imageCollection(): Uri = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -230,5 +297,18 @@ class MediaStoreDataSource(context: Context) {
             .lastOrNull { it.isNotBlank() }
     }
 }
+
+data class MediaUriProbe(
+    val rawUri: String,
+    val authority: String? = null,
+    val scheme: String? = null,
+    val mediaStoreId: Long? = null,
+    val queryFound: Boolean = false,
+    val inputStreamOpened: Boolean = false,
+    val fileDescriptorOpened: Boolean = false,
+    val readableSize: Long? = null,
+    val errorType: String? = null,
+    val errorMessage: String? = null
+)
 
 class MediaQueryException : Exception()

@@ -346,7 +346,24 @@ class CloudinaryUploadService(
         }
 
         val source = openSource(uri)
-            ?: return@withContext CloudinaryUploadResult.MediaUnavailable
+            ?: run {
+                DeveloperLogger.error(
+                    category = LogCategory.MEDIASTORE,
+                    event = "MEDIA_OPEN_FAILED",
+                    message = "ContentResolver.openInputStream returned no stream",
+                    operationId = operationId,
+                    localMediaId = localMediaId,
+                    clientUploadId = clientUploadId,
+                    throwable = IllegalStateException("openInputStream returned null"),
+                    metadata = mapOf(
+                        "content_uri" to mediaUri,
+                        "uri_authority" to uri.authority,
+                        "uri_scheme" to uri.scheme,
+                        "media_store_id" to uri.lastPathSegment
+                    )
+                )
+                return@withContext CloudinaryUploadResult.MediaUnavailable
+            }
 
         source.use { input ->
             val boundary = "CloudinaryBoundary${UUID.randomUUID()}"
@@ -462,9 +479,29 @@ class CloudinaryUploadService(
                 CloudinaryUploadResult.Timeout
             } catch (cancellation: CancellationException) {
                 throw cancellation
-            } catch (_: FileNotFoundException) {
+            } catch (error: FileNotFoundException) {
+                DeveloperLogger.error(
+                    category = LogCategory.MEDIASTORE,
+                    event = "MEDIA_READ_FAILED",
+                    message = "Media stream became unavailable while uploading",
+                    operationId = operationId,
+                    localMediaId = localMediaId,
+                    clientUploadId = clientUploadId,
+                    throwable = error,
+                    metadata = mapOf("content_uri" to mediaUri)
+                )
                 CloudinaryUploadResult.MediaUnavailable
-            } catch (_: SecurityException) {
+            } catch (error: SecurityException) {
+                DeveloperLogger.error(
+                    category = LogCategory.MEDIASTORE,
+                    event = "MEDIA_READ_FAILED",
+                    message = "Media stream permission failed while uploading",
+                    operationId = operationId,
+                    localMediaId = localMediaId,
+                    clientUploadId = clientUploadId,
+                    throwable = error,
+                    metadata = mapOf("content_uri" to mediaUri)
+                )
                 CloudinaryUploadResult.MediaUnavailable
             } catch (_: FileTooLargeException) {
                 DeveloperLogger.error(

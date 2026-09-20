@@ -227,6 +227,23 @@ class SyncRepository(
 
     fun pendingIds(): List<String> = runBlocking(Dispatchers.IO) { dao.pending().map { it.mediaId } }
 
+    suspend fun queueEntity(id: String): UploadQueueEntity? = dao.find(id)
+
+    suspend fun updateQueueMedia(id: String, item: MediaItem) {
+        dao.find(id)?.let { entity ->
+            dao.upsert(
+                entity.copy(
+                    localMediaId = item.mediaStoreId,
+                    contentUri = item.uri,
+                    fileName = item.filename,
+                    mimeType = item.mimeType,
+                    fileSize = item.fileSizeBytes,
+                    updatedAt = System.currentTimeMillis()
+                )
+            )
+        }
+    }
+
     private fun commit(next: Map<String, SyncRecord>) { _records.value = next; store.write(next) }
 }
 
