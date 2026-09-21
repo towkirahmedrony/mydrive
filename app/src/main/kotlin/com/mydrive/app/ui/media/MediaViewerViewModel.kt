@@ -72,12 +72,17 @@ class MediaViewerViewModel(
     fun shareMedia(item: MediaItem) {
         if (item.uri.isBlank()) return
         try {
+            val shareUri = Uri.parse(item.uri)
             val intent = Intent(Intent.ACTION_SEND).apply {
                 type = item.mimeType.ifBlank { if (item.type == MediaType.VIDEO) "video/*" else "image/*" }
-                putExtra(Intent.EXTRA_STREAM, Uri.parse(item.uri))
+                putExtra(Intent.EXTRA_STREAM, shareUri)
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
-            context.startActivity(Intent.createChooser(intent, item.filename))
+            val chooser = Intent.createChooser(intent, item.filename).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            context.startActivity(chooser)
         } catch (_: Exception) {
             Toast.makeText(context, "Unable to share this item", Toast.LENGTH_SHORT).show()
         }
@@ -86,13 +91,18 @@ class MediaViewerViewModel(
     fun editMedia(item: MediaItem) {
         if (item.uri.isBlank()) return
         try {
+            val editUri = Uri.parse(item.uri)
             val intent = Intent(Intent.ACTION_EDIT).apply {
-                setDataAndType(Uri.parse(item.uri), item.mimeType.ifBlank {
+                setDataAndType(editUri, item.mimeType.ifBlank {
                     if (item.type == MediaType.VIDEO) "video/*" else "image/*"
                 })
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
-            context.startActivity(Intent.createChooser(intent, "Edit with"))
+            val chooser = Intent.createChooser(intent, "Edit with").apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            context.startActivity(chooser)
         } catch (_: Exception) {
             Toast.makeText(context, "No editor available on this device", Toast.LENGTH_SHORT).show()
         }
@@ -163,13 +173,18 @@ class MediaViewerViewModel(
     fun openWith(item: MediaItem) {
         if (item.uri.isBlank()) return
         try {
+            val viewUri = Uri.parse(item.uri)
             val intent = Intent(Intent.ACTION_VIEW).apply {
-                setDataAndType(Uri.parse(item.uri), item.mimeType.ifBlank {
+                setDataAndType(viewUri, item.mimeType.ifBlank {
                     if (item.type == MediaType.VIDEO) "video/*" else "image/*"
                 })
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
-            context.startActivity(Intent.createChooser(intent, "Open with"))
+            val chooser = Intent.createChooser(intent, "Open with").apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            context.startActivity(chooser)
         } catch (_: Exception) {
             Toast.makeText(context, "No app available to open this item", Toast.LENGTH_SHORT).show()
         }
@@ -178,39 +193,25 @@ class MediaViewerViewModel(
     fun requestCopy(itemId: String) { _pendingOperation.value = MediaOperation.CopyTo(itemId) }
     fun copyToDestination(itemId: String, destUri: Uri) {
         _pendingOperation.value = MediaOperation.Idle
-        viewModelScope.launch { finishCopy(copyMediaToUri(itemId, destUri), "Copied successfully", "Copy failed") }
+        viewModelScope.launch {
+            val success = repository.copyMedia(context, itemId, destUri)
+            finishCopy(success, "Copied successfully", "Copy failed")
+        }
     }
 
     fun requestMove(itemId: String) { _pendingOperation.value = MediaOperation.MoveTo(itemId) }
     fun moveToDestination(itemId: String, destUri: Uri) {
         _pendingOperation.value = MediaOperation.Idle
         viewModelScope.launch {
-            val copied = copyMediaToUri(itemId, destUri)
-            val moved = copied && repository.deleteMedia(context, itemId)
+            val success = repository.moveMedia(context, itemId, destUri)
             withContext(Dispatchers.Main) {
-                Toast.makeText(context, if (moved) "Moved successfully" else if (copied) "Copied but could not delete original" else "Move failed", Toast.LENGTH_SHORT).show()
+                Toast.makeText(context, if (success) "Moved successfully" else "Move failed", Toast.LENGTH_SHORT).show()
             }
         }
     }
 
     private suspend fun finishCopy(success: Boolean, ok: String, fail: String) = withContext(Dispatchers.Main) {
         Toast.makeText(context, if (success) ok else fail, Toast.LENGTH_SHORT).show()
-    }
-
-    private suspend fun copyMediaToUri(itemId: String, destFolderUri: Uri): Boolean = withContext(Dispatchers.IO) {
-        val item = uiState.value.items.firstOrNull { it.id == itemId } ?: return@withContext false
-        try {
-            val mimeType = item.mimeType.ifBlank { if (item.type == MediaType.VIDEO) "video/*" else "image/*" }
-            val docUri = DocumentsContract.createDocument(context.contentResolver, destFolderUri, mimeType, item.filename)
-                ?: return@withContext false
-            context.contentResolver.openInputStream(Uri.parse(item.uri))?.use { input ->
-                context.contentResolver.openOutputStream(docUri)?.use { output -> input.copyTo(output) }
-                    ?: return@withContext false
-            } ?: return@withContext false
-            true
-        } catch (_: Exception) {
-            false
-        }
     }
 
     companion object {

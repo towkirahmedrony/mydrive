@@ -18,13 +18,17 @@ class MediaPermissions(context: Context) {
     private val appContext = context.applicationContext
     private val prefs = appContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
-    fun requiredPermissions(): Array<String> = if (Build.VERSION.SDK_INT >= 33) {
-        arrayOf(
+    fun requiredPermissions(): Array<String> = when {
+        Build.VERSION.SDK_INT >= 34 -> arrayOf(
+            Manifest.permission.READ_MEDIA_IMAGES,
+            Manifest.permission.READ_MEDIA_VIDEO,
+            Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED
+        )
+        Build.VERSION.SDK_INT >= 33 -> arrayOf(
             Manifest.permission.READ_MEDIA_IMAGES,
             Manifest.permission.READ_MEDIA_VIDEO
         )
-    } else {
-        arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE)
+        else -> arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE)
     }
 
     fun hasBeenAsked(): Boolean = prefs.getBoolean(KEY_ASKED, false)
