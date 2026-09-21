@@ -3,6 +3,7 @@ package com.mydrive.app.data.repository
 import android.content.ContentUris
 import android.content.ContentValues
 import android.content.Context
+import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Matrix
 import android.net.Uri
@@ -107,38 +108,24 @@ class MediaRepository(
     }
 
     fun requiredPermissions(): Array<String> = permissions.requiredPermissions()
-
-    fun markPermissionAsked() {
-        permissions.markAsked()
-    }
+    fun markPermissionAsked() { permissions.markAsked() }
 
     @Volatile
     private var viewerSessionIds: List<String>? = null
 
     fun mediaById(id: String): MediaItem? = _media.value.firstOrNull { it.id == id }
-
     fun albumById(id: String): AlbumFolder? = _albums.value.firstOrNull { it.id == id }
-
     fun albums(): List<AlbumFolder> = _albums.value
-
-    fun beginViewerSession(ids: List<String>) {
-        viewerSessionIds = ids
-    }
-
+    fun beginViewerSession(ids: List<String>) { viewerSessionIds = ids }
     fun viewerSessionIds(): List<String>? = viewerSessionIds
 
     fun mediaForViewer(startId: String, albumId: String?): List<MediaItem> {
         val current = _media.value
         val byId = current.associateBy { it.id }
-        val session = viewerSessionIds
-            ?.mapNotNull { byId[it] }
-            ?.takeIf { items -> items.any { it.id == startId } }
+        val session = viewerSessionIds?.mapNotNull { byId[it] }?.takeIf { items -> items.any { it.id == startId } }
         if (session != null) return session
-        val scoped = if (!albumId.isNullOrBlank()) {
-            current.filter { it.albumId == albumId }
-        } else {
-            current
-        }.sortedByDescending { it.capturedAtMillis }
+        val scoped = if (!albumId.isNullOrBlank()) current.filter { it.albumId == albumId } else current
+            .sortedByDescending { it.capturedAtMillis }
         if (scoped.any { it.id == startId }) return scoped
         val start = byId[startId]
         return if (start != null) listOf(start) else scoped
@@ -147,50 +134,29 @@ class MediaRepository(
     fun toggleFavorite(id: String) {
         favorites.toggle(id)
         val favorite = favorites.contains(id)
-        _media.update { items ->
-            items.map { item ->
-                if (item.id == id) item.copy(isFavorite = favorite) else item
-            }
-        }
+        _media.update { items -> items.map { item -> if (item.id == id) item.copy(isFavorite = favorite) else item } }
     }
 
-    fun updatePreferences(transform: (BackupPreferences) -> BackupPreferences) {
-        _preferences.update(transform)
-    }
-
+    fun updatePreferences(transform: (BackupPreferences) -> BackupPreferences) { _preferences.update(transform) }
     fun saveTelegramConfiguration(botToken: String?, chatId: String, enabled: Boolean) {
-        telegramSettingsStore.saveConfiguration(
-            botToken = botToken,
-            chatId = chatId,
-            enabled = enabled
-        )
+        telegramSettingsStore.saveConfiguration(botToken = botToken, chatId = chatId, enabled = enabled)
     }
-
-    fun setTelegramBackupEnabled(enabled: Boolean) {
-        telegramSettingsStore.setEnabled(enabled)
-    }
+    fun setTelegramBackupEnabled(enabled: Boolean) { telegramSettingsStore.setEnabled(enabled) }
 
     suspend fun testTelegramConnection(): TelegramVerificationResult {
-        if (telegram.value.connectionState == TelegramConnectionState.TESTING) {
-            return TelegramVerificationResult.TelegramUnavailable
-        }
+        if (telegram.value.connectionState == TelegramConnectionState.TESTING) return TelegramVerificationResult.TelegramUnavailable
         val credentials = telegramSettingsStore.credentials()
         if (credentials == null) {
             telegramSettingsStore.markConnectionFailed("Configuration incomplete.")
             return TelegramVerificationResult.InvalidChatId
         }
-
         val result = try {
             telegramSettingsStore.markTesting()
-            telegramApiVerifier.verify(
-                botToken = credentials.botToken,
-                chatId = credentials.chatId
-            )
+            telegramApiVerifier.verify(botToken = credentials.botToken, chatId = credentials.chatId)
         } catch (cancellation: CancellationException) {
             telegramSettingsStore.markNotTested()
             throw cancellation
         }
-
         when (result) {
             TelegramVerificationResult.Success -> telegramSettingsStore.markConnected()
             else -> telegramSettingsStore.markConnectionFailed(result.message())
@@ -198,26 +164,16 @@ class MediaRepository(
         return result
     }
 
-    fun markTelegramConnectionFailed(message: String) {
-        telegramSettingsStore.markConnectionFailed(message)
-    }
-
-    fun clearTelegramConfiguration() {
-        telegramSettingsStore.clear()
-    }
+    fun markTelegramConnectionFailed(message: String) { telegramSettingsStore.markConnectionFailed(message) }
+    fun clearTelegramConfiguration() { telegramSettingsStore.clear() }
 
     suspend fun refresh(force: Boolean = false) {
         refreshMutex.withLock {
             val now = System.currentTimeMillis()
-            if (!force && _media.value.isNotEmpty() && now - lastRefreshAt < MIN_REFRESH_INTERVAL_MS) {
-                applyAccessState()
-                return
-            }
+            if (!force && _media.value.isNotEmpty() && now - lastRefreshAt < MIN_REFRESH_INTERVAL_MS) { applyAccessState(); return }
             applyAccessState()
             if (!permissions.canReadMedia()) {
-                _media.value = emptyList()
-                _albums.value = emptyList()
-                _storage.value = StorageSummary(0, 0, 0, 0)
+                _media.value = emptyList(); _albums.value = emptyList(); _storage.value = StorageSummary(0, 0, 0, 0)
                 _loadState.update { it.copy(isLoading = false, errorMessage = null) }
                 return
             }
@@ -225,39 +181,22 @@ class MediaRepository(
             _loadState.update { it.copy(isLoading = showSpinner, errorMessage = null) }
             try {
                 val favoriteIds = favorites.ids.value
-                val items = mediaStore.loadMedia().map { item ->
-                    item.copy(isFavorite = item.id in favoriteIds)
-                }
+                val items = mediaStore.loadMedia().map { item -> item.copy(isFavorite = item.id in favoriteIds) }
                 syncRepository.reconcileMedia(items)
-                // Prune references to media that no longer exists. This is only
-                // safe after a complete load with full media access, otherwise a
-                // partial query could wrongly discard still-valid references.
                 if (permissions.access() == MediaAccess.GRANTED) {
-                    val presentIds = withContext(Dispatchers.Default) {
-                        items.mapTo(HashSet(items.size)) { it.id }
-                    }
+                    val presentIds = withContext(Dispatchers.Default) { items.mapTo(HashSet(items.size)) { it.id } }
                     favorites.retainAll(presentIds)
                     syncRepository.reconcile(presentIds)
                 }
                 val records = syncRepository.records.value
                 val merged = items.map { it.withRecord(records[it.id]) }
-                _media.value = merged
-                _albums.value = buildAlbums(merged)
-                lastRefreshAt = now
-                updateStorage(merged)
+                _media.value = merged; _albums.value = buildAlbums(merged); lastRefreshAt = now; updateStorage(merged)
                 _loadState.update { it.copy(isLoading = false, errorMessage = null) }
             } catch (_: MediaQueryException) {
                 val keepExisting = _media.value.isNotEmpty()
-                _loadState.update {
-                    it.copy(
-                        isLoading = false,
-                        errorMessage = if (keepExisting) null else "Couldn't load your photos and videos."
-                    )
-                }
+                _loadState.update { it.copy(isLoading = false, errorMessage = if (keepExisting) null else "Couldn't load your photos and videos.") }
             } catch (_: SecurityException) {
-                applyAccessState()
-                _media.value = emptyList()
-                _albums.value = emptyList()
+                applyAccessState(); _media.value = emptyList(); _albums.value = emptyList()
                 _loadState.update { it.copy(isLoading = false, errorMessage = null) }
             }
         }
@@ -266,252 +205,93 @@ class MediaRepository(
     private fun initialLoadState(): MediaLoadState {
         val access = permissions.access()
         val canRead = access == MediaAccess.GRANTED || access == MediaAccess.PARTIAL
-        return MediaLoadState(
-            accessGranted = access == MediaAccess.GRANTED,
-            accessPartial = access == MediaAccess.PARTIAL,
-            needsPermission = access == MediaAccess.NEEDS_REQUEST,
-            permissionDenied = access == MediaAccess.DENIED,
-            isLoading = canRead
-        )
+        return MediaLoadState(accessGranted = access == MediaAccess.GRANTED, accessPartial = access == MediaAccess.PARTIAL, needsPermission = access == MediaAccess.NEEDS_REQUEST, permissionDenied = access == MediaAccess.DENIED, isLoading = canRead)
     }
 
     private fun applyAccessState() {
         val access = permissions.access()
-        _loadState.update {
-            it.copy(
-                accessGranted = access == MediaAccess.GRANTED,
-                accessPartial = access == MediaAccess.PARTIAL,
-                needsPermission = access == MediaAccess.NEEDS_REQUEST,
-                permissionDenied = access == MediaAccess.DENIED
-            )
-        }
+        _loadState.update { it.copy(accessGranted = access == MediaAccess.GRANTED, accessPartial = access == MediaAccess.PARTIAL, needsPermission = access == MediaAccess.NEEDS_REQUEST, permissionDenied = access == MediaAccess.DENIED) }
     }
 
-    private fun buildAlbums(items: List<MediaItem>): List<AlbumFolder> {
-        return items
-            .groupBy { it.albumId }
-            .map { (albumId, albumItems) ->
-                val cover = albumItems.maxByOrNull { it.capturedAtMillis }
-                AlbumFolder(
-                    id = albumId,
-                    name = cover?.albumName?.ifBlank { "Other" } ?: "Other",
-                    coverSeed = cover?.thumbnailSeed ?: 0,
-                    coverType = cover?.type ?: MediaType.PHOTO,
-                    mediaCount = albumItems.size,
-                    coverUri = cover?.uri.orEmpty()
-                )
-            }
-            .sortedByDescending { it.mediaCount }
-    }
+    private fun buildAlbums(items: List<MediaItem>): List<AlbumFolder> = items.groupBy { it.albumId }.map { (albumId, albumItems) ->
+        val cover = albumItems.maxByOrNull { it.capturedAtMillis }
+        AlbumFolder(id = albumId, name = cover?.albumName?.ifBlank { "Other" } ?: "Other", coverSeed = cover?.thumbnailSeed ?: 0, coverType = cover?.type ?: MediaType.PHOTO, mediaCount = albumItems.size, coverUri = cover?.uri.orEmpty())
+    }.sortedByDescending { it.mediaCount }
 
     private fun updateStorage(items: List<MediaItem>) {
         val photos = items.count { it.type == MediaType.PHOTO }
         val videos = items.count { it.type == MediaType.VIDEO }
-        _storage.value = StorageSummary(
-            totalMedia = items.size,
-            photos = photos,
-            videos = videos,
-            pendingUploads = items.count { it.backupState != BackupState.COMPLETED }
-        )
-        _todayStats.value = TodayStats(
-            photosBackedUp = 0,
-            videosBackedUp = 0,
-            pending = items.count { it.backupState != BackupState.COMPLETED },
-            failed = items.count { it.backupState == BackupState.FAILED }
-        )
+        _storage.value = StorageSummary(totalMedia = items.size, photos = photos, videos = videos, pendingUploads = items.count { it.backupState != BackupState.COMPLETED })
+        _todayStats.value = TodayStats(photosBackedUp = 0, videosBackedUp = 0, pending = items.count { it.backupState != BackupState.COMPLETED }, failed = items.count { it.backupState == BackupState.FAILED })
         refreshSyncSummary()
     }
 
     private fun refreshSyncSummary() {
         val items = _media.value
-        val inProgress = items.count { it.backupState.isActive }
-        _syncSummary.update { it.copy(inProgressCount = inProgress, completedToday = 0) }
+        _syncSummary.update { it.copy(inProgressCount = items.count { it.backupState.isActive }, completedToday = 0) }
     }
 
     private fun MediaItem.withRecord(record: SyncRecord?): MediaItem {
         if (record == null) {
             if (backupState == BackupState.NOT_STARTED) return this
-            return copy(
-                backupState = BackupState.NOT_STARTED,
-                backupCompleted = false,
-                progress = 0f,
-                errorMessage = null,
-                cloudinaryAssetId = null,
-                cloudinaryPublicId = null
-            )
+            return copy(backupState = BackupState.NOT_STARTED, backupCompleted = false, progress = 0f, errorMessage = null, cloudinaryAssetId = null, cloudinaryPublicId = null)
         }
         val state = record.state.toBackupState().resumeLocally()
-        return copy(
-            backupState = state,
-            backupCompleted = state == BackupState.COMPLETED,
-            progress = 0f,
-            errorMessage = record.errorMessage,
-            cloudinaryAssetId = record.cloudinaryAssetId,
-            cloudinaryPublicId = record.cloudinaryPublicId
-        )
+        return copy(backupState = state, backupCompleted = state == BackupState.COMPLETED, progress = 0f, errorMessage = record.errorMessage, cloudinaryAssetId = record.cloudinaryAssetId, cloudinaryPublicId = record.cloudinaryPublicId)
     }
 
-    fun retryBackup(id: String) {
-        syncRepository.retry(id)
-    }
+    fun retryBackup(id: String) { syncRepository.retry(id) }
 
-    /**
-     * Delete a local MediaStore item. Returns true on success.
-     * On Android Q+ this moves the item to the system trash.
-     */
     suspend fun deleteMedia(context: Context, id: String): Boolean = withContext(Dispatchers.IO) {
         val item = _media.value.firstOrNull { it.id == id } ?: return@withContext false
         val uri = Uri.parse(item.uri)
         val deleted = try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                val updatedRows = context.contentResolver.update(
-                    uri,
-                    ContentValues().apply {
-                        put(MediaStore.MediaColumns.IS_TRASHED, 1)
-                    },
-                    null,
-                    null
-                )
-                updatedRows > 0
-            } else {
-                context.contentResolver.delete(uri, null, null) > 0
-            }
-        } catch (_: Exception) {
-            false
-        }
-        if (deleted) {
-            _media.update { items -> items.filter { it.id != id } }
-            favorites.retainAll(_media.value.mapTo(HashSet()) { it.id })
-            rebuildAlbums()
-        }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) context.contentResolver.update(uri, ContentValues().apply { put(MediaStore.MediaColumns.IS_TRASHED, 1) }, null, null) > 0
+            else context.contentResolver.delete(uri, null, null) > 0
+        } catch (_: Exception) { false }
+        if (deleted) { _media.update { items -> items.filter { it.id != id } }; favorites.retainAll(_media.value.mapTo(HashSet()) { it.id }); rebuildAlbums() }
         deleted
     }
 
-    /**
-     * Rename a local media file via MediaStore display name update.
-     * The original extension is preserved unless the user changes it.
-     */
-    suspend fun renameMedia(context: Context, id: String, newName: String): Boolean =
-        withContext(Dispatchers.IO) {
-            val item = _media.value.firstOrNull { it.id == id } ?: return@withContext false
-            val trimmed = newName.trim()
-            if (trimmed.isBlank() || trimmed == item.filename) return@withContext false
-            val uri = Uri.parse(item.uri)
-            val values = ContentValues().apply {
-                put(MediaStore.MediaColumns.DISPLAY_NAME, trimmed)
-            }
-            val updated = try {
-                context.contentResolver.update(uri, values, null, null) > 0
-            } catch (_: Exception) {
-                false
-            }
-            if (updated) {
-                _media.update { items ->
-                    items.map {
-                        if (it.id == id) it.copy(filename = trimmed) else it
-                    }
-                }
-                rebuildAlbums()
-            }
-            updated
-        }
-
-    /**
-     * Rotate a local image by [degrees] degrees (positive = clockwise).
-     * Writes the rotated bitmap back to the same MediaStore URI and normalizes EXIF.
-     * Returns true on success. Video items are ignored.
-     */
-    suspend fun rotateMedia(context: Context, id: String, degrees: Float): Boolean =
-        withContext(Dispatchers.IO) {
-            val item = _media.value.firstOrNull { it.id == id } ?: return@withContext false
-            if (item.type != MediaType.PHOTO) return@withContext false
-            val uri = Uri.parse(item.uri)
-            val filePath = getMediaFilePath(context, item)
-            try {
-                // Decode full image
-                val input = context.contentResolver.openInputStream(uri)
-                    ?: return@withContext false
-                val bitmap = BitmapFactory.decodeStream(input)
-                input.close()
-                if (bitmap == null) return@withContext false
-                // Determine total rotation including current EXIF orientation
-                val currentOrientation = if (filePath != null) {
-                    try {
-                        val exif = ExifInterface(filePath)
-                        exif.rotationDegrees
-                    } catch (_: Exception) {
-                        0
-                    }
-                } else {
-                    0
-                }
-                val totalRotation = (currentOrientation + degrees.toInt()).mod(360).toFloat()
-                val matrix = Matrix().apply { postRotate(degrees) }
-                val rotated = Bitmap.createBitmap(
-                    bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true
-                )
-                if (rotated !== bitmap) bitmap.recycle()
-                // Write back to MediaStore
-                val outputStream = context.contentResolver.openOutputStream(uri)
-                    ?: run {
-                        rotated.recycle()
-                        return@withContext false
-                    }
-                val format = if (item.mimeType.contains("png")) {
-                    Bitmap.CompressFormat.PNG
-                } else {
-                    Bitmap.CompressFormat.JPEG
-                }
-                val quality = if (format == Bitmap.CompressFormat.JPEG) 95 else 100
-                rotated.compress(format, quality, outputStream)
-                outputStream.close()
-                rotated.recycle()
-                // Normalize EXIF orientation to 0
-                if (filePath != null) {
-                    try {
-                        val exif = ExifInterface(filePath)
-                        exif.setAttribute(
-                            ExifInterface.TAG_ORIENTATION,
-                            ExifInterface.ORIENTATION_NORMAL.toString()
-                        )
-                        exif.saveAttributes()
-                    } catch (_: Exception) {
-                        // Best effort
-                    }
-                }
-                true
-            } catch (_: Exception) {
-                false
-            }
-        }
-
-    /**
-     * Get the on-disk file path for a MediaStore item (API < 29 only).
-     * Returns null on Android Q+ where DATA column is deprecated.
-     */
-    suspend fun getMediaFilePath(context: Context, item: MediaItem): String? =
-        withContext(Dispatchers.IO) {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) return@withContext null
-            val uri = Uri.parse(item.uri)
-            val projection = arrayOf(MediaStore.MediaColumns.DATA)
-            try {
-                context.contentResolver.query(uri, projection, null, null, null)?.use { cursor ->
-                    if (cursor.moveToFirst()) {
-                        val idx = cursor.getColumnIndex(MediaStore.MediaColumns.DATA)
-                        if (idx >= 0) cursor.getString(idx)
-                        else null
-                    } else null
-                }
-            } catch (_: Exception) {
-                null
-            }
-        }
-
-    private fun rebuildAlbums() {
-        _albums.value = buildAlbums(_media.value)
+    suspend fun renameMedia(context: Context, id: String, newName: String): Boolean = withContext(Dispatchers.IO) {
+        val item = _media.value.firstOrNull { it.id == id } ?: return@withContext false
+        val trimmed = newName.trim()
+        if (trimmed.isBlank() || trimmed == item.filename) return@withContext false
+        val uri = Uri.parse(item.uri)
+        val updated = try { context.contentResolver.update(uri, ContentValues().apply { put(MediaStore.MediaColumns.DISPLAY_NAME, trimmed) }, null, null) > 0 } catch (_: Exception) { false }
+        if (updated) { _media.update { items -> items.map { if (it.id == id) it.copy(filename = trimmed) else it } }; rebuildAlbums() }
+        updated
     }
 
-    companion object {
-        private const val MIN_REFRESH_INTERVAL_MS = 1_500L
+    suspend fun rotateMedia(context: Context, id: String, degrees: Float): Boolean = withContext(Dispatchers.IO) {
+        val item = _media.value.firstOrNull { it.id == id } ?: return@withContext false
+        if (item.type != MediaType.PHOTO) return@withContext false
+        val uri = Uri.parse(item.uri)
+        val filePath = getMediaFilePath(context, item)
+        try {
+            val bitmap = context.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it) } ?: return@withContext false
+            val currentOrientation = if (filePath != null) try { ExifInterface(filePath).rotationDegrees } catch (_: Exception) { 0 } else 0
+            val totalRotation = (currentOrientation + degrees.toInt()).mod(360).toFloat()
+            val rotated = Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, Matrix().apply { postRotate(degrees) }, true)
+            if (rotated !== bitmap) bitmap.recycle()
+            val outputStream = context.contentResolver.openOutputStream(uri) ?: run { rotated.recycle(); return@withContext false }
+            val format = if (item.mimeType.contains("png")) Bitmap.CompressFormat.PNG else Bitmap.CompressFormat.JPEG
+            val quality = if (format == Bitmap.CompressFormat.JPEG) 95 else 100
+            outputStream.use { rotated.compress(format, quality, it) }
+            rotated.recycle()
+            if (filePath != null) try { ExifInterface(filePath).apply { setAttribute(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL.toString()); saveAttributes() } } catch (_: Exception) { }
+            true
+        } catch (_: Exception) { false }
     }
+
+    suspend fun getMediaFilePath(context: Context, item: MediaItem): String? = withContext(Dispatchers.IO) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) return@withContext null
+        val uri = Uri.parse(item.uri)
+        val projection = arrayOf(MediaStore.MediaColumns.DATA)
+        try { context.contentResolver.query(uri, projection, null, null, null)?.use { cursor -> if (cursor.moveToFirst()) { val idx = cursor.getColumnIndex(MediaStore.MediaColumns.DATA); if (idx >= 0) cursor.getString(idx) else null } else null } } catch (_: Exception) { null }
+    }
+
+    private fun rebuildAlbums() { _albums.value = buildAlbums(_media.value) }
+
+    companion object { private const val MIN_REFRESH_INTERVAL_MS = 1_500L }
 }
