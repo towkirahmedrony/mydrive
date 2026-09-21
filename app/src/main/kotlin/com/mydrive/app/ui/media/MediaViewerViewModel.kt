@@ -58,6 +58,8 @@ class MediaViewerViewModel(
     val pendingOperation: StateFlow<MediaOperation> = _pendingOperation
     private val _deleteConfirmation = kotlinx.coroutines.flow.MutableStateFlow<DeleteConfirmationRequest?>(null)
     val deleteConfirmation: StateFlow<DeleteConfirmationRequest?> = _deleteConfirmation
+    private val _manageMediaAccess = kotlinx.coroutines.flow.MutableStateFlow<String?>(null)
+    val manageMediaAccess: StateFlow<String?> = _manageMediaAccess
     private var pendingDeleteCompletion: ((Int?) -> Unit)? = null
 
     val uiState: StateFlow<MediaViewerUiState> = repository.media
@@ -149,6 +151,17 @@ class MediaViewerViewModel(
         }
     }
 
+    fun onManageMediaAccessResult() {
+        val itemId = _manageMediaAccess.value ?: return
+        _manageMediaAccess.value = null
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && android.provider.MediaStore.canManageMedia(context)) {
+            performDelete(itemId)
+        } else {
+            pendingDeleteCompletion = null
+            DeveloperLogger.info(LogCategory.MEDIASTORE, "MEDIA_DELETE_MANAGE_MEDIA_CANCELLED", "Media management access was not granted", localMediaId = itemId)
+        }
+    }
+
     private fun performDelete(itemId: String) {
         viewModelScope.launch {
             val items = uiState.value.items
@@ -156,6 +169,9 @@ class MediaViewerViewModel(
             when (val result = repository.deleteMediaWithResult(context, itemId)) {
                 is DeleteMediaResult.NeedsConfirmation -> {
                     _deleteConfirmation.value = DeleteConfirmationRequest(itemId, result.intentSender)
+                }
+                DeleteMediaResult.NeedsManageMediaAccess -> {
+                    _manageMediaAccess.value = itemId
                 }
                 DeleteMediaResult.Deleted -> finalizeDelete(itemId, currentIndex)
                 DeleteMediaResult.Failed -> {

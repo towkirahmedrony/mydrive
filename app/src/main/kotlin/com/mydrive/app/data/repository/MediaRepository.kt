@@ -54,6 +54,7 @@ import kotlinx.coroutines.withContext
 sealed class DeleteMediaResult {
     data object Deleted : DeleteMediaResult()
     data class NeedsConfirmation(val intentSender: android.content.IntentSender) : DeleteMediaResult()
+    data object NeedsManageMediaAccess : DeleteMediaResult()
     data object Failed : DeleteMediaResult()
 }
 
@@ -273,15 +274,37 @@ class MediaRepository(
 
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                val sender = MediaStore.createTrashRequest(context.contentResolver, listOf(uri), true).intentSender
-                DeveloperLogger.info(
-                    LogCategory.MEDIASTORE,
-                    "MEDIA_DELETE_TRASH_REQUESTED",
-                    "MediaStore trash request created; waiting for system result",
-                    localMediaId = item.id,
-                    metadata = mediaActionMetadata("DELETE", item) + ("android_flow" to "create_trash_request")
-                )
-                DeleteMediaResult.NeedsConfirmation(sender)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && !MediaStore.canManageMedia(context)) {
+                    DeveloperLogger.info(
+                        LogCategory.MEDIASTORE,
+                        "MEDIA_DELETE_NEEDS_MANAGE_MEDIA_ACCESS",
+                        "Media management access is required to trash this item without a second system confirmation",
+                        localMediaId = item.id,
+                        metadata = mediaActionMetadata("DELETE", item) + ("android_flow" to "request_manage_media_access")
+                    )
+                    return@withContext DeleteMediaResult.NeedsManageMediaAccess
+                }
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    val values = ContentValues().apply {
+                        put(MediaStore.MediaColumns.IS_TRASHED, 1)
+                    }
+                    if (context.contentResolver.update(uri, values, null, null) > 0) {
+                        DeveloperLogger.info(
+                            LogCategory.MEDIASTORE,
+                            "MEDIA_DELETE_TRASHED",
+                            "MediaStore item moved to Trash",
+                            localMediaId = item.id,
+                            metadata = mediaActionMetadata("DELETE", item) + ("android_flow" to "direct_trash_with_manage_media")
+                        )
+                        DeleteMediaResult.Deleted
+                    } else {
+                        logMediaActionFailure("DELETE", item, IllegalStateException("MediaStore trash update returned 0 rows"))
+                        DeleteMediaResult.Failed
+                    }
+                } else {
+                    val sender = MediaStore.createTrashRequest(context.contentResolver, listOf(uri), true).intentSender
+                    DeleteMediaResult.NeedsConfirmation(sender)
+                }
             } else {
                 val values = ContentValues().apply {
                     put(MediaStore.MediaColumns.IS_TRASHED, 1)

@@ -2,6 +2,9 @@ package com.mydrive.app.ui.media
 
 import android.app.Activity
 import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import android.provider.Settings
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.IntentSenderRequest
@@ -192,9 +195,26 @@ fun MediaViewerScreen(
         viewModel.onDeleteConfirmationResult(result.resultCode == Activity.RESULT_OK)
     }
 
+    val manageMediaAccess by viewModel.manageMediaAccess.collectAsStateWithLifecycle()
+    val manageMediaLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) {
+        viewModel.onManageMediaAccessResult()
+    }
+
     LaunchedEffect(deleteConfirmation) {
         deleteConfirmation?.let { request ->
             deleteLauncher.launch(IntentSenderRequest.Builder(request.intentSender).build())
+        }
+    }
+
+    LaunchedEffect(manageMediaAccess) {
+        if (manageMediaAccess != null) {
+            manageMediaLauncher.launch(
+                Intent(Settings.ACTION_REQUEST_MANAGE_MEDIA).apply {
+                    data = Uri.parse("package:${context.packageName}")
+                }
+            )
         }
     }
 
