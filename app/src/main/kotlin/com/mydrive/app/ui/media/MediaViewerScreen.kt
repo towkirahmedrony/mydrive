@@ -4,6 +4,7 @@ import android.app.Activity
 import android.content.Context
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
@@ -181,6 +182,19 @@ fun MediaViewerScreen(
             }
         } else {
             viewModel.dismissOperation()
+        }
+    }
+
+    val deleteConfirmation by viewModel.deleteConfirmation.collectAsStateWithLifecycle()
+    val deleteLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartIntentSenderForResult()
+    ) { result ->
+        viewModel.onDeleteConfirmationResult(result.resultCode == Activity.RESULT_OK)
+    }
+
+    LaunchedEffect(deleteConfirmation) {
+        deleteConfirmation?.let { request ->
+            deleteLauncher.launch(IntentSenderRequest.Builder(request.intentSender).build())
         }
     }
 

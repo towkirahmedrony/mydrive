@@ -1,9 +1,12 @@
 package com.mydrive.app.ui.media
 
 import android.app.Application
+import android.content.ClipData
+import android.content.ContentResolver
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.os.Build
 import android.provider.DocumentsContract
 import android.widget.Toast
 import androidx.lifecycle.ViewModel
@@ -11,7 +14,10 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.mydrive.app.data.model.MediaItem
 import com.mydrive.app.data.model.MediaType
+import com.mydrive.app.data.repository.DeleteMediaResult
 import com.mydrive.app.data.repository.MediaRepository
+import com.mydrive.app.debug.DeveloperLogger
+import com.mydrive.app.debug.LogCategory
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -25,6 +31,8 @@ data class MediaViewerUiState(
     val items: List<MediaItem>,
     val initialIndex: Int
 )
+
+data class DeleteConfirmationRequest(val itemId: String, val intentSender: android.content.IntentSender)
 
 sealed class MediaOperation {
     data object Idle : MediaOperation()
@@ -48,6 +56,9 @@ class MediaViewerViewModel(
 
     private val _pendingOperation = kotlinx.coroutines.flow.MutableStateFlow<MediaOperation>(MediaOperation.Idle)
     val pendingOperation: StateFlow<MediaOperation> = _pendingOperation
+    private val _deleteConfirmation = kotlinx.coroutines.flow.MutableStateFlow<DeleteConfirmationRequest?>(null)
+    val deleteConfirmation: StateFlow<DeleteConfirmationRequest?> = _deleteConfirmation
+    private var pendingDeleteCompletion: ((Int?) -> Unit)? = null
 
     val uiState: StateFlow<MediaViewerUiState> = repository.media
         .map { media ->
@@ -70,12 +81,21 @@ class MediaViewerViewModel(
     fun toggleFavorite(id: String) = repository.toggleFavorite(id)
 
     fun shareMedia(item: MediaItem) {
-        if (item.uri.isBlank()) return
+        val shareUri = runCatching { Uri.parse(item.uri) }.getOrNull()
+        val mimeType = item.mimeType.ifBlank { if (item.type == MediaType.VIDEO) "video/*" else "image/*" }
+        val probe = if (shareUri != null) repository.probeMediaUri(item.uri) else null
+        val permissionGranted = repository.hasMediaReadPermission()
+        if (shareUri == null || shareUri.scheme != ContentResolver.SCHEME_CONTENT || shareUri.authority.isNullOrBlank() || probe == null || !probe.queryFound || !probe.inputStreamOpened || !permissionGranted) {
+            val error = SecurityException(probe?.errorMessage ?: "Share requires an accessible content:// URI and media read permission")
+            DeveloperLogger.error(LogCategory.MEDIASTORE, "MEDIA_SHARE_FAILED", "Media Viewer SHARE failed", localMediaId = item.id, throwable = error, metadata = mediaActionMetadata("SHARE", item, mimeType) + mapOf("uri_probe_query_found" to (probe?.queryFound?.toString() ?: "false"), "uri_probe_input_opened" to (probe?.inputStreamOpened?.toString() ?: "false"), "permission_granted" to permissionGranted.toString()))
+            Toast.makeText(context, "Unable to share this item", Toast.LENGTH_SHORT).show()
+            return
+        }
         try {
-            val shareUri = Uri.parse(item.uri)
             val intent = Intent(Intent.ACTION_SEND).apply {
-                type = item.mimeType.ifBlank { if (item.type == MediaType.VIDEO) "video/*" else "image/*" }
+                type = mimeType
                 putExtra(Intent.EXTRA_STREAM, shareUri)
+                clipData = ClipData.newRawUri(item.filename, shareUri)
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
@@ -83,7 +103,8 @@ class MediaViewerViewModel(
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
             context.startActivity(chooser)
-        } catch (_: Exception) {
+        } catch (error: Exception) {
+            DeveloperLogger.error(LogCategory.MEDIASTORE, "MEDIA_SHARE_FAILED", "Media Viewer SHARE failed", localMediaId = item.id, throwable = error, metadata = mediaActionMetadata("SHARE", item, mimeType))
             Toast.makeText(context, "Unable to share this item", Toast.LENGTH_SHORT).show()
         }
     }
@@ -113,20 +134,53 @@ class MediaViewerViewModel(
 
     fun confirmDelete(itemId: String, onDeleted: (nextIndex: Int?) -> Unit) {
         _pendingOperation.value = MediaOperation.Idle
+        pendingDeleteCompletion = onDeleted
+        performDelete(itemId)
+    }
+
+    fun onDeleteConfirmationResult(approved: Boolean) {
+        val request = _deleteConfirmation.value ?: return
+        _deleteConfirmation.value = null
+        if (approved) {
+            performDelete(request.itemId)
+        } else {
+            pendingDeleteCompletion = null
+            DeveloperLogger.info(LogCategory.MEDIASTORE, "MEDIA_DELETE_CONFIRMATION_CANCELLED", "User cancelled MediaStore delete confirmation", localMediaId = request.itemId)
+        }
+    }
+
+    private fun performDelete(itemId: String) {
         viewModelScope.launch {
             val items = uiState.value.items
             val currentIndex = items.indexOfFirst { it.id == itemId }
-            val success = repository.deleteMedia(context, itemId)
-            withContext(Dispatchers.Main) {
-                if (success) {
+            when (val result = repository.deleteMediaWithResult(context, itemId)) {
+                is DeleteMediaResult.NeedsConfirmation -> {
+                    _deleteConfirmation.value = DeleteConfirmationRequest(itemId, result.intentSender)
+                }
+                DeleteMediaResult.Deleted -> {
+                    val completion = pendingDeleteCompletion
+                    pendingDeleteCompletion = null
                     val remaining = uiState.value.items
-                    onDeleted(if (remaining.isEmpty()) null else currentIndex.coerceAtMost(remaining.lastIndex))
-                } else {
+                    withContext(Dispatchers.Main) {
+                        completion?.invoke(if (remaining.isEmpty()) null else currentIndex.coerceAtMost(remaining.lastIndex))
+                    }
+                }
+                DeleteMediaResult.Failed -> {
+                    pendingDeleteCompletion = null
+                    withContext(Dispatchers.Main) {
                     Toast.makeText(context, "Could not delete this item", Toast.LENGTH_SHORT).show()
+                    }
                 }
             }
         }
     }
+
+    private fun mediaActionMetadata(action: String, item: MediaItem, mimeType: String): Map<String, String?> = mapOf(
+        "action" to action,
+        "media_uri" to item.uri,
+        "mime_type" to mimeType,
+        "android_api" to Build.VERSION.SDK_INT.toString()
+    )
 
     fun requestRename(itemId: String) { _pendingOperation.value = MediaOperation.Rename(itemId) }
     fun confirmRename(itemId: String, newName: String) {

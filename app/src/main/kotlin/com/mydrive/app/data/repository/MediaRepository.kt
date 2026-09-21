@@ -1,6 +1,7 @@
 package com.mydrive.app.data.repository
 
 import android.content.ContentUris
+import android.content.ContentResolver
 import android.content.ContentValues
 import android.content.Context
 import android.graphics.Bitmap
@@ -36,6 +37,8 @@ import com.mydrive.app.data.model.UserProfile
 import com.mydrive.app.data.model.isActive
 import com.mydrive.app.data.remote.TelegramApiVerifier
 import com.mydrive.app.data.remote.TelegramVerificationResult
+import com.mydrive.app.debug.DeveloperLogger
+import com.mydrive.app.debug.LogCategory
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -47,6 +50,12 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+
+sealed class DeleteMediaResult {
+    data object Deleted : DeleteMediaResult()
+    data class NeedsConfirmation(val intentSender: android.content.IntentSender) : DeleteMediaResult()
+    data object Failed : DeleteMediaResult()
+}
 
 class MediaRepository(
     private val mediaStore: MediaStoreDataSource,
@@ -242,47 +251,85 @@ class MediaRepository(
 
     fun retryBackup(id: String) { syncRepository.retry(id) }
 
-    suspend fun deleteMedia(context: Context, id: String): Boolean = withContext(Dispatchers.IO) {
-        val item = _media.value.firstOrNull { it.id == id } ?: return@withContext false
-        if (item.uri.isBlank()) return@withContext false
-        val uri = Uri.parse(item.uri)
-
-        val deleted = try {
-            val deletedCount = context.contentResolver.delete(uri, null, null)
-            if (deletedCount > 0) {
-                true
-            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                val values = ContentValues().apply {
-                    put(MediaStore.MediaColumns.IS_TRASHED, 1)
-                }
-                context.contentResolver.update(uri, values, null, null) > 0
-            } else {
-                false
-            }
-        } catch (_: SecurityException) {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                try {
-                    val values = ContentValues().apply {
-                        put(MediaStore.MediaColumns.IS_TRASHED, 1)
-                    }
-                    context.contentResolver.update(uri, values, null, null) > 0
-                } catch (_: Exception) {
-                    false
-                }
-            } else {
-                false
-            }
-        } catch (_: Exception) {
-            false
+    suspend fun deleteMediaWithResult(context: Context, id: String): DeleteMediaResult = withContext(Dispatchers.IO) {
+        val item = _media.value.firstOrNull { it.id == id } ?: return@withContext DeleteMediaResult.Failed
+        if (item.uri.isBlank()) return@withContext DeleteMediaResult.Failed
+        val uri = runCatching { Uri.parse(item.uri) }.getOrNull()
+        if (uri == null || uri.scheme != ContentResolver.SCHEME_CONTENT || uri.authority.isNullOrBlank()) {
+            logMediaActionFailure("DELETE", item, IllegalArgumentException("Delete requires a valid content:// URI"))
+            return@withContext DeleteMediaResult.Failed
+        }
+        if (!permissions.canReadMedia()) {
+            val error = SecurityException("Required media read permission is not granted")
+            logMediaActionFailure("DELETE", item, error, mapOf("permission_granted" to "false"))
+            return@withContext DeleteMediaResult.Failed
+        }
+        val probe = mediaStore.probeUri(item.uri)
+        if (!probe.queryFound) {
+            val error = SecurityException(probe.errorMessage ?: "MediaStore URI is not accessible")
+            logMediaActionFailure("DELETE", item, error, mapOf("uri_probe" to "query_not_found"))
+            return@withContext DeleteMediaResult.Failed
         }
 
-        if (deleted) {
+        val result = try {
+            val deletedCount = context.contentResolver.delete(uri, null, null)
+            if (deletedCount > 0) {
+                DeleteMediaResult.Deleted
+            } else {
+                logMediaActionFailure("DELETE", item, IllegalStateException("MediaStore delete returned 0 rows"))
+                DeleteMediaResult.Failed
+            }
+        } catch (error: android.app.RecoverableSecurityException) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                DeveloperLogger.warn(LogCategory.MEDIASTORE, "MEDIA_DELETE_REQUIRES_CONFIRMATION", "MediaStore requested user confirmation", localMediaId = item.id, throwable = error, metadata = mediaActionMetadata("DELETE", item) + ("android_flow" to "recoverable_security_exception"))
+                DeleteMediaResult.NeedsConfirmation(error.userAction.actionIntent.intentSender)
+            } else {
+                logMediaActionFailure("DELETE", item, error)
+                DeleteMediaResult.Failed
+            }
+        } catch (error: SecurityException) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                try {
+                    val sender = MediaStore.createDeleteRequest(context.contentResolver, listOf(uri)).intentSender
+                    DeveloperLogger.warn(LogCategory.MEDIASTORE, "MEDIA_DELETE_REQUIRES_CONFIRMATION", "MediaStore delete requires user confirmation", localMediaId = item.id, throwable = error, metadata = mediaActionMetadata("DELETE", item) + ("android_flow" to "create_delete_request"))
+                    DeleteMediaResult.NeedsConfirmation(sender)
+                } catch (requestError: Exception) {
+                    logMediaActionFailure("DELETE", item, requestError, mapOf("initial_exception" to error.javaClass.name))
+                    DeleteMediaResult.Failed
+                }
+            } else {
+                logMediaActionFailure("DELETE", item, error)
+                DeleteMediaResult.Failed
+            }
+        } catch (error: Exception) {
+            logMediaActionFailure("DELETE", item, error)
+            DeleteMediaResult.Failed
+        }
+
+        if (result is DeleteMediaResult.Deleted) {
             _media.update { items -> items.filter { it.id != id } }
             favorites.retainAll(_media.value.mapTo(HashSet()) { it.id })
             rebuildAlbums()
             // NOTE: Local delete ONLY. Supabase media_assets record remains untouched on the server.
         }
-        deleted
+        result
+    }
+
+    suspend fun deleteMedia(context: Context, id: String): Boolean =
+        deleteMediaWithResult(context, id) is DeleteMediaResult.Deleted
+
+    fun hasMediaReadPermission(): Boolean = permissions.canReadMedia()
+    fun probeMediaUri(rawUri: String) = mediaStore.probeUri(rawUri)
+
+    private fun mediaActionMetadata(action: String, item: MediaItem): Map<String, String?> = mapOf(
+        "action" to action,
+        "media_uri" to item.uri,
+        "mime_type" to item.mimeType,
+        "android_api" to Build.VERSION.SDK_INT.toString()
+    )
+
+    private fun logMediaActionFailure(action: String, item: MediaItem, error: Throwable, extra: Map<String, String?> = emptyMap()) {
+        DeveloperLogger.error(LogCategory.MEDIASTORE, "MEDIA_${action}_FAILED", "Media Viewer $action failed", localMediaId = item.id, throwable = error, metadata = mediaActionMetadata(action, item) + extra)
     }
 
     suspend fun copyMedia(context: Context, id: String, destFolderUri: Uri): Boolean = withContext(Dispatchers.IO) {
