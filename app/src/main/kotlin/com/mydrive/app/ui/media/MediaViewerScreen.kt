@@ -485,9 +485,7 @@ private fun DeleteConfirmationDialog(
             TextButton(onClick = { viewModel.dismissOperation() }) {
                 Text("Cancel")
             }
-        },
-        containerColor = MaterialTheme.colorScheme.surface,
-        contentColor = MaterialTheme.colorScheme.onSurface
+        }
     )
 }
 
@@ -535,9 +533,7 @@ private fun RenameDialog(
             TextButton(onClick = onDismiss) {
                 Text("Cancel")
             }
-        },
-        containerColor = MaterialTheme.colorScheme.surface,
-        contentColor = MaterialTheme.colorScheme.onSurface
+        }
     )
 }
 
