@@ -4,6 +4,7 @@ import android.app.Application
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.provider.DocumentsContract
 import android.widget.Toast
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
@@ -43,7 +44,6 @@ class MediaViewerViewModel(
 ) : ViewModel() {
 
     private val context: Context get() = appContext.applicationContext
-
     private val snapshot: List<MediaItem> = repository.mediaForViewer(mediaId, albumId)
 
     private val _pendingOperation = kotlinx.coroutines.flow.MutableStateFlow<MediaOperation>(MediaOperation.Idle)
@@ -52,10 +52,7 @@ class MediaViewerViewModel(
     val uiState: StateFlow<MediaViewerUiState> = repository.media
         .map { media ->
             val byId = media.associateBy { it.id }
-            val items = snapshot.map { original ->
-                val live = byId[original.id]
-                live ?: original
-            }
+            val items = snapshot.map { original -> byId[original.id] ?: original }
             MediaViewerUiState(
                 items = items,
                 initialIndex = items.indexOfFirst { it.id == mediaId }.coerceAtLeast(0)
@@ -70,17 +67,13 @@ class MediaViewerViewModel(
             )
         )
 
-    fun toggleFavorite(id: String) {
-        repository.toggleFavorite(id)
-    }
+    fun toggleFavorite(id: String) = repository.toggleFavorite(id)
 
     fun shareMedia(item: MediaItem) {
         if (item.uri.isBlank()) return
         try {
             val intent = Intent(Intent.ACTION_SEND).apply {
-                type = item.mimeType.ifBlank {
-                    if (item.type == MediaType.VIDEO) "video/*" else "image/*"
-                }
+                type = item.mimeType.ifBlank { if (item.type == MediaType.VIDEO) "video/*" else "image/*" }
                 putExtra(Intent.EXTRA_STREAM, Uri.parse(item.uri))
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }
@@ -94,14 +87,10 @@ class MediaViewerViewModel(
         if (item.uri.isBlank()) return
         try {
             val intent = Intent(Intent.ACTION_EDIT).apply {
-                setDataAndType(
-                    Uri.parse(item.uri),
-                    item.mimeType.ifBlank {
-                        if (item.type == MediaType.VIDEO) "video/*" else "image/*"
-                    }
-                )
-                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+                setDataAndType(Uri.parse(item.uri), item.mimeType.ifBlank {
+                    if (item.type == MediaType.VIDEO) "video/*" else "image/*"
+                })
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
             }
             context.startActivity(Intent.createChooser(intent, "Edit with"))
         } catch (_: Exception) {
@@ -109,83 +98,48 @@ class MediaViewerViewModel(
         }
     }
 
-    fun requestDelete(itemId: String) {
-        _pendingOperation.value = MediaOperation.DeleteConfirm(itemId)
-    }
+    fun requestDelete(itemId: String) { _pendingOperation.value = MediaOperation.DeleteConfirm(itemId) }
+    fun dismissOperation() { _pendingOperation.value = MediaOperation.Idle }
 
-    fun dismissOperation() {
-        _pendingOperation.value = MediaOperation.Idle
-    }
-
-    fun confirmDelete(
-        itemId: String,
-        onDeleted: (nextIndex: Int?) -> Unit
-    ) {
+    fun confirmDelete(itemId: String, onDeleted: (nextIndex: Int?) -> Unit) {
         _pendingOperation.value = MediaOperation.Idle
         viewModelScope.launch {
             val items = uiState.value.items
             val currentIndex = items.indexOfFirst { it.id == itemId }
             val success = repository.deleteMedia(context, itemId)
-            if (success) {
-                val remainingItems = uiState.value.items
-                val nextIndex = when {
-                    remainingItems.isEmpty() -> null
-                    currentIndex < remainingItems.size -> currentIndex
-                    else -> (remainingItems.size - 1).coerceAtLeast(0)
-                }
-                withContext(Dispatchers.Main) {
-                    onDeleted(nextIndex)
-                }
-            } else {
-                withContext(Dispatchers.Main) {
+            withContext(Dispatchers.Main) {
+                if (success) {
+                    val remaining = uiState.value.items
+                    onDeleted(if (remaining.isEmpty()) null else currentIndex.coerceAtMost(remaining.lastIndex))
+                } else {
                     Toast.makeText(context, "Could not delete this item", Toast.LENGTH_SHORT).show()
                 }
             }
         }
     }
 
-    fun requestRename(itemId: String) {
-        _pendingOperation.value = MediaOperation.Rename(itemId)
-    }
-
+    fun requestRename(itemId: String) { _pendingOperation.value = MediaOperation.Rename(itemId) }
     fun confirmRename(itemId: String, newName: String) {
         _pendingOperation.value = MediaOperation.Idle
         viewModelScope.launch {
-            val success = repository.renameMedia(context, itemId, newName)
-            withContext(Dispatchers.Main) {
-                if (!success) {
+            if (!repository.renameMedia(context, itemId, newName)) {
+                withContext(Dispatchers.Main) {
                     Toast.makeText(context, "Could not rename this item", Toast.LENGTH_SHORT).show()
                 }
             }
         }
     }
 
-    fun requestMoreMenu(itemId: String) {
-        _pendingOperation.value = MediaOperation.MoreMenu(itemId)
-    }
+    fun requestMoreMenu(itemId: String) { _pendingOperation.value = MediaOperation.MoreMenu(itemId) }
+    fun requestDetails(itemId: String) { _pendingOperation.value = MediaOperation.Details(itemId) }
 
-    fun requestDetails(itemId: String) {
-        _pendingOperation.value = MediaOperation.Details(itemId)
-    }
-
-    fun rotateLeft(itemId: String) {
+    fun rotateLeft(itemId: String) = rotate(itemId, -90f)
+    fun rotateRight(itemId: String) = rotate(itemId, 90f)
+    private fun rotate(itemId: String, degrees: Float) {
         _pendingOperation.value = MediaOperation.Idle
         viewModelScope.launch {
-            val success = repository.rotateMedia(context, itemId, -90f)
-            withContext(Dispatchers.Main) {
-                if (!success) {
-                    Toast.makeText(context, "Could not rotate this item", Toast.LENGTH_SHORT).show()
-                }
-            }
-        }
-    }
-
-    fun rotateRight(itemId: String) {
-        _pendingOperation.value = MediaOperation.Idle
-        viewModelScope.launch {
-            val success = repository.rotateMedia(context, itemId, 90f)
-            withContext(Dispatchers.Main) {
-                if (!success) {
+            if (!repository.rotateMedia(context, itemId, degrees)) {
+                withContext(Dispatchers.Main) {
                     Toast.makeText(context, "Could not rotate this item", Toast.LENGTH_SHORT).show()
                 }
             }
@@ -196,9 +150,7 @@ class MediaViewerViewModel(
         if (item.uri.isBlank()) return
         try {
             val intent = Intent(Intent.ACTION_ATTACH_DATA).apply {
-                type = item.mimeType.ifBlank {
-                    if (item.type == MediaType.VIDEO) "video/*" else "image/*"
-                }
+                type = item.mimeType.ifBlank { if (item.type == MediaType.VIDEO) "video/*" else "image/*" }
                 putExtra(Intent.EXTRA_STREAM, Uri.parse(item.uri))
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }
@@ -212,12 +164,9 @@ class MediaViewerViewModel(
         if (item.uri.isBlank()) return
         try {
             val intent = Intent(Intent.ACTION_VIEW).apply {
-                setDataAndType(
-                    Uri.parse(item.uri),
-                    item.mimeType.ifBlank {
-                        if (item.type == MediaType.VIDEO) "video/*" else "image/*"
-                    }
-                )
+                setDataAndType(Uri.parse(item.uri), item.mimeType.ifBlank {
+                    if (item.type == MediaType.VIDEO) "video/*" else "image/*"
+                })
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }
             context.startActivity(Intent.createChooser(intent, "Open with"))
@@ -226,85 +175,50 @@ class MediaViewerViewModel(
         }
     }
 
-    fun requestCopy(itemId: String) {
-        _pendingOperation.value = MediaOperation.CopyTo(itemId)
-    }
-
+    fun requestCopy(itemId: String) { _pendingOperation.value = MediaOperation.CopyTo(itemId) }
     fun copyToDestination(itemId: String, destUri: Uri) {
         _pendingOperation.value = MediaOperation.Idle
-        viewModelScope.launch {
-            val success = copyMediaToUri(itemId, destUri)
-            withContext(Dispatchers.Main) {
-                if (success) {
-                    Toast.makeText(context, "Copied successfully", Toast.LENGTH_SHORT).show()
-                } else {
-                    Toast.makeText(context, "Copy failed", Toast.LENGTH_SHORT).show()
-                }
-            }
-        }
+        viewModelScope.launch { finishCopy(copyMediaToUri(itemId, destUri), "Copied successfully", "Copy failed") }
     }
 
-    fun requestMove(itemId: String) {
-        _pendingOperation.value = MediaOperation.MoveTo(itemId)
-    }
-
+    fun requestMove(itemId: String) { _pendingOperation.value = MediaOperation.MoveTo(itemId) }
     fun moveToDestination(itemId: String, destUri: Uri) {
         _pendingOperation.value = MediaOperation.Idle
         viewModelScope.launch {
             val copied = copyMediaToUri(itemId, destUri)
-            if (copied) {
-                val deleted = repository.deleteMedia(context, itemId)
-                withContext(Dispatchers.Main) {
-                    if (deleted) {
-                        Toast.makeText(context, "Moved successfully", Toast.LENGTH_SHORT).show()
-                    } else {
-                        Toast.makeText(context, "Copied but could not delete original", Toast.LENGTH_SHORT).show()
-                    }
-                }
-            } else {
-                withContext(Dispatchers.Main) {
-                    Toast.makeText(context, "Move failed", Toast.LENGTH_SHORT).show()
-                }
+            val moved = copied && repository.deleteMedia(context, itemId)
+            withContext(Dispatchers.Main) {
+                Toast.makeText(context, if (moved) "Moved successfully" else if (copied) "Copied but could not delete original" else "Move failed", Toast.LENGTH_SHORT).show()
             }
         }
     }
 
-    private suspend fun copyMediaToUri(itemId: String, destFolderUri: Uri): Boolean =
-        withContext(Dispatchers.IO) {
-            val item = uiState.value.items.firstOrNull { it.id == itemId } ?: return@withContext false
-            val sourceUri = Uri.parse(item.uri)
-            try {
-                val resolver = context.contentResolver
-                val mimeType = item.mimeType.ifBlank {
-                    if (item.type == MediaType.VIDEO) "video/*" else "image/*"
-                }
-                // Create new file in destination folder
-                val docUri = resolver.createDocument(destFolderUri, mimeType, item.filename)
+    private suspend fun finishCopy(success: Boolean, ok: String, fail: String) = withContext(Dispatchers.Main) {
+        Toast.makeText(context, if (success) ok else fail, Toast.LENGTH_SHORT).show()
+    }
+
+    private suspend fun copyMediaToUri(itemId: String, destFolderUri: Uri): Boolean = withContext(Dispatchers.IO) {
+        val item = uiState.value.items.firstOrNull { it.id == itemId } ?: return@withContext false
+        try {
+            val mimeType = item.mimeType.ifBlank { if (item.type == MediaType.VIDEO) "video/*" else "image/*" }
+            val docUri = DocumentsContract.createDocument(context.contentResolver, destFolderUri, mimeType, item.filename)
+                ?: return@withContext false
+            context.contentResolver.openInputStream(Uri.parse(item.uri))?.use { input ->
+                context.contentResolver.openOutputStream(docUri)?.use { output -> input.copyTo(output) }
                     ?: return@withContext false
-                // Copy bytes
-                resolver.openInputStream(sourceUri)?.use { input ->
-                    resolver.openOutputStream(docUri)?.use { output ->
-                        input.copyTo(output)
-                    } ?: return@withContext false
-                } ?: return@withContext false
-                true
-            } catch (_: Exception) {
-                false
-            }
+            } ?: return@withContext false
+            true
+        } catch (_: Exception) {
+            false
         }
+    }
 
     companion object {
-        fun factory(
-            repository: MediaRepository,
-            mediaId: String,
-            albumId: String?,
-            app: Application
-        ): ViewModelProvider.Factory =
+        fun factory(repository: MediaRepository, mediaId: String, albumId: String?, app: Application): ViewModelProvider.Factory =
             object : ViewModelProvider.Factory {
                 @Suppress("UNCHECKED_CAST")
-                override fun <T : ViewModel> create(modelClass: Class<T>): T {
-                    return MediaViewerViewModel(repository, mediaId, albumId, app) as T
-                }
+                override fun <T : ViewModel> create(modelClass: Class<T>): T =
+                    MediaViewerViewModel(repository, mediaId, albumId, app) as T
             }
     }
 }
