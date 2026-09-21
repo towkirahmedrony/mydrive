@@ -1,6 +1,7 @@
 import { corsHeaders, handleCors } from "../shared/cors.ts";
 import { getSupabaseAdmin } from "../shared/auth.ts";
 import { accessTokenForAccount } from "../shared/drive-folders.ts";
+import { DriveMediaError } from "../shared/drive-media-read.ts";
 import {
   driveMediaFailure,
   openDriveFileContent,
@@ -154,6 +155,141 @@ function writeThumbnailCache(key: string, value: CachedThumbnail): void {
   }
 }
 
+/**
+ * Short-lived cache of the READ PLAN for one media row.
+ *
+ * Building a plan costs three database round trips (media row, replication job,
+ * Drive account) and is identical for the grid tile, the poster and the
+ * original of the same media. A media page asks for the same row repeatedly —
+ * tile, viewer, prev/next — so the plan is cached briefly per isolate instead of
+ * being rebuilt for every request. Nothing user-scoped is cached: the plan holds
+ * no credential and no token, only the ids the resolver already read.
+ */
+const PLAN_CACHE_TTL_MS = 60_000;
+const PLAN_NEGATIVE_TTL_MS = 15_000;
+
+interface ReadPlan {
+  mediaId: string;
+  ownerId: string;
+  mimeType: string;
+  accountId: string;
+  fileId: string;
+  expectedFolderId: string | null;
+}
+
+type PlanOutcome =
+  | { kind: "ok"; plan: ReadPlan }
+  | { kind: "media_not_found" }
+  | { kind: "not_archived" }
+  | { kind: "account_missing" }
+  | { kind: "account_disabled" };
+
+const planCache = new Map<string, { outcome: PlanOutcome; expiresAt: number }>();
+
+/**
+ * Resolved `thumbnailLink` per file, so the grid does not re-fetch Drive file
+ * metadata for a tile it has already resolved. Google's thumbnail URL is valid
+ * for hours, so a 30 minute window is comfortably inside its lifetime.
+ */
+const THUMB_LINK_TTL_MS = 30 * 60 * 1000;
+
+/** Thumbnail edge length requested from Drive for grid tiles and posters. */
+const THUMB_SIZE = 480;
+
+interface ThumbLinkEntry {
+  link: string | null;
+  etag: string;
+  integrity: string;
+  expiresAt: number;
+}
+
+const thumbLinkCache = new Map<string, ThumbLinkEntry>();
+
+/** Short, non-reversible ETag so a Drive file id never appears in a header. */
+/** true when the client already holds this exact representation. */
+function matchesIfNoneMatch(header: string | null, etag: string): boolean {
+  if (!header) return false;
+  if (header.trim() === "*") return true;
+  const bare = etag.replace(/^W\//, "");
+  return header.split(",").some((part) => part.trim().replace(/^W\//, "") === bare);
+}
+
+/**
+ * A file the administrator moved inside Drive must still be viewable, so a
+ * folder difference is logged and reported rather than turned into a refusal.
+ * The file id itself came from our own database and remains authoritative.
+ */
+function logFolderMismatch(
+  integrity: string,
+  mediaId: string,
+  archive: { fileId: string; expectedFolderId: string | null },
+): void {
+  if (integrity !== "folder_mismatch") return;
+  console.warn(
+    "[media-drive] archive folder mismatch:",
+    JSON.stringify({
+      media_id: mediaId,
+      file_id: archive.fileId,
+      expected_folder: archive.expectedFolderId,
+    }),
+  );
+}
+
+/**
+ * Turns a failed content read into the most accurate failure available.
+ *
+ * The content read is the existence check, so a 404 is already a real answer.
+ * One metadata read is made here — only on the failure path — to tell a trashed
+ * file apart from a credential or provider problem, which keeps the panel from
+ * reporting an outage as a deleted file.
+ */
+async function refineContentFailure(params: {
+  error: unknown;
+  accessToken: string;
+  fileId: string;
+}): Promise<DriveMediaError> {
+  const failure = driveMediaFailure(params.error);
+  if (
+    failure.reason !== "archive_missing" &&
+    failure.reason !== "credential_error"
+  ) {
+    return failure;
+  }
+
+  try {
+    const metadata = await readDriveFileMetadata({
+      accessToken: params.accessToken,
+      fileId: params.fileId,
+    });
+    if (metadata.trashed) {
+      return new DriveMediaError(
+        "Drive file is trashed",
+        { reason: "archive_missing", status: 404, retryable: false },
+      );
+    }
+    // The metadata read succeeded, so the earlier content failure was not a
+    // missing file: report it as a provider fault rather than a deletion.
+    return new DriveMediaError(
+      "Drive content read failed while the file still exists",
+      { reason: "provider_unavailable", status: failure.status || 502, retryable: true },
+    );
+  } catch (error) {
+    return driveMediaFailure(error);
+  }
+}
+
+async function shortEtag(seed: string): Promise<string> {
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(`media-drive.v1.${seed}`),
+  );
+  const hex = Array.from(new Uint8Array(digest))
+    .slice(0, 12)
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+  return `W/"${hex}"`;
+}
+
 function json(
   payload: Record<string, unknown>,
   status: number,
@@ -277,6 +413,82 @@ async function resolveArchive(
   return { accountId, fileId, expectedFolderId };
 }
 
+/**
+ * Builds (or reuses) the read plan for one media row: media facts, the owning
+ * Drive account and the archived file id.
+ *
+ * Positive plans are cached for a minute and negative answers briefly, so a
+ * tile, its poster and its original share one resolution instead of three.
+ * Nothing credential-bearing is cached — the access token is still fetched per
+ * request through the existing Vault helper.
+ */
+async function resolvePlan(
+  admin: AdminClient,
+  mediaId: string,
+): Promise<PlanOutcome> {
+  const cached = planCache.get(mediaId);
+  if (cached && cached.expiresAt > Date.now()) return cached.outcome;
+
+  const outcome = await buildPlan(admin, mediaId);
+  planCache.set(mediaId, {
+    outcome,
+    expiresAt: Date.now() +
+      (outcome.kind === "ok" ? PLAN_CACHE_TTL_MS : PLAN_NEGATIVE_TTL_MS),
+  });
+  if (planCache.size > 512) {
+    const oldest = planCache.keys().next().value;
+    if (oldest !== undefined) planCache.delete(oldest);
+  }
+  return outcome;
+}
+
+async function buildPlan(
+  admin: AdminClient,
+  mediaId: string,
+): Promise<PlanOutcome> {
+  const { data: mediaRow, error: mediaError } = await admin
+    .from("media_assets")
+    .select(MEDIA_SELECT_COLUMNS)
+    .eq("id", mediaId)
+    .maybeSingle();
+
+  if (mediaError) throw new Error(`Media lookup failed: ${mediaError.message}`);
+  if (!mediaRow) return { kind: "media_not_found" };
+
+  const media = mediaRow as unknown as Record<string, unknown>;
+  const archive = await resolveArchive(admin, mediaId);
+  if (!archive) return { kind: "not_archived" };
+
+  const { data: accountRow, error: accountError } = await admin
+    .from("drive_accounts")
+    .select("enabled, status")
+    .eq("id", archive.accountId)
+    .maybeSingle();
+
+  if (accountError) {
+    throw new Error(`Drive account lookup failed: ${accountError.message}`);
+  }
+  const account = accountRow as
+    | { enabled?: boolean | null; status?: string | null }
+    | null;
+  if (!account) return { kind: "account_missing" };
+  if (account.enabled === false || account.status === "disabled") {
+    return { kind: "account_disabled" };
+  }
+
+  return {
+    kind: "ok",
+    plan: {
+      mediaId,
+      ownerId: typeof media.owner_id === "string" ? media.owner_id : "",
+      mimeType: typeof media.mime_type === "string" ? media.mime_type : "",
+      accountId: archive.accountId,
+      fileId: archive.fileId,
+      expectedFolderId: archive.expectedFolderId,
+    },
+  };
+}
+
 /** Streams an upstream Drive response onward, preserving range semantics. */
 function streamThrough(
   upstream: Response,
@@ -363,73 +575,52 @@ export async function handleMediaDriveRequest(
     }
     const variant = asVariant(body.variant);
 
-    // ── 2. Load and validate the media record ─────────────────────────────
-    const { data: mediaRow, error: mediaError } = await admin
-      .from("media_assets")
-      .select(MEDIA_SELECT_COLUMNS)
-      .eq("id", mediaId)
-      .maybeSingle();
-
-    if (mediaError) {
-      throw new Error(`Media lookup failed: ${mediaError.message}`);
+    // ── 2/3. Resolve the media record and the archive that owns it ────────
+    const outcome = await resolvePlan(admin, mediaId);
+    switch (outcome.kind) {
+      case "media_not_found":
+        return fail("media_not_found", "Media record not found", 404, false);
+      case "not_archived":
+        return fail(
+          "not_archived",
+          "No completed Google Drive copy is recorded for this media",
+          404,
+          false,
+        );
+      case "account_missing":
+        return fail(
+          "account_missing",
+          "The Drive account that holds this file no longer exists",
+          503,
+          false,
+        );
+      case "account_disabled":
+        return fail(
+          "account_disabled",
+          "The Drive account that holds this file is disabled",
+          503,
+          false,
+        );
     }
-    if (!mediaRow) {
-      return fail("media_not_found", "Media record not found", 404, false);
-    }
 
-    const media = mediaRow as unknown as Record<string, unknown>;
-    const ownerId = typeof media.owner_id === "string" ? media.owner_id : "";
+    const adapter = outcome.plan;
+    const archive = {
+      accountId: adapter.accountId,
+      fileId: adapter.fileId,
+      expectedFolderId: adapter.expectedFolderId,
+    };
+    const media = { mime_type: adapter.mimeType };
 
     // Requested-scope check: a caller that names the employee must be naming
     // the employee that owns this row, so a media id can never be repointed.
     const requestedOwner = typeof body.owner_id === "string"
       ? body.owner_id.trim()
       : "";
-    if (requestedOwner && requestedOwner !== ownerId) {
+    if (requestedOwner && requestedOwner !== adapter.ownerId) {
       return fail(
         "ownership_mismatch",
         "This media does not belong to the requested employee",
         403,
-        false,
-      );
-    }
-
-    // ── 3. Resolve the archived copy + the account that owns it ───────────
-    const archive = await resolveArchive(admin, mediaId);
-    if (!archive) {
-      return fail(
-        "not_archived",
-        "No completed Google Drive copy is recorded for this media",
-        404,
-        false,
-      );
-    }
-
-    const { data: accountRow, error: accountError } = await admin
-      .from("drive_accounts")
-      .select("id, enabled, status, google_email")
-      .eq("id", archive.accountId)
-      .maybeSingle();
-
-    if (accountError) {
-      throw new Error(`Drive account lookup failed: ${accountError.message}`);
-    }
-    const account = accountRow as
-      | { enabled?: boolean | null; status?: string | null }
-      | null;
-    if (!account) {
-      return fail(
-        "account_missing",
-        "The Drive account that holds this file no longer exists",
-        503,
-        false,
-      );
-    }
-    if (account.enabled === false || account.status === "disabled") {
-      return fail(
-        "account_disabled",
-        "The Drive account that holds this file is disabled",
-        503,
         false,
       );
     }
@@ -457,49 +648,83 @@ export async function handleMediaDriveRequest(
       );
     }
 
-    // ── 5. Verify the archived file still exists ──────────────────────────
-    const metadata = await readDriveFileMetadata({
-      accessToken,
-      fileId: archive.fileId,
-    });
-
-    if (metadata.trashed) {
-      // The only case where the archived copy is genuinely unavailable.
-      return fail(
-        "archive_missing",
-        "The archived Drive file has been trashed",
-        404,
-        false,
-      );
-    }
-
-    // Integrity note: the file id itself is authoritative (it came from our
-    // own database), so a folder difference is reported rather than turned
-    // into a refusal — a file that an administrator moved inside Drive must
-    // still be viewable.
-    const integrity = archive.expectedFolderId === null
-      ? "unverified"
-      : metadata.parents.includes(archive.expectedFolderId)
-      ? "ok"
-      : "folder_mismatch";
-    if (integrity === "folder_mismatch") {
-      console.warn(
-        "[media-drive] archive folder mismatch:",
-        JSON.stringify({
-          media_id: mediaId,
-          file_id: archive.fileId,
-          expected_folder: archive.expectedFolderId,
-        }),
-      );
-    }
-
     const fallbackType = typeof media.mime_type === "string" && media.mime_type
       ? media.mime_type
       : "application/octet-stream";
 
-    // ── 6. Serve the bytes ────────────────────────────────────────────────
+    // ── 5/6. Serve the bytes ──────────────────────────────────────────────
+    //
+    // The two variants need different Drive work:
+    //
+    //   thumb    Drive file metadata is required — it carries `thumbnailLink`,
+    //            the preview URL. Both the link and the image bytes are cached
+    //            per file, so a grid of tiles costs one Drive metadata call and
+    //            one image fetch per file, and nothing at all for a repeat view.
+    //
+    //   original Metadata is NOT required to stream: the file id came from our
+    //            own database, and `alt=media` is itself the existence check
+    //            (404 = gone). Doing that call first added a full Drive
+    //            round-trip of latency to every photo and — worse — to every
+    //            range request a video player makes while seeking. It is now
+    //            made only when a content read fails, to classify the failure
+    //            precisely (trashed vs missing vs credential).
     if (variant === "thumb") {
-      if (!metadata.thumbnailLink) {
+      const size = THUMB_SIZE;
+      const linkKey = `${archive.fileId}:${size}`;
+      let planned = thumbLinkCache.get(linkKey);
+      if (!planned || planned.expiresAt <= Date.now()) {
+        const metadata = await readDriveFileMetadata({
+          accessToken,
+          fileId: archive.fileId,
+        });
+
+        if (metadata.trashed) {
+          // The only case where the archived copy is genuinely unavailable.
+          return fail(
+            "archive_missing",
+            "The archived Drive file has been trashed",
+            404,
+            false,
+          );
+        }
+
+        const folderState = archive.expectedFolderId === null
+          ? "unverified"
+          : metadata.parents.includes(archive.expectedFolderId)
+          ? "ok"
+          : "folder_mismatch";
+        logFolderMismatch(folderState, mediaId, archive);
+
+        planned = {
+          link: metadata.thumbnailLink,
+          etag: await shortEtag(
+            `${archive.fileId}:${metadata.md5Checksum ?? metadata.thumbnailLink ?? "none"}:${size}`,
+          ),
+          integrity: folderState,
+          expiresAt: Date.now() + THUMB_LINK_TTL_MS,
+        };
+        thumbLinkCache.set(linkKey, planned);
+      }
+
+      const integrity = planned.integrity;
+      const etag = planned.etag;
+
+      // A returning browser revalidates instead of re-fetching: no Drive call.
+      if (matchesIfNoneMatch(req.headers.get("if-none-match"), etag)) {
+        return new Response(null, {
+          status: 304,
+          headers: {
+            ...corsHeaders,
+            ETag: etag,
+            "Cache-Control": "private, max-age=21600",
+            "X-MyDrive-Source": "drive-archive",
+            "X-MyDrive-Variant": "thumb",
+            "X-MyDrive-Archive-Integrity": integrity,
+          },
+        });
+      }
+
+      if (!planned.link) {
         // Drive generates no preview for this file. That is a "no poster"
         // answer, never a "file deleted" one.
         return fail(
@@ -510,36 +735,45 @@ export async function handleMediaDriveRequest(
         );
       }
 
-      const cacheKey = `${archive.fileId}:${metadata.md5Checksum ?? "n/a"}`;
-      const cached = readThumbnailCache(cacheKey);
-      if (cached) {
-        return new Response(cached.body, {
+      const byteKey = `${archive.fileId}:${size}`;
+      const cacheHeaders = {
+        ...corsHeaders,
+        ETag: etag,
+        // Safe to let the ADMIN'S OWN browser hold an immutable archived
+        // preview: it is per-file immutable, `private` keeps it out of any
+        // shared/CDN cache, and the URL still requires an authenticated admin
+        // session to be useful.
+        "Cache-Control": "private, max-age=21600, stale-while-revalidate=86400",
+        "X-Content-Type-Options": "nosniff",
+        "X-MyDrive-Source": "drive-archive",
+        "X-MyDrive-Variant": "thumb",
+        "X-MyDrive-Archive-Integrity": integrity,
+      };
+
+      const cachedBytes = readThumbnailCache(byteKey);
+      if (cachedBytes) {
+        return new Response(cachedBytes.body, {
           status: 200,
           headers: {
-            ...corsHeaders,
-            "Content-Type": cached.contentType,
-            "Content-Length": String(cached.body.byteLength),
-            "Cache-Control": "private, max-age=600",
-            "X-Content-Type-Options": "nosniff",
-            "X-MyDrive-Source": "drive-archive",
-            "X-MyDrive-Variant": "thumb",
+            ...cacheHeaders,
+            "Content-Type": cachedBytes.contentType,
+            "Content-Length": String(cachedBytes.body.byteLength),
             "X-MyDrive-Thumbnail-Cache": "hit",
-            "X-MyDrive-Archive-Integrity": integrity,
           },
         });
       }
 
       const thumbnail = await openDriveThumbnail({
         accessToken,
-        thumbnailLink: metadata.thumbnailLink,
+        thumbnailLink: planned.link,
         // 480px covers a 4:3 grid tile on a 2x display without shipping the
         // original, and is one Drive request.
-        size: 480,
+        size,
       });
 
       const contentType = thumbnail.headers.get("content-type") ?? "image/jpeg";
       const bytes = await thumbnail.arrayBuffer();
-      writeThumbnailCache(cacheKey, {
+      writeThumbnailCache(byteKey, {
         body: bytes,
         contentType,
         expiresAt: Date.now() + THUMB_CACHE_TTL_MS,
@@ -548,43 +782,43 @@ export async function handleMediaDriveRequest(
       return new Response(bytes, {
         status: 200,
         headers: {
-          ...corsHeaders,
+          ...cacheHeaders,
           "Content-Type": contentType,
           "Content-Length": String(bytes.byteLength),
-          "Cache-Control": "private, max-age=600",
-          "X-Content-Type-Options": "nosniff",
-          "X-MyDrive-Source": "drive-archive",
-          "X-MyDrive-Variant": "thumb",
           "X-MyDrive-Thumbnail-Cache": "miss",
-          "X-MyDrive-Archive-Integrity": integrity,
         },
       });
     }
 
+    // ── original ──────────────────────────────────────────────────────────
+    // No file metadata is read on this path, so no folder claim is made.
+    const integrity = "unverified";
     const range = req.headers.get("range");
-    const upstream = await openDriveFileContent({
-      accessToken,
-      fileId: archive.fileId,
-      range,
-    });
-
-    console.log(
-      "[media-drive] serving archived original:",
-      JSON.stringify({
-        media_id: mediaId,
-        account_id: archive.accountId,
-        variant,
-        ranged: Boolean(range),
-        status: upstream.status,
-        integrity,
-      }),
-    );
+    let upstream: Response;
+    try {
+      upstream = await openDriveFileContent({
+        accessToken,
+        fileId: archive.fileId,
+        range,
+        // Revalidation is cheaper than a re-download, and Drive can answer it.
+        ifNoneMatch: req.headers.get("if-none-match"),
+      });
+    } catch (error) {
+      // Classify precisely, but only on the failure path: one metadata read
+      // tells a trashed file apart from a credential or provider problem, so
+      // the panel never calls a transient fault a deleted file.
+      throw await refineContentFailure({
+        error,
+        accessToken,
+        fileId: archive.fileId,
+      });
+    }
 
     return streamThrough(upstream, {
       contentType: upstream.headers.get("content-type") ?? fallbackType,
-      // The Admin Panel re-caches under the lifetime of its own short-lived
-      // grant; this only tells intermediaries not to hold the bytes.
-      cacheControl: "private, no-store",
+      // Large originals are not worth holding in the browser: correctness of
+      // seeking depends on revalidation, not on a long cache lifetime.
+      cacheControl: "private, max-age=600",
       integrity,
       variant,
     });

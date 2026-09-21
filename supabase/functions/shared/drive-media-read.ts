@@ -228,6 +228,11 @@ export async function openDriveFileContent(params: {
   accessToken: string;
   fileId: string;
   range?: string | null;
+  /**
+   * The browser's validator, forwarded so Drive can answer 304 instead of
+   * re-sending bytes the client already holds.
+   */
+  ifNoneMatch?: string | null;
   fetchImpl?: typeof fetch;
   timeoutMs?: number;
 }): Promise<Response> {
@@ -249,6 +254,7 @@ export async function openDriveFileContent(params: {
     Authorization: `Bearer ${params.accessToken}`,
   };
   if (params.range) headers.Range = params.range;
+  if (params.ifNoneMatch) headers["If-None-Match"] = params.ifNoneMatch;
 
   const fetchImpl = params.fetchImpl ?? fetch;
   let res: Response;
@@ -264,7 +270,8 @@ export async function openDriveFileContent(params: {
     );
   }
 
-  if (!res.ok && res.status !== 206) {
+  // 304 is a complete, successful answer: the client's copy is still current.
+  if (!res.ok && res.status !== 206 && res.status !== 304) {
     const classified = classifyDriveStatus(res.status, "content");
     throw new DriveMediaError(
       `Drive media download failed: HTTP ${res.status}`,
