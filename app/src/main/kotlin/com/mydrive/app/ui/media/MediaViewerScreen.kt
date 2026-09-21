@@ -351,104 +351,33 @@ fun MediaViewerScreen(
         }
     }
 
-    // Delete confirmation dialog
-    val pendingDelete = operation
-    if (pendingDelete is MediaOperation.DeleteConfirm) {
-        val deleteItem = state.items.firstOrNull { it.id == pendingDelete.itemId }
-        if (deleteItem != null) {
-            AlertDialog(
-                onDismissRequest = { viewModel.dismissOperation() },
-                title = {
-                    Text(
-                        text = "Delete ${if (deleteItem.type == MediaType.VIDEO) "video" else "photo"}?",
-                        style = MaterialTheme.typography.titleMedium
-                    )
-                },
-                text = {
-                    Text(
-                        text = "\"${deleteItem.filename}\" will be ${if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) "moved to trash" else "permanently deleted"}.",
-                        style = MaterialTheme.typography.bodyMedium
-                    )
-                },
-                confirmButton = {
-                    TextButton(
-                        onClick = {
-                            viewModel.confirmDelete(deleteItem.id) { nextIndex ->
-                                if (nextIndex == null) {
-                                    onBack()
-                                }
-                                // Pager will auto-update from state
-                            }
-                        }
-                    ) {
-                        Text("Delete", color = StatusAttention)
-                    }
-                },
-                dismissButton = {
-                    TextButton(onClick = { viewModel.dismissOperation() }) {
-                        Text("Cancel")
-                    }
-                },
-                containerColor = MaterialTheme.colorScheme.surface,
-                contentColor = MaterialTheme.colorScheme.onSurface
-            )
-        }
+    // Keep dialog composition in dedicated functions. This avoids a Kotlin 2.1
+    // Compose compiler inference issue with nested nullable smart casts here.
+    val pendingDelete = operation as? MediaOperation.DeleteConfirm
+    state.items.firstOrNull { it.id == pendingDelete?.itemId }?.let { deleteItem ->
+        DeleteConfirmationDialog(
+            item = deleteItem,
+            viewModel = viewModel,
+            onBack = onBack
+        )
     }
 
-    // Rename dialog
-    if (showRenameDialog && renameTargetItem != null) {
-        AlertDialog(
-            onDismissRequest = {
+    renameTargetItem?.takeIf { showRenameDialog }?.let { renameItem ->
+        RenameDialog(
+            item = renameItem,
+            value = renameValue,
+            onValueChange = { renameValue = it },
+            onRename = { newName ->
+                if (newName.isNotBlank() && newName != renameItem.filename) {
+                    viewModel.confirmRename(renameItem.id, newName)
+                }
                 showRenameDialog = false
                 renameTargetItem = null
             },
-            title = {
-                Text("Rename", style = MaterialTheme.typography.titleMedium)
-            },
-            text = {
-                Column {
-                    Text(
-                        text = "Enter a new filename:",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    Spacer(Modifier.height(Spacing.sm))
-                    androidx.compose.material3.OutlinedTextField(
-                        value = renameValue,
-                        onValueChange = { renameValue = it },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth(),
-                        textStyle = MaterialTheme.typography.bodyLarge,
-                        colors = androidx.compose.material3.OutlinedTextFieldDefaults.colors(
-                            focusedBorderColor = Copper,
-                            cursorColor = Copper
-                        )
-                    )
-                }
-            },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        if (renameValue.isNotBlank() && renameValue != renameTargetItem?.filename) {
-                            viewModel.confirmRename(renameTargetItem!!.id, renameValue)
-                        }
-                        showRenameDialog = false
-                        renameTargetItem = null
-                    }
-                ) {
-                    Text("Rename", color = Copper)
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = {
-                    showRenameDialog = false
-                    renameTargetItem = null
-                }) {
-                    Text("Cancel")
-                }
-            },
-            containerColor = MaterialTheme.colorScheme.surface,
-            contentColor = MaterialTheme.colorScheme.onSurface
+            onDismiss = {
+                showRenameDialog = false
+                renameTargetItem = null
+            }
         )
     }
 
@@ -518,6 +447,96 @@ fun MediaViewerScreen(
             }
         }
     }
+}
+
+@Composable
+private fun DeleteConfirmationDialog(
+    item: MediaItem,
+    viewModel: MediaViewerViewModel,
+    onBack: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = { viewModel.dismissOperation() },
+        title = {
+            Text(
+                text = "Delete ${if (item.type == MediaType.VIDEO) "video" else "photo"}?",
+                style = MaterialTheme.typography.titleMedium
+            )
+        },
+        text = {
+            Text(
+                text = "\"${item.filename}\" will be ${if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) "moved to trash" else "permanently deleted"}.",
+                style = MaterialTheme.typography.bodyMedium
+            )
+        },
+        confirmButton = {
+            TextButton(
+                onClick = {
+                    viewModel.confirmDelete(item.id) { nextIndex ->
+                        if (nextIndex == null) onBack()
+                    }
+                }
+            ) {
+                Text("Delete", color = StatusAttention)
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = { viewModel.dismissOperation() }) {
+                Text("Cancel")
+            }
+        },
+        containerColor = MaterialTheme.colorScheme.surface,
+        contentColor = MaterialTheme.colorScheme.onSurface
+    )
+}
+
+@Composable
+private fun RenameDialog(
+    item: MediaItem,
+    value: String,
+    onValueChange: (String) -> Unit,
+    onRename: (String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text("Rename", style = MaterialTheme.typography.titleMedium)
+        },
+        text = {
+            Column {
+                Text(
+                    text = "Enter a new filename:",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(Modifier.height(Spacing.sm))
+                androidx.compose.material3.OutlinedTextField(
+                    value = value,
+                    onValueChange = onValueChange,
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                    textStyle = MaterialTheme.typography.bodyLarge,
+                    colors = androidx.compose.material3.OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = Copper,
+                        cursorColor = Copper
+                    )
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { onRename(value) }) {
+                Text("Rename", color = Copper)
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel")
+            }
+        },
+        containerColor = MaterialTheme.colorScheme.surface,
+        contentColor = MaterialTheme.colorScheme.onSurface
+    )
 }
 
 // ── Primary action bar ──────────────────────────────────────────────
