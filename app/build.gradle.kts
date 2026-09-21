@@ -157,5 +157,6 @@ dependencies {
     implementation(libs.androidx.room.ktx)
     add("kapt", libs.androidx.room.compiler)
     implementation(libs.androidx.work.runtime.ktx)
+    implementation("androidx.exifinterface:exifinterface:1.3.7")
     debugImplementation(libs.androidx.compose.ui.tooling)
 }

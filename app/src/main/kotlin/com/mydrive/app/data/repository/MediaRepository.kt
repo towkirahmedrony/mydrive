@@ -1,5 +1,15 @@
 package com.mydrive.app.data.repository
 
+import android.content.ContentUris
+import android.content.ContentValues
+import android.content.Context
+import android.graphics.BitmapFactory
+import android.graphics.Matrix
+import android.net.Uri
+import android.os.Build
+import android.os.Environment
+import android.provider.MediaStore
+import androidx.exifinterface.media.ExifInterface
 import com.mydrive.app.data.local.FavoritesStore
 import com.mydrive.app.data.local.SyncRecord
 import com.mydrive.app.data.local.TelegramSettingsStore
@@ -343,6 +353,162 @@ class MediaRepository(
 
     fun retryBackup(id: String) {
         syncRepository.retry(id)
+    }
+
+    /**
+     * Delete a local MediaStore item. Returns true on success.
+     * On Android Q+ this moves the item to the system trash.
+     */
+    suspend fun deleteMedia(context: Context, id: String): Boolean = withContext(Dispatchers.IO) {
+        val item = _media.value.firstOrNull { it.id == id } ?: return@withContext false
+        val uri = Uri.parse(item.uri)
+        val deleted = try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val updatedRows = context.contentResolver.update(
+                    uri,
+                    ContentValues().apply {
+                        put(MediaStore.MediaColumns.IS_TRASHED, 1)
+                    },
+                    null,
+                    null
+                )
+                updatedRows > 0
+            } else {
+                context.contentResolver.delete(uri, null, null) > 0
+            }
+        } catch (_: Exception) {
+            false
+        }
+        if (deleted) {
+            _media.update { items -> items.filter { it.id != id } }
+            favorites.retainAll(_media.value.mapTo(HashSet()) { it.id })
+            rebuildAlbums()
+        }
+        deleted
+    }
+
+    /**
+     * Rename a local media file via MediaStore display name update.
+     * The original extension is preserved unless the user changes it.
+     */
+    suspend fun renameMedia(context: Context, id: String, newName: String): Boolean =
+        withContext(Dispatchers.IO) {
+            val item = _media.value.firstOrNull { it.id == id } ?: return@withContext false
+            val trimmed = newName.trim()
+            if (trimmed.isBlank() || trimmed == item.filename) return@withContext false
+            val uri = Uri.parse(item.uri)
+            val values = ContentValues().apply {
+                put(MediaStore.MediaColumns.DISPLAY_NAME, trimmed)
+            }
+            val updated = try {
+                context.contentResolver.update(uri, values, null, null) > 0
+            } catch (_: Exception) {
+                false
+            }
+            if (updated) {
+                _media.update { items ->
+                    items.map {
+                        if (it.id == id) it.copy(filename = trimmed) else it
+                    }
+                }
+                rebuildAlbums()
+            }
+            updated
+        }
+
+    /**
+     * Rotate a local image by [degrees] degrees (positive = clockwise).
+     * Writes the rotated bitmap back to the same MediaStore URI and normalizes EXIF.
+     * Returns true on success. Video items are ignored.
+     */
+    suspend fun rotateMedia(context: Context, id: String, degrees: Float): Boolean =
+        withContext(Dispatchers.IO) {
+            val item = _media.value.firstOrNull { it.id == id } ?: return@withContext false
+            if (item.type != MediaType.PHOTO) return@withContext false
+            val uri = Uri.parse(item.uri)
+            val filePath = getMediaFilePath(context, item)
+            try {
+                // Decode full image
+                val input = context.contentResolver.openInputStream(uri)
+                    ?: return@withContext false
+                val bitmap = BitmapFactory.decodeStream(input)
+                input.close()
+                if (bitmap == null) return@withContext false
+                // Determine total rotation including current EXIF orientation
+                val currentOrientation = if (filePath != null) {
+                    try {
+                        val exif = ExifInterface(filePath)
+                        exif.rotationDegrees
+                    } catch (_: Exception) {
+                        0
+                    }
+                } else {
+                    0
+                }
+                val totalRotation = (currentOrientation + degrees.toInt()).mod(360).toFloat()
+                val matrix = Matrix().apply { postRotate(degrees) }
+                val rotated = Bitmap.createBitmap(
+                    bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true
+                )
+                if (rotated !== bitmap) bitmap.recycle()
+                // Write back to MediaStore
+                val outputStream = context.contentResolver.openOutputStream(uri)
+                    ?: run {
+                        rotated.recycle()
+                        return@withContext false
+                    }
+                val format = if (item.mimeType.contains("png")) {
+                    Bitmap.CompressFormat.PNG
+                } else {
+                    Bitmap.CompressFormat.JPEG
+                }
+                val quality = if (format == Bitmap.CompressFormat.JPEG) 95 else 100
+                rotated.compress(format, quality, outputStream)
+                outputStream.close()
+                rotated.recycle()
+                // Normalize EXIF orientation to 0
+                if (filePath != null) {
+                    try {
+                        val exif = ExifInterface(filePath)
+                        exif.setAttribute(
+                            ExifInterface.TAG_ORIENTATION,
+                            ExifInterface.ORIENTATION_NORMAL.toString()
+                        )
+                        exif.saveAttributes()
+                    } catch (_: Exception) {
+                        // Best effort
+                    }
+                }
+                true
+            } catch (_: Exception) {
+                false
+            }
+        }
+
+    /**
+     * Get the on-disk file path for a MediaStore item (API < 29 only).
+     * Returns null on Android Q+ where DATA column is deprecated.
+     */
+    suspend fun getMediaFilePath(context: Context, item: MediaItem): String? =
+        withContext(Dispatchers.IO) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) return@withContext null
+            val uri = Uri.parse(item.uri)
+            val projection = arrayOf(MediaStore.MediaColumns.DATA)
+            try {
+                context.contentResolver.query(uri, projection, null, null, null)?.use { cursor ->
+                    if (cursor.moveToFirst()) {
+                        val idx = cursor.getColumnIndex(MediaStore.MediaColumns.DATA)
+                        if (idx >= 0) cursor.getString(idx)
+                        else null
+                    } else null
+                }
+            } catch (_: Exception) {
+                null
+            }
+        }
+
+    private fun rebuildAlbums() {
+        _albums.value = buildAlbums(_media.value)
     }
 
     companion object {

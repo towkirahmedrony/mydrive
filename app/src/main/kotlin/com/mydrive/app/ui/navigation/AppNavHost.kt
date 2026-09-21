@@ -233,8 +233,9 @@ fun AppNavHost(
                 val albumId = entry.arguments?.getString("albumId")
                     ?.let { android.net.Uri.decode(it) }
                     ?.takeIf { it.isNotBlank() }
+                val app = LocalContext.current.applicationContext as MyDriveApp
                 val vm: MediaViewerViewModel = viewModel(
-                    factory = MediaViewerViewModel.factory(repository, mediaId, albumId)
+                    factory = MediaViewerViewModel.factory(repository, mediaId, albumId, app)
                 )
                 MediaViewerScreen(
                     viewModel = vm,

@@ -3,6 +3,8 @@ package com.mydrive.app.ui.media
 import android.app.Activity
 import android.content.Context
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -17,20 +19,35 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
+import androidx.compose.material.icons.outlined.ContentCopy
+import androidx.compose.material.icons.outlined.Delete
+import androidx.compose.material.icons.outlined.DriveFileRenameOutline
+import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.Favorite
 import androidx.compose.material.icons.outlined.FavoriteBorder
+import androidx.compose.material.icons.outlined.FileOpen
 import androidx.compose.material.icons.outlined.Info
+import androidx.compose.material.icons.outlined.MoreVert
+import androidx.compose.material.icons.outlined.OpenInNew
 import androidx.compose.material.icons.outlined.Pause
 import androidx.compose.material.icons.outlined.PlayArrow
+import androidx.compose.material.icons.outlined.RotateLeft
+import androidx.compose.material.icons.outlined.RotateRight
+import androidx.compose.material.icons.outlined.Share
+import androidx.compose.material.icons.outlined.Wallpaper
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -38,6 +55,7 @@ import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -67,7 +85,9 @@ import com.mydrive.app.data.model.MediaType
 import com.mydrive.app.ui.theme.Copper
 import com.mydrive.app.ui.theme.Ink
 import com.mydrive.app.ui.theme.Ivory
+import com.mydrive.app.ui.theme.IvoryMuted
 import com.mydrive.app.ui.theme.Spacing
+import com.mydrive.app.ui.theme.StatusAttention
 import com.mydrive.app.ui.theme.StatusIdle
 import com.mydrive.app.ui.util.formatPlaybackMs
 import kotlinx.coroutines.launch
@@ -79,8 +99,10 @@ fun MediaViewerScreen(
     onBack: () -> Unit
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
+    val operation by viewModel.pendingOperation.collectAsStateWithLifecycle()
     val darkTheme = isSystemInDarkTheme()
     val view = LocalView.current
+    val context = LocalContext.current
 
     DisposableEffect(darkTheme) {
         val window = (view.context as? Activity)?.window
@@ -120,7 +142,6 @@ fun MediaViewerScreen(
     )
     var zoomed by remember { mutableStateOf(false) }
     var chromeVisible by remember { mutableStateOf(true) }
-    var showDetails by remember { mutableStateOf(false) }
     var videoState by remember { mutableStateOf(VideoPlaybackState()) }
     var seekRequestMs by remember { mutableStateOf<Int?>(null) }
     var seekNonce by remember { mutableIntStateOf(0) }
@@ -129,14 +150,51 @@ fun MediaViewerScreen(
     var scrubbing by remember { mutableStateOf(false) }
     var scrubPosition by remember { mutableIntStateOf(0) }
 
+    // Rename dialog state
+    var showRenameDialog by remember { mutableStateOf(false) }
+    var renameValue by remember { mutableStateOf("") }
+    var renameTargetItem by remember { mutableStateOf<MediaItem?>(null) }
+
     val current = state.items.getOrNull(pagerState.currentPage) ?: state.items.first()
     val isVideo = current.type == MediaType.VIDEO
-    val context = LocalContext.current
     val prefetchScope = rememberCoroutineScope()
 
-    // Warm the ORIGINAL full-resolution decodes for the neighboring pages so
-    // swiping lands on an already-sharp image. Requests go to FullImageLoader's
-    // LRU cache, shared with the page composables via viewerFullResTargetPx.
+    // SAF launcher for Copy/Move
+    val safLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocumentTree()
+    ) { treeUri ->
+        if (treeUri != null) {
+            val pendingOp = operation
+            val itemId = when (pendingOp) {
+                is MediaOperation.CopyTo -> pendingOp.itemId
+                is MediaOperation.MoveTo -> pendingOp.itemId
+                else -> null
+            }
+            if (itemId != null) {
+                when (pendingOp) {
+                    is MediaOperation.CopyTo -> viewModel.copyToDestination(itemId, treeUri)
+                    is MediaOperation.MoveTo -> viewModel.moveToDestination(itemId, treeUri)
+                    else -> {}
+                }
+            } else {
+                viewModel.dismissOperation()
+            }
+        } else {
+            viewModel.dismissOperation()
+        }
+    }
+
+    // Launch SAF when copy/move is pending
+    LaunchedEffect(operation) {
+        when (operation) {
+            is MediaOperation.CopyTo, is MediaOperation.MoveTo -> {
+                safLauncher.launch(null)
+            }
+            else -> {}
+        }
+    }
+
+    // Warm the ORIGINAL full-resolution decodes for neighboring pages
     LaunchedEffect(current.id, state.items, context) {
         val index = state.items.indexOfFirst { it.id == current.id }
         if (index < 0) return@LaunchedEffect
@@ -165,8 +223,8 @@ fun MediaViewerScreen(
         scrubbing = false
     }
 
-    LaunchedEffect(showDetails) {
-        if (showDetails && isVideo && videoState.playing) {
+    LaunchedEffect(operation) {
+        if (operation is MediaOperation.Details && isVideo && videoState.playing) {
             playRequest = false
             playNonce += 1
         }
@@ -203,6 +261,7 @@ fun MediaViewerScreen(
             )
         }
 
+        // Top bar: Back + page counter
         AnimatedVisibility(
             visible = chromeVisible,
             enter = fadeIn(),
@@ -240,6 +299,7 @@ fun MediaViewerScreen(
             }
         }
 
+        // Bottom bar: Video controls (if video) + Action bar
         AnimatedVisibility(
             visible = chromeVisible,
             enter = fadeIn(),
@@ -251,11 +311,11 @@ fun MediaViewerScreen(
                     .fillMaxWidth()
                     .background(
                         Brush.verticalGradient(
-                            listOf(Color.Transparent, Ink.copy(alpha = 0.86f))
+                            listOf(Color.Transparent, Color.Black.copy(alpha = 0.88f))
                         )
                     )
                     .navigationBarsPadding()
-                    .padding(horizontal = Spacing.md, vertical = Spacing.md)
+                    .padding(horizontal = Spacing.sm, vertical = Spacing.xs)
             ) {
                 if (isVideo) {
                     VideoPlaybackBar(
@@ -276,38 +336,387 @@ fun MediaViewerScreen(
                             playNonce += 1
                         }
                     )
+                    Spacer(Modifier.height(Spacing.xs))
                 }
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(top = if (isVideo) Spacing.sm else 0.dp),
-                    horizontalArrangement = Arrangement.SpaceEvenly,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    ViewerAction(
-                        icon = if (current.isFavorite) Icons.Outlined.Favorite else Icons.Outlined.FavoriteBorder,
-                        label = "Favorite",
-                        tint = if (current.isFavorite) Copper else Ivory,
-                        contentDescription = if (current.isFavorite) "Remove favorite" else "Add favorite"
-                    ) { viewModel.toggleFavorite(current.id) }
-                    ViewerAction(Icons.Outlined.Info, "Details") { showDetails = true }
-                }
+
+                // Primary action bar: Share | Edit | Delete | More
+                ViewerActionBar(
+                    item = current,
+                    onShare = { viewModel.shareMedia(current) },
+                    onEdit = { viewModel.editMedia(current) },
+                    onDelete = { viewModel.requestDelete(current.id) },
+                    onMore = { viewModel.requestMoreMenu(current.id) }
+                )
             }
         }
     }
 
-    if (showDetails) {
-        val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-        ModalBottomSheet(
-            onDismissRequest = { showDetails = false },
-            sheetState = sheetState,
+    // Delete confirmation dialog
+    val pendingDelete = operation
+    if (pendingDelete is MediaOperation.DeleteConfirm) {
+        val deleteItem = state.items.firstOrNull { it.id == pendingDelete.itemId }
+        if (deleteItem != null) {
+            AlertDialog(
+                onDismissRequest = { viewModel.dismissOperation() },
+                title = {
+                    Text(
+                        text = "Delete ${if (deleteItem.type == MediaType.VIDEO) "video" else "photo"}?",
+                        style = MaterialTheme.typography.titleMedium
+                    )
+                },
+                text = {
+                    Text(
+                        text = "\"${deleteItem.filename}\" will be ${if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) "moved to trash" else "permanently deleted"}.",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            viewModel.confirmDelete(deleteItem.id) { nextIndex ->
+                                if (nextIndex == null) {
+                                    onBack()
+                                }
+                                // Pager will auto-update from state
+                            }
+                        }
+                    ) {
+                        Text("Delete", color = StatusAttention)
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { viewModel.dismissOperation() }) {
+                        Text("Cancel")
+                    }
+                },
+                containerColor = MaterialTheme.colorScheme.surface,
+                contentColor = MaterialTheme.colorScheme.onSurface
+            )
+        }
+    }
+
+    // Rename dialog
+    if (showRenameDialog && renameTargetItem != null) {
+        AlertDialog(
+            onDismissRequest = {
+                showRenameDialog = false
+                renameTargetItem = null
+            },
+            title = {
+                Text("Rename", style = MaterialTheme.typography.titleMedium)
+            },
+            text = {
+                Column {
+                    Text(
+                        text = "Enter a new filename:",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(Modifier.height(Spacing.sm))
+                    androidx.compose.material3.OutlinedTextField(
+                        value = renameValue,
+                        onValueChange = { renameValue = it },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                        textStyle = MaterialTheme.typography.bodyLarge,
+                        colors = androidx.compose.material3.OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = Copper,
+                            cursorColor = Copper
+                        )
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        if (renameValue.isNotBlank() && renameValue != renameTargetItem?.filename) {
+                            viewModel.confirmRename(renameTargetItem!!.id, renameValue)
+                        }
+                        showRenameDialog = false
+                        renameTargetItem = null
+                    }
+                ) {
+                    Text("Rename", color = Copper)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    showRenameDialog = false
+                    renameTargetItem = null
+                }) {
+                    Text("Cancel")
+                }
+            },
             containerColor = MaterialTheme.colorScheme.surface,
             contentColor = MaterialTheme.colorScheme.onSurface
-        ) {
-            MediaDetailsSheet(item = current)
+        )
+    }
+
+    // More menu bottom sheet
+    val moreState = operation
+    if (moreState is MediaOperation.MoreMenu) {
+        val moreItem = state.items.firstOrNull { it.id == moreState.itemId }
+        if (moreItem != null) {
+            MoreMenuSheet(
+                item = moreItem,
+                onDismiss = { viewModel.dismissOperation() },
+                onCopy = {
+                    viewModel.dismissOperation()
+                    viewModel.requestCopy(moreItem.id)
+                },
+                onMove = {
+                    viewModel.dismissOperation()
+                    viewModel.requestMove(moreItem.id)
+                },
+                onRename = {
+                    viewModel.dismissOperation()
+                    renameTargetItem = moreItem
+                    renameValue = moreItem.filename
+                    showRenameDialog = true
+                },
+                onRotateLeft = {
+                    viewModel.dismissOperation()
+                    viewModel.rotateLeft(moreItem.id)
+                },
+                onRotateRight = {
+                    viewModel.dismissOperation()
+                    viewModel.rotateRight(moreItem.id)
+                },
+                onSetWallpaper = {
+                    viewModel.dismissOperation()
+                    viewModel.setAsWallpaper(moreItem)
+                },
+                onDetails = {
+                    viewModel.dismissOperation()
+                    viewModel.requestDetails(moreItem.id)
+                },
+                onOpenWith = {
+                    viewModel.dismissOperation()
+                    viewModel.openWith(moreItem)
+                },
+                onToggleFavorite = {
+                    viewModel.dismissOperation()
+                    viewModel.toggleFavorite(moreItem.id)
+                }
+            )
+        }
+    }
+
+    // Details bottom sheet
+    val detailsState = operation
+    if (detailsState is MediaOperation.Details) {
+        val detailItem = state.items.firstOrNull { it.id == detailsState.itemId }
+        if (detailItem != null) {
+            val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+            ModalBottomSheet(
+                onDismissRequest = { viewModel.dismissOperation() },
+                sheetState = sheetState,
+                containerColor = MaterialTheme.colorScheme.surface,
+                contentColor = MaterialTheme.colorScheme.onSurface
+            ) {
+                MediaDetailsSheet(item = detailItem)
+            }
         }
     }
 }
+
+// ── Primary action bar ──────────────────────────────────────────────
+
+@Composable
+private fun ViewerActionBar(
+    item: MediaItem,
+    onShare: () -> Unit,
+    onEdit: () -> Unit,
+    onDelete: () -> Unit,
+    onMore: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = Spacing.sm, vertical = Spacing.xs),
+        horizontalArrangement = Arrangement.SpaceEvenly,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        ViewerBarAction(
+            icon = Icons.Outlined.Share,
+            label = "Share",
+            onClick = onShare
+        )
+        ViewerBarAction(
+            icon = Icons.Outlined.Edit,
+            label = "Edit",
+            onClick = onEdit
+        )
+        ViewerBarAction(
+            icon = Icons.Outlined.Delete,
+            label = "Delete",
+            onClick = onDelete
+        )
+        ViewerBarAction(
+            icon = Icons.Outlined.MoreVert,
+            label = "More",
+            onClick = onMore
+        )
+    }
+}
+
+@Composable
+private fun ViewerBarAction(
+    icon: ImageVector,
+    label: String,
+    onClick: () -> Unit
+) {
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        modifier = Modifier
+            .clickable(onClick = onClick)
+            .padding(horizontal = Spacing.md, vertical = Spacing.xs)
+            .semantics { contentDescription = label }
+    ) {
+        Icon(
+            icon,
+            contentDescription = label,
+            tint = Ivory,
+            modifier = Modifier.size(24.dp)
+        )
+        Spacer(Modifier.height(4.dp))
+        Text(
+            label,
+            style = MaterialTheme.typography.labelSmall,
+            color = IvoryMuted
+        )
+    }
+}
+
+// ── More menu bottom sheet ──────────────────────────────────────────
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun MoreMenuSheet(
+    item: MediaItem,
+    onDismiss: () -> Unit,
+    onCopy: () -> Unit,
+    onMove: () -> Unit,
+    onRename: () -> Unit,
+    onRotateLeft: () -> Unit,
+    onRotateRight: () -> Unit,
+    onSetWallpaper: () -> Unit,
+    onDetails: () -> Unit,
+    onOpenWith: () -> Unit,
+    onToggleFavorite: () -> Unit
+) {
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+        containerColor = MaterialTheme.colorScheme.surface,
+        contentColor = MaterialTheme.colorScheme.onSurface
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .navigationBarsPadding()
+                .padding(bottom = Spacing.lg)
+        ) {
+            // Header
+            Text(
+                text = item.filename,
+                style = MaterialTheme.typography.titleMedium,
+                color = MaterialTheme.colorScheme.onSurface,
+                maxLines = 1,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = Spacing.lg, vertical = Spacing.xs)
+            )
+            Spacer(Modifier.height(Spacing.xs))
+
+            // File actions
+            MoreMenuItem(
+                icon = Icons.Outlined.ContentCopy,
+                label = "Copy"
+            ) { onCopy() }
+            MoreMenuItem(
+                icon = Icons.Outlined.FileOpen,
+                label = "Move"
+            ) { onMove() }
+            MoreMenuItem(
+                icon = Icons.Outlined.DriveFileRenameOutline,
+                label = "Rename"
+            ) { onRename() }
+
+            // Divider
+            Spacer(Modifier.height(Spacing.xs))
+
+            // Image actions (photos only)
+            if (item.type == MediaType.PHOTO) {
+                MoreMenuItem(
+                    icon = Icons.Outlined.RotateLeft,
+                    label = "Rotate left"
+                ) { onRotateLeft() }
+                MoreMenuItem(
+                    icon = Icons.Outlined.RotateRight,
+                    label = "Rotate right"
+                ) { onRotateRight() }
+            }
+
+            MoreMenuItem(
+                icon = Icons.Outlined.Wallpaper,
+                label = "Set as wallpaper"
+            ) { onSetWallpaper() }
+
+            Spacer(Modifier.height(Spacing.xs))
+
+            MoreMenuItem(
+                icon = Icons.Outlined.Info,
+                label = "Details"
+            ) { onDetails() }
+            MoreMenuItem(
+                icon = Icons.Outlined.OpenInNew,
+                label = "Open with"
+            ) { onOpenWith() }
+
+            Spacer(Modifier.height(Spacing.xs))
+
+            // Favorite toggle
+            MoreMenuItem(
+                icon = if (item.isFavorite) Icons.Outlined.Favorite else Icons.Outlined.FavoriteBorder,
+                label = if (item.isFavorite) "Remove favorite" else "Add to favorites",
+                tint = if (item.isFavorite) Copper else MaterialTheme.colorScheme.onSurface
+            ) { onToggleFavorite() }
+        }
+    }
+}
+
+@Composable
+private fun MoreMenuItem(
+    icon: ImageVector,
+    label: String,
+    tint: Color = MaterialTheme.colorScheme.onSurface,
+    onClick: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(horizontal = Spacing.lg, vertical = Spacing.sm),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(
+            icon,
+            contentDescription = label,
+            tint = tint,
+            modifier = Modifier.size(22.dp)
+        )
+        Spacer(Modifier.width(Spacing.md))
+        Text(
+            text = label,
+            style = MaterialTheme.typography.bodyLarge,
+            color = tint
+        )
+    }
+}
+
+// ── Viewer page composable ──────────────────────────────────────────
 
 @Composable
 private fun ViewerPage(
@@ -344,6 +753,8 @@ private fun ViewerPage(
         )
     }
 }
+
+// ── Video playback bar ──────────────────────────────────────────────
 
 @Composable
 private fun VideoPlaybackBar(
@@ -405,30 +816,7 @@ private fun VideoPlaybackBar(
     }
 }
 
-@Composable
-private fun ViewerAction(
-    icon: ImageVector,
-    label: String,
-    tint: Color = Ivory,
-    contentDescription: String = label,
-    onClick: () -> Unit
-) {
-    Column(
-        horizontalAlignment = Alignment.CenterHorizontally,
-        modifier = Modifier
-            .clickable(onClick = onClick)
-            .padding(horizontal = Spacing.md, vertical = Spacing.xs)
-            .semantics { this.contentDescription = contentDescription }
-    ) {
-        Icon(icon, contentDescription = contentDescription, tint = tint, modifier = Modifier.size(24.dp))
-        Text(
-            label,
-            style = MaterialTheme.typography.labelSmall,
-            color = StatusIdle,
-            modifier = Modifier.padding(top = 4.dp)
-        )
-    }
-}
+// ── Circle icon button ──────────────────────────────────────────────
 
 @Composable
 private fun CircleIcon(
