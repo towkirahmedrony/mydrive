@@ -449,6 +449,7 @@ fun MediaViewerScreen(
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun DeleteConfirmationDialog(
     item: MediaItem,
@@ -490,6 +491,7 @@ private fun DeleteConfirmationDialog(
     )
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun RenameDialog(
     item: MediaItem,
