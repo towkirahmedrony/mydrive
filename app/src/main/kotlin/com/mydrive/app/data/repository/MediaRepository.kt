@@ -244,22 +244,110 @@ class MediaRepository(
 
     suspend fun deleteMedia(context: Context, id: String): Boolean = withContext(Dispatchers.IO) {
         val item = _media.value.firstOrNull { it.id == id } ?: return@withContext false
+        if (item.uri.isBlank()) return@withContext false
         val uri = Uri.parse(item.uri)
+
         val deleted = try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) context.contentResolver.update(uri, ContentValues().apply { put(MediaStore.MediaColumns.IS_TRASHED, 1) }, null, null) > 0
-            else context.contentResolver.delete(uri, null, null) > 0
-        } catch (_: Exception) { false }
-        if (deleted) { _media.update { items -> items.filter { it.id != id } }; favorites.retainAll(_media.value.mapTo(HashSet()) { it.id }); rebuildAlbums() }
+            val deletedCount = context.contentResolver.delete(uri, null, null)
+            if (deletedCount > 0) {
+                true
+            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val values = ContentValues().apply {
+                    put(MediaStore.MediaColumns.IS_TRASHED, 1)
+                }
+                context.contentResolver.update(uri, values, null, null) > 0
+            } else {
+                false
+            }
+        } catch (_: SecurityException) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                try {
+                    val values = ContentValues().apply {
+                        put(MediaStore.MediaColumns.IS_TRASHED, 1)
+                    }
+                    context.contentResolver.update(uri, values, null, null) > 0
+                } catch (_: Exception) {
+                    false
+                }
+            } else {
+                false
+            }
+        } catch (_: Exception) {
+            false
+        }
+
+        if (deleted) {
+            _media.update { items -> items.filter { it.id != id } }
+            favorites.retainAll(_media.value.mapTo(HashSet()) { it.id })
+            rebuildAlbums()
+            // NOTE: Local delete ONLY. Supabase media_assets record remains untouched on the server.
+        }
         deleted
+    }
+
+    suspend fun copyMedia(context: Context, id: String, destFolderUri: Uri): Boolean = withContext(Dispatchers.IO) {
+        val item = _media.value.firstOrNull { it.id == id } ?: return@withContext false
+        val sourceUri = Uri.parse(item.uri)
+        try {
+            val mimeType = item.mimeType.ifBlank { if (item.type == MediaType.VIDEO) "video/*" else "image/*" }
+            val docUri = android.provider.DocumentsContract.createDocument(context.contentResolver, destFolderUri, mimeType, item.filename)
+                ?: return@withContext false
+            val success = context.contentResolver.openInputStream(sourceUri)?.use { input ->
+                context.contentResolver.openOutputStream(docUri)?.use { output ->
+                    input.copyTo(output, bufferSize = 65536)
+                    true
+                } ?: false
+            } ?: false
+
+            if (success) {
+                refresh(force = true)
+            }
+            success
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    suspend fun moveMedia(context: Context, id: String, destFolderUri: Uri): Boolean = withContext(Dispatchers.IO) {
+        val copied = copyMedia(context, id, destFolderUri)
+        if (copied) {
+            deleteMedia(context, id)
+        } else {
+            false
+        }
     }
 
     suspend fun renameMedia(context: Context, id: String, newName: String): Boolean = withContext(Dispatchers.IO) {
         val item = _media.value.firstOrNull { it.id == id } ?: return@withContext false
-        val trimmed = newName.trim()
-        if (trimmed.isBlank() || trimmed == item.filename) return@withContext false
+        var trimmed = newName.trim()
+        if (trimmed.isBlank()) return@withContext false
+
+        val oldExt = item.filename.substringAfterLast('.', "")
+        if (oldExt.isNotBlank() && !trimmed.contains('.')) {
+            trimmed = "$trimmed.$oldExt"
+        }
+
+        if (trimmed == item.filename) return@withContext false
+
         val uri = Uri.parse(item.uri)
-        val updated = try { context.contentResolver.update(uri, ContentValues().apply { put(MediaStore.MediaColumns.DISPLAY_NAME, trimmed) }, null, null) > 0 } catch (_: Exception) { false }
-        if (updated) { _media.update { items -> items.map { if (it.id == id) it.copy(filename = trimmed) else it } }; rebuildAlbums() }
+        val values = ContentValues().apply {
+            put(MediaStore.MediaColumns.DISPLAY_NAME, trimmed)
+        }
+
+        val updated = try {
+            context.contentResolver.update(uri, values, null, null) > 0
+        } catch (_: Exception) {
+            false
+        }
+
+        if (updated) {
+            val updatedItem = item.copy(filename = trimmed)
+            _media.update { items ->
+                items.map { if (it.id == id) updatedItem else it }
+            }
+            syncRepository.updateQueueMedia(id, updatedItem)
+            rebuildAlbums()
+        }
         updated
     }
 
@@ -267,21 +355,65 @@ class MediaRepository(
         val item = _media.value.firstOrNull { it.id == id } ?: return@withContext false
         if (item.type != MediaType.PHOTO) return@withContext false
         val uri = Uri.parse(item.uri)
-        val filePath = getMediaFilePath(context, item)
         try {
-            val bitmap = context.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it) } ?: return@withContext false
-            val currentOrientation = if (filePath != null) try { ExifInterface(filePath).rotationDegrees } catch (_: Exception) { 0 } else 0
-            val totalRotation = (currentOrientation + degrees.toInt()).mod(360).toFloat()
-            val rotated = Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, Matrix().apply { postRotate(degrees) }, true)
-            if (rotated !== bitmap) bitmap.recycle()
-            val outputStream = context.contentResolver.openOutputStream(uri) ?: run { rotated.recycle(); return@withContext false }
-            val format = if (item.mimeType.contains("png")) Bitmap.CompressFormat.PNG else Bitmap.CompressFormat.JPEG
+            val bitmap = context.contentResolver.openInputStream(uri)?.use { inputStream ->
+                BitmapFactory.decodeStream(inputStream)
+            } ?: return@withContext false
+
+            val matrix = Matrix().apply { postRotate(degrees) }
+            val rotated = Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
+            if (rotated !== bitmap) {
+                bitmap.recycle()
+            }
+
+            val tempFile = java.io.File(context.cacheDir, "temp_rotate_${System.currentTimeMillis()}.tmp")
+            val format = if (item.mimeType.contains("png", ignoreCase = true)) {
+                Bitmap.CompressFormat.PNG
+            } else {
+                Bitmap.CompressFormat.JPEG
+            }
             val quality = if (format == Bitmap.CompressFormat.JPEG) 95 else 100
-            outputStream.use { rotated.compress(format, quality, it) }
+
+            java.io.FileOutputStream(tempFile).use { out ->
+                rotated.compress(format, quality, out)
+            }
             rotated.recycle()
-            if (filePath != null) try { ExifInterface(filePath).apply { setAttribute(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL.toString()); saveAttributes() } } catch (_: Exception) { }
-            true
-        } catch (_: Exception) { false }
+
+            if (!tempFile.exists() || tempFile.length() <= 0L) {
+                tempFile.delete()
+                return@withContext false
+            }
+
+            val written = java.io.FileInputStream(tempFile).use { tempIn ->
+                context.contentResolver.openOutputStream(uri, "wt")?.use { targetOut ->
+                    tempIn.copyTo(targetOut, bufferSize = 65536)
+                    true
+                } ?: false
+            }
+            tempFile.delete()
+
+            if (written) {
+                val swap = degrees == 90f || degrees == -90f || degrees == 270f || degrees == -270f
+                _media.update { items ->
+                    items.map { current ->
+                        if (current.id == id) {
+                            val newW = if (swap) current.height else current.width
+                            val newH = if (swap) current.width else current.height
+                            current.copy(
+                                width = newW,
+                                height = newH,
+                                resolution = if (newW > 0 && newH > 0) "$newW x $newH" else current.resolution,
+                                dateModifiedMillis = System.currentTimeMillis()
+                            )
+                        } else current
+                    }
+                }
+                com.mydrive.app.data.media.FullImageLoader.clearCache()
+            }
+            written
+        } catch (_: Exception) {
+            false
+        }
     }
 
     suspend fun getMediaFilePath(context: Context, item: MediaItem): String? = withContext(Dispatchers.IO) {
