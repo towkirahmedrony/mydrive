@@ -271,48 +271,43 @@ class MediaRepository(
             return@withContext DeleteMediaResult.Failed
         }
 
-        val result = try {
-            val deletedCount = context.contentResolver.delete(uri, null, null)
-            if (deletedCount > 0) {
-                DeleteMediaResult.Deleted
-            } else {
-                logMediaActionFailure("DELETE", item, IllegalStateException("MediaStore delete returned 0 rows"))
-                DeleteMediaResult.Failed
-            }
-        } catch (error: android.app.RecoverableSecurityException) {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                DeveloperLogger.warn(LogCategory.MEDIASTORE, "MEDIA_DELETE_REQUIRES_CONFIRMATION", "MediaStore requested user confirmation", localMediaId = item.id, throwable = error, metadata = mediaActionMetadata("DELETE", item) + ("android_flow" to "recoverable_security_exception"))
-                DeleteMediaResult.NeedsConfirmation(error.userAction.actionIntent.intentSender)
-            } else {
-                logMediaActionFailure("DELETE", item, error)
-                DeleteMediaResult.Failed
-            }
-        } catch (error: SecurityException) {
+        try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                try {
-                    val sender = MediaStore.createDeleteRequest(context.contentResolver, listOf(uri)).intentSender
-                    DeveloperLogger.warn(LogCategory.MEDIASTORE, "MEDIA_DELETE_REQUIRES_CONFIRMATION", "MediaStore delete requires user confirmation", localMediaId = item.id, throwable = error, metadata = mediaActionMetadata("DELETE", item) + ("android_flow" to "create_delete_request"))
-                    DeleteMediaResult.NeedsConfirmation(sender)
-                } catch (requestError: Exception) {
-                    logMediaActionFailure("DELETE", item, requestError, mapOf("initial_exception" to error.javaClass.name))
+                val sender = MediaStore.createTrashRequest(context.contentResolver, listOf(uri), true).intentSender
+                DeveloperLogger.info(
+                    LogCategory.MEDIASTORE,
+                    "MEDIA_DELETE_TRASH_REQUESTED",
+                    "MediaStore trash request created; waiting for system result",
+                    localMediaId = item.id,
+                    metadata = mediaActionMetadata("DELETE", item) + ("android_flow" to "create_trash_request")
+                )
+                DeleteMediaResult.NeedsConfirmation(sender)
+            } else {
+                val values = ContentValues().apply {
+                    put(MediaStore.MediaColumns.IS_TRASHED, 1)
+                }
+                if (context.contentResolver.update(uri, values, null, null) > 0) {
+                    DeleteMediaResult.Deleted
+                } else {
+                    logMediaActionFailure("DELETE", item, IllegalStateException("MediaStore trash update returned 0 rows"))
                     DeleteMediaResult.Failed
                 }
-            } else {
-                logMediaActionFailure("DELETE", item, error)
-                DeleteMediaResult.Failed
             }
         } catch (error: Exception) {
-            logMediaActionFailure("DELETE", item, error)
+            logMediaActionFailure("DELETE", item, error, mapOf("android_flow" to if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) "create_trash_request" else "trash_update"))
             DeleteMediaResult.Failed
         }
+    }
 
-        if (result is DeleteMediaResult.Deleted) {
-            _media.update { items -> items.filter { it.id != id } }
-            favorites.retainAll(_media.value.mapTo(HashSet()) { it.id })
-            rebuildAlbums()
-            // NOTE: Local delete ONLY. Supabase media_assets record remains untouched on the server.
-        }
-        result
+    suspend fun finalizeLocalDelete(id: String): Boolean = withContext(Dispatchers.IO) {
+        val existed = _media.value.any { it.id == id }
+        if (!existed) return@withContext false
+        _media.update { items -> items.filter { it.id != id } }
+        favorites.retainAll(_media.value.mapTo(HashSet()) { it.id })
+        rebuildAlbums()
+        // Local MediaStore/Room refresh only. Supabase media_assets and archive data remain untouched.
+        refresh(force = true)
+        true
     }
 
     suspend fun deleteMedia(context: Context, id: String): Boolean =

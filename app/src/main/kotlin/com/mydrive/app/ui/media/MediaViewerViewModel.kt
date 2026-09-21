@@ -142,7 +142,7 @@ class MediaViewerViewModel(
         val request = _deleteConfirmation.value ?: return
         _deleteConfirmation.value = null
         if (approved) {
-            performDelete(request.itemId)
+            finalizeDelete(request.itemId)
         } else {
             pendingDeleteCompletion = null
             DeveloperLogger.info(LogCategory.MEDIASTORE, "MEDIA_DELETE_CONFIRMATION_CANCELLED", "User cancelled MediaStore delete confirmation", localMediaId = request.itemId)
@@ -157,19 +157,38 @@ class MediaViewerViewModel(
                 is DeleteMediaResult.NeedsConfirmation -> {
                     _deleteConfirmation.value = DeleteConfirmationRequest(itemId, result.intentSender)
                 }
-                DeleteMediaResult.Deleted -> {
-                    val completion = pendingDeleteCompletion
-                    pendingDeleteCompletion = null
-                    val remaining = uiState.value.items
-                    withContext(Dispatchers.Main) {
-                        completion?.invoke(if (remaining.isEmpty()) null else currentIndex.coerceAtMost(remaining.lastIndex))
-                    }
-                }
+                DeleteMediaResult.Deleted -> finalizeDelete(itemId, currentIndex)
                 DeleteMediaResult.Failed -> {
                     pendingDeleteCompletion = null
                     withContext(Dispatchers.Main) {
                     Toast.makeText(context, "Could not delete this item", Toast.LENGTH_SHORT).show()
                     }
+                }
+            }
+        }
+    }
+
+    private fun finalizeDelete(itemId: String, knownIndex: Int? = null) {
+        viewModelScope.launch {
+            val currentIndex = knownIndex ?: uiState.value.items.indexOfFirst { it.id == itemId }
+            if (repository.finalizeLocalDelete(itemId)) {
+                val completion = pendingDeleteCompletion
+                pendingDeleteCompletion = null
+                withContext(Dispatchers.Main) {
+                    val remaining = uiState.value.items
+                    completion?.invoke(if (remaining.isEmpty()) null else currentIndex.coerceAtMost(remaining.lastIndex))
+                }
+            } else {
+                pendingDeleteCompletion = null
+                DeveloperLogger.error(
+                    LogCategory.MEDIASTORE,
+                    "MEDIA_DELETE_LOCAL_STATE_FAILED",
+                    "Media Viewer DELETE succeeded in MediaStore but local state finalization failed",
+                    localMediaId = itemId,
+                    metadata = mapOf("action" to "DELETE", "android_api" to Build.VERSION.SDK_INT.toString())
+                )
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(context, "Could not update this item", Toast.LENGTH_SHORT).show()
                 }
             }
         }
