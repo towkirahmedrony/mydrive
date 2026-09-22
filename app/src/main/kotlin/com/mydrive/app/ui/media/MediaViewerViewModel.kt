@@ -7,7 +7,6 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
-import android.provider.DocumentsContract
 import android.widget.Toast
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
@@ -23,7 +22,6 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
-import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -32,7 +30,11 @@ data class MediaViewerUiState(
     val initialIndex: Int
 )
 
-data class DeleteConfirmationRequest(val itemId: String, val intentSender: android.content.IntentSender)
+data class DeleteConfirmationRequest(
+    val itemId: String,
+    val intentSender: android.content.IntentSender,
+    val alreadyPerformedOnApproval: Boolean
+)
 
 sealed class MediaOperation {
     data object Idle : MediaOperation()
@@ -58,14 +60,14 @@ class MediaViewerViewModel(
     val pendingOperation: StateFlow<MediaOperation> = _pendingOperation
     private val _deleteConfirmation = kotlinx.coroutines.flow.MutableStateFlow<DeleteConfirmationRequest?>(null)
     val deleteConfirmation: StateFlow<DeleteConfirmationRequest?> = _deleteConfirmation
-    private val _manageMediaAccess = kotlinx.coroutines.flow.MutableStateFlow<String?>(null)
-    val manageMediaAccess: StateFlow<String?> = _manageMediaAccess
+    private val _userMessage = kotlinx.coroutines.flow.MutableStateFlow<String?>(null)
+    val userMessage: StateFlow<String?> = _userMessage
     private var pendingDeleteCompletion: ((Int?) -> Unit)? = null
 
     val uiState: StateFlow<MediaViewerUiState> = repository.media
         .map { media ->
             val byId = media.associateBy { it.id }
-            val items = snapshot.map { original -> byId[original.id] ?: original }
+            val items = snapshot.mapNotNull { original -> byId[original.id] }
             MediaViewerUiState(
                 items = items,
                 initialIndex = items.indexOfFirst { it.id == mediaId }.coerceAtLeast(0)
@@ -137,28 +139,50 @@ class MediaViewerViewModel(
     fun confirmDelete(itemId: String, onDeleted: (nextIndex: Int?) -> Unit) {
         _pendingOperation.value = MediaOperation.Idle
         pendingDeleteCompletion = onDeleted
+        val item = uiState.value.items.firstOrNull { it.id == itemId }
+        DeveloperLogger.info(
+            LogCategory.MEDIASTORE,
+            "MEDIA_DELETE_CONFIRMED",
+            "User confirmed Move to Trash",
+            localMediaId = itemId,
+            metadata = mapOf(
+                "action" to "DELETE",
+                "media_uri" to item?.uri,
+                "mime_type" to item?.mimeType,
+                "android_api" to Build.VERSION.SDK_INT.toString(),
+                "operation" to "user_confirm"
+            )
+        )
         performDelete(itemId)
+    }
+
+    fun consumeUserMessage() {
+        _userMessage.value = null
     }
 
     fun onDeleteConfirmationResult(approved: Boolean) {
         val request = _deleteConfirmation.value ?: return
         _deleteConfirmation.value = null
         if (approved) {
-            finalizeDelete(request.itemId)
+            if (request.alreadyPerformedOnApproval) {
+                finalizeDelete(request.itemId)
+            } else {
+                performDelete(request.itemId)
+            }
         } else {
             pendingDeleteCompletion = null
-            DeveloperLogger.info(LogCategory.MEDIASTORE, "MEDIA_DELETE_CONFIRMATION_CANCELLED", "User cancelled MediaStore delete confirmation", localMediaId = request.itemId)
-        }
-    }
-
-    fun onManageMediaAccessResult() {
-        val itemId = _manageMediaAccess.value ?: return
-        _manageMediaAccess.value = null
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && android.provider.MediaStore.canManageMedia(context)) {
-            performDelete(itemId)
-        } else {
-            pendingDeleteCompletion = null
-            DeveloperLogger.info(LogCategory.MEDIASTORE, "MEDIA_DELETE_MANAGE_MEDIA_CANCELLED", "Media management access was not granted", localMediaId = itemId)
+            DeveloperLogger.info(
+                LogCategory.MEDIASTORE,
+                "MEDIA_DELETE_CONFIRMATION_CANCELLED",
+                "User cancelled Android MediaStore trash confirmation",
+                localMediaId = request.itemId,
+                metadata = mapOf(
+                    "action" to "DELETE",
+                    "android_api" to Build.VERSION.SDK_INT.toString(),
+                    "result" to "CANCELLED",
+                    "system_confirmation_required" to "true"
+                )
+            )
         }
     }
 
@@ -167,18 +191,25 @@ class MediaViewerViewModel(
             val items = uiState.value.items
             val currentIndex = items.indexOfFirst { it.id == itemId }
             when (val result = repository.deleteMediaWithResult(context, itemId)) {
-                is DeleteMediaResult.NeedsConfirmation -> {
-                    _deleteConfirmation.value = DeleteConfirmationRequest(itemId, result.intentSender)
+                is DeleteMediaResult.RequiresSystemConfirmation -> {
+                    _deleteConfirmation.value = DeleteConfirmationRequest(
+                        itemId = itemId,
+                        intentSender = result.intentSender,
+                        alreadyPerformedOnApproval = result.alreadyPerformedOnApproval
+                    )
                 }
-                DeleteMediaResult.NeedsManageMediaAccess -> {
-                    _manageMediaAccess.value = itemId
+                DeleteMediaResult.Success -> finalizeDelete(itemId, currentIndex)
+                DeleteMediaResult.NotFound -> {
+                    pendingDeleteCompletion = null
+                    showUserMessage("This media is no longer available.")
                 }
-                DeleteMediaResult.Deleted -> finalizeDelete(itemId, currentIndex)
+                DeleteMediaResult.PermissionDenied -> {
+                    pendingDeleteCompletion = null
+                    showUserMessage("Android requires permission to modify this item.")
+                }
                 DeleteMediaResult.Failed -> {
                     pendingDeleteCompletion = null
-                    withContext(Dispatchers.Main) {
-                    Toast.makeText(context, "Could not delete this item", Toast.LENGTH_SHORT).show()
-                    }
+                    showUserMessage("This item could not be moved to Trash.")
                 }
             }
         }
@@ -191,8 +222,14 @@ class MediaViewerViewModel(
                 val completion = pendingDeleteCompletion
                 pendingDeleteCompletion = null
                 withContext(Dispatchers.Main) {
-                    val remaining = uiState.value.items
-                    completion?.invoke(if (remaining.isEmpty()) null else currentIndex.coerceAtMost(remaining.lastIndex))
+                    val remaining = uiState.value.items.filter { it.id != itemId }
+                    val nextIndex = if (remaining.isEmpty()) null else currentIndex.coerceAtMost(remaining.lastIndex)
+                    completion?.invoke(nextIndex)
+                    if (nextIndex == null) {
+                        Toast.makeText(context, "Moved to Trash", Toast.LENGTH_SHORT).show()
+                    } else {
+                        _userMessage.value = "Moved to Trash"
+                    }
                 }
             } else {
                 pendingDeleteCompletion = null
@@ -203,11 +240,13 @@ class MediaViewerViewModel(
                     localMediaId = itemId,
                     metadata = mapOf("action" to "DELETE", "android_api" to Build.VERSION.SDK_INT.toString())
                 )
-                withContext(Dispatchers.Main) {
-                    Toast.makeText(context, "Could not update this item", Toast.LENGTH_SHORT).show()
-                }
+                showUserMessage("This item could not be moved to Trash.")
             }
         }
+    }
+
+    private suspend fun showUserMessage(message: String) = withContext(Dispatchers.Main) {
+        _userMessage.value = message
     }
 
     private fun mediaActionMetadata(action: String, item: MediaItem, mimeType: String): Map<String, String?> = mapOf(

@@ -1,10 +1,7 @@
 package com.mydrive.app.ui.media
 
 import android.app.Activity
-import android.content.Context
-import android.content.Intent
-import android.net.Uri
-import android.provider.Settings
+import android.os.Build
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.IntentSenderRequest
@@ -52,15 +49,24 @@ import androidx.compose.material.icons.outlined.RotateRight
 import androidx.compose.material.icons.outlined.Share
 import androidx.compose.material.icons.outlined.Wallpaper
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
+import androidx.compose.material3.Snackbar
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -86,10 +92,13 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.mydrive.app.data.media.FullImageLoader
 import com.mydrive.app.data.model.MediaItem
 import com.mydrive.app.data.model.MediaType
+import com.mydrive.app.ui.components.MediaImage
 import com.mydrive.app.ui.theme.Copper
 import com.mydrive.app.ui.theme.Ink
 import com.mydrive.app.ui.theme.Ivory
 import com.mydrive.app.ui.theme.IvoryMuted
+import com.mydrive.app.ui.theme.MediaShape
+import com.mydrive.app.ui.theme.SheetShape
 import com.mydrive.app.ui.theme.Spacing
 import com.mydrive.app.ui.theme.StatusAttention
 import com.mydrive.app.ui.theme.StatusIdle
@@ -189,17 +198,12 @@ fun MediaViewerScreen(
     }
 
     val deleteConfirmation by viewModel.deleteConfirmation.collectAsStateWithLifecycle()
+    val userMessage by viewModel.userMessage.collectAsStateWithLifecycle()
+    val snackbarHostState = remember { SnackbarHostState() }
     val deleteLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartIntentSenderForResult()
     ) { result ->
         viewModel.onDeleteConfirmationResult(result.resultCode == Activity.RESULT_OK)
-    }
-
-    val manageMediaAccess by viewModel.manageMediaAccess.collectAsStateWithLifecycle()
-    val manageMediaLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.StartActivityForResult()
-    ) {
-        viewModel.onManageMediaAccessResult()
     }
 
     LaunchedEffect(deleteConfirmation) {
@@ -208,14 +212,10 @@ fun MediaViewerScreen(
         }
     }
 
-    LaunchedEffect(manageMediaAccess) {
-        if (manageMediaAccess != null) {
-            manageMediaLauncher.launch(
-                Intent(Settings.ACTION_REQUEST_MANAGE_MEDIA).apply {
-                    data = Uri.parse("package:${context.packageName}")
-                }
-            )
-        }
+    LaunchedEffect(userMessage) {
+        val message = userMessage ?: return@LaunchedEffect
+        snackbarHostState.showSnackbar(message)
+        viewModel.consumeUserMessage()
     }
 
     // Launch SAF when copy/move is pending
@@ -243,6 +243,12 @@ fun MediaViewerScreen(
                     FullImageLoader.load(context, neighbor.uri, target)
                 }
             }
+    }
+
+    LaunchedEffect(state.items.size) {
+        if (state.items.isNotEmpty() && pagerState.currentPage > state.items.lastIndex) {
+            pagerState.scrollToPage(state.items.lastIndex)
+        }
     }
 
     LaunchedEffect(pagerState.currentPage, current.id) {
@@ -383,16 +389,41 @@ fun MediaViewerScreen(
                 )
             }
         }
+
+        SnackbarHost(
+            hostState = snackbarHostState,
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .navigationBarsPadding()
+                .padding(bottom = 88.dp)
+        ) { data ->
+            Snackbar(
+                snackbarData = data,
+                containerColor = MaterialTheme.colorScheme.inverseSurface,
+                contentColor = MaterialTheme.colorScheme.inverseOnSurface,
+                shape = RoundedCornerShape(12.dp)
+            )
+        }
     }
 
     // Keep dialog composition in dedicated functions. This avoids a Kotlin 2.1
     // Compose compiler inference issue with nested nullable smart casts here.
     val pendingDelete = operation as? MediaOperation.DeleteConfirm
     state.items.firstOrNull { it.id == pendingDelete?.itemId }?.let { deleteItem ->
-        DeleteConfirmationDialog(
+        DeleteConfirmationSheet(
             item = deleteItem,
-            viewModel = viewModel,
-            onBack = onBack
+            onDismiss = { viewModel.dismissOperation() },
+            onConfirm = {
+                viewModel.confirmDelete(deleteItem.id) { nextIndex ->
+                    if (nextIndex == null) {
+                        onBack()
+                    } else {
+                        prefetchScope.launch {
+                            pagerState.scrollToPage(nextIndex)
+                        }
+                    }
+                }
+            }
         )
     }
 
@@ -485,42 +516,127 @@ fun MediaViewerScreen(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun DeleteConfirmationDialog(
+private fun DeleteConfirmationSheet(
     item: MediaItem,
-    viewModel: MediaViewerViewModel,
-    onBack: () -> Unit
+    onDismiss: () -> Unit,
+    onConfirm: () -> Unit
 ) {
-    AlertDialog(
-        onDismissRequest = { viewModel.dismissOperation() },
-        title = {
-            Text(
-                text = "Delete ${if (item.type == MediaType.VIDEO) "video" else "photo"}?",
-                style = MaterialTheme.typography.titleMedium
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val isVideo = item.type == MediaType.VIDEO
+    val usesTrash = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R
+    val title = if (usesTrash) "Move to Trash?" else "Delete this item?"
+    val kind = if (isVideo) "video" else "photo"
+    val body = if (usesTrash) {
+        "This $kind will be removed from your gallery and moved to Trash."
+    } else {
+        "This $kind will be permanently deleted from this device."
+    }
+    val confirmLabel = if (usesTrash) "Move to Trash" else "Delete"
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+        shape = SheetShape,
+        containerColor = MaterialTheme.colorScheme.surface,
+        contentColor = MaterialTheme.colorScheme.onSurface,
+        tonalElevation = 6.dp,
+        dragHandle = null
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .navigationBarsPadding()
+                .padding(horizontal = Spacing.lg, vertical = Spacing.md),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Box(
+                modifier = Modifier
+                    .padding(bottom = Spacing.md)
+                    .size(width = 36.dp, height = 4.dp)
+                    .clip(RoundedCornerShape(100.dp))
+                    .background(MaterialTheme.colorScheme.outline.copy(alpha = 0.45f))
             )
-        },
-        text = {
-            Text(
-                text = "\"${item.filename}\" will be ${if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) "moved to trash" else "permanently deleted"}.",
-                style = MaterialTheme.typography.bodyMedium
-            )
-        },
-        confirmButton = {
-            TextButton(
-                onClick = {
-                    viewModel.confirmDelete(item.id) { nextIndex ->
-                        if (nextIndex == null) onBack()
+            Box(
+                modifier = Modifier
+                    .size(72.dp)
+                    .clip(MediaShape)
+                    .background(MaterialTheme.colorScheme.surfaceVariant)
+            ) {
+                MediaImage(
+                    uri = item.uri,
+                    seed = item.thumbnailSeed,
+                    type = item.type,
+                    modifier = Modifier.fillMaxSize(),
+                    contentScale = ContentScale.Crop,
+                    sizePx = 144,
+                    contentDescription = item.filename
+                )
+                if (isVideo) {
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.BottomEnd)
+                            .padding(6.dp)
+                            .size(18.dp)
+                            .clip(CircleShape)
+                            .background(Color.Black.copy(alpha = 0.62f)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Outlined.PlayArrow,
+                            contentDescription = null,
+                            tint = Ivory,
+                            modifier = Modifier.size(12.dp)
+                        )
                     }
                 }
+            }
+            Spacer(Modifier.height(Spacing.md))
+            Text(
+                text = title,
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onSurface
+            )
+            Spacer(Modifier.height(Spacing.xs))
+            Text(
+                text = item.filename,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Spacer(Modifier.height(Spacing.sm))
+            Text(
+                text = body,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(Modifier.height(Spacing.lg))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(Spacing.sm)
             ) {
-                Text("Delete", color = StatusAttention)
+                OutlinedButton(
+                    onClick = onDismiss,
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(100.dp)
+                ) {
+                    Text("Cancel")
+                }
+                Button(
+                    onClick = onConfirm,
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(100.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = StatusAttention,
+                        contentColor = Ivory
+                    )
+                ) {
+                    Text(confirmLabel, fontWeight = FontWeight.SemiBold)
+                }
             }
-        },
-        dismissButton = {
-            TextButton(onClick = { viewModel.dismissOperation() }) {
-                Text("Cancel")
-            }
+            Spacer(Modifier.height(Spacing.sm))
         }
-    )
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)

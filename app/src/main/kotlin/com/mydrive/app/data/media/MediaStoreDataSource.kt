@@ -137,9 +137,16 @@ class MediaStoreDataSource(context: Context) {
         idPrefix: String
     ): List<MediaItem> {
         val sortOrder = "${MediaStore.MediaColumns.DATE_ADDED} DESC"
+        val selection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            "${MediaStore.MediaColumns.IS_TRASHED}=0"
+        } else {
+            null
+        }
         return try {
-            queryWithProjection(collection, type, idPrefix, buildProjection(type), sortOrder)
-                ?: queryWithProjection(collection, type, idPrefix, minimalProjection(type), sortOrder)
+            queryWithProjection(collection, type, idPrefix, buildProjection(type), sortOrder, selection)
+                ?: queryWithProjection(collection, type, idPrefix, minimalProjection(type), sortOrder, selection)
+                ?: queryWithProjection(collection, type, idPrefix, buildProjection(type), sortOrder, null)
+                ?: queryWithProjection(collection, type, idPrefix, minimalProjection(type), sortOrder, null)
                 ?: throw MediaQueryException()
         } catch (_: SecurityException) {
             emptyList()
@@ -151,11 +158,12 @@ class MediaStoreDataSource(context: Context) {
         type: MediaType,
         idPrefix: String,
         projection: Array<String>,
-        sortOrder: String
+        sortOrder: String,
+        selection: String?
     ): List<MediaItem>? {
         val items = mutableListOf<MediaItem>()
         val cursor = try {
-            appContext.contentResolver.query(collection, projection, null, null, sortOrder)
+            appContext.contentResolver.query(collection, projection, selection, null, sortOrder)
         } catch (_: SecurityException) {
             return emptyList()
         } catch (_: IllegalArgumentException) {

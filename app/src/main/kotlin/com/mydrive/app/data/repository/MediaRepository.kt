@@ -1,16 +1,17 @@
 package com.mydrive.app.data.repository
 
-import android.content.ContentUris
+import android.app.RecoverableSecurityException
 import android.content.ContentResolver
 import android.content.ContentValues
 import android.content.Context
+import android.content.IntentSender
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Matrix
 import android.net.Uri
 import android.os.Build
-import android.os.Environment
 import android.provider.MediaStore
+import java.io.FileNotFoundException
 import androidx.exifinterface.media.ExifInterface
 import com.mydrive.app.data.local.FavoritesStore
 import com.mydrive.app.data.local.SyncRecord
@@ -52,9 +53,13 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
 sealed class DeleteMediaResult {
-    data object Deleted : DeleteMediaResult()
-    data class NeedsConfirmation(val intentSender: android.content.IntentSender) : DeleteMediaResult()
-    data object NeedsManageMediaAccess : DeleteMediaResult()
+    data object Success : DeleteMediaResult()
+    data class RequiresSystemConfirmation(
+        val intentSender: IntentSender,
+        val alreadyPerformedOnApproval: Boolean
+    ) : DeleteMediaResult()
+    data object NotFound : DeleteMediaResult()
+    data object PermissionDenied : DeleteMediaResult()
     data object Failed : DeleteMediaResult()
 }
 
@@ -102,6 +107,7 @@ class MediaRepository(
 
     private val refreshMutex = Mutex()
     private var lastRefreshAt = 0L
+    private val locallyHiddenIds = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
 
     init {
         scope.launch {
@@ -191,12 +197,18 @@ class MediaRepository(
             _loadState.update { it.copy(isLoading = showSpinner, errorMessage = null) }
             try {
                 val favoriteIds = favorites.ids.value
-                val items = mediaStore.loadMedia().map { item -> item.copy(isFavorite = item.id in favoriteIds) }
+                val scanned = mediaStore.loadMedia()
+                val scannedIds = scanned.mapTo(HashSet(scanned.size)) { it.id }
+                locallyHiddenIds.removeAll { it !in scannedIds }
+                val items = scanned
+                    .filter { it.id !in locallyHiddenIds }
+                    .map { item -> item.copy(isFavorite = item.id in favoriteIds) }
                 syncRepository.reconcileMedia(items)
                 if (permissions.access() == MediaAccess.GRANTED) {
                     val presentIds = withContext(Dispatchers.Default) { items.mapTo(HashSet(items.size)) { it.id } }
                     favorites.retainAll(presentIds)
-                    syncRepository.reconcile(presentIds)
+                    // Keep local backup metadata for items only moved to device Trash.
+                    syncRepository.reconcile(presentIds + locallyHiddenIds)
                 }
                 val records = syncRepository.records.value
                 val merged = items.map { it.withRecord(records[it.id]) }
@@ -253,8 +265,26 @@ class MediaRepository(
     fun retryBackup(id: String) { syncRepository.retry(id) }
 
     suspend fun deleteMediaWithResult(context: Context, id: String): DeleteMediaResult = withContext(Dispatchers.IO) {
-        val item = _media.value.firstOrNull { it.id == id } ?: return@withContext DeleteMediaResult.Failed
-        if (item.uri.isBlank()) return@withContext DeleteMediaResult.Failed
+        val item = _media.value.firstOrNull { it.id == id }
+        if (item == null) {
+            DeveloperLogger.info(
+                LogCategory.MEDIASTORE,
+                "MEDIA_DELETE_NOT_FOUND",
+                "Delete requested for media that is no longer in the local gallery",
+                localMediaId = id,
+                metadata = mapOf(
+                    "action" to "DELETE",
+                    "android_api" to Build.VERSION.SDK_INT.toString(),
+                    "operation" to "lookup",
+                    "result" to "NOT_FOUND"
+                )
+            )
+            return@withContext DeleteMediaResult.NotFound
+        }
+        if (item.uri.isBlank()) {
+            logMediaActionFailure("DELETE", item, IllegalArgumentException("Delete requires a valid content:// URI"))
+            return@withContext DeleteMediaResult.Failed
+        }
         val uri = runCatching { Uri.parse(item.uri) }.getOrNull()
         if (uri == null || uri.scheme != ContentResolver.SCHEME_CONTENT || uri.authority.isNullOrBlank()) {
             logMediaActionFailure("DELETE", item, IllegalArgumentException("Delete requires a valid content:// URI"))
@@ -262,79 +292,233 @@ class MediaRepository(
         }
         if (!permissions.canReadMedia()) {
             val error = SecurityException("Required media read permission is not granted")
-            logMediaActionFailure("DELETE", item, error, mapOf("permission_granted" to "false"))
-            return@withContext DeleteMediaResult.Failed
+            logMediaActionFailure("DELETE", item, error, mapOf("permission_granted" to "false", "result" to "PERMISSION_DENIED"))
+            return@withContext DeleteMediaResult.PermissionDenied
         }
         val probe = mediaStore.probeUri(item.uri)
         if (!probe.queryFound) {
-            val error = SecurityException(probe.errorMessage ?: "MediaStore URI is not accessible")
-            logMediaActionFailure("DELETE", item, error, mapOf("uri_probe" to "query_not_found"))
-            return@withContext DeleteMediaResult.Failed
+            logMediaActionFailure(
+                "DELETE",
+                item,
+                FileNotFoundException(probe.errorMessage ?: "MediaStore URI is not accessible"),
+                mapOf("uri_probe" to "query_not_found", "result" to "NOT_FOUND")
+            )
+            return@withContext DeleteMediaResult.NotFound
         }
+        trashLocalMedia(context, item, uri)
+    }
 
-        try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && !MediaStore.canManageMedia(context)) {
-                    DeveloperLogger.info(
-                        LogCategory.MEDIASTORE,
-                        "MEDIA_DELETE_NEEDS_MANAGE_MEDIA_ACCESS",
-                        "Media management access is required to trash this item without a second system confirmation",
-                        localMediaId = item.id,
-                        metadata = mediaActionMetadata("DELETE", item) + ("android_flow" to "request_manage_media_access")
-                    )
-                    return@withContext DeleteMediaResult.NeedsManageMediaAccess
-                }
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                    val values = ContentValues().apply {
-                        put(MediaStore.MediaColumns.IS_TRASHED, 1)
-                    }
-                    if (context.contentResolver.update(uri, values, null, null) > 0) {
-                        DeveloperLogger.info(
-                            LogCategory.MEDIASTORE,
-                            "MEDIA_DELETE_TRASHED",
-                            "MediaStore item moved to Trash",
-                            localMediaId = item.id,
-                            metadata = mediaActionMetadata("DELETE", item) + ("android_flow" to "direct_trash_with_manage_media")
-                        )
-                        DeleteMediaResult.Deleted
-                    } else {
-                        logMediaActionFailure("DELETE", item, IllegalStateException("MediaStore trash update returned 0 rows"))
-                        DeleteMediaResult.Failed
-                    }
-                } else {
-                    val sender = MediaStore.createTrashRequest(context.contentResolver, listOf(uri), true).intentSender
-                    DeleteMediaResult.NeedsConfirmation(sender)
-                }
-            } else {
-                val values = ContentValues().apply {
-                    put(MediaStore.MediaColumns.IS_TRASHED, 1)
-                }
-                if (context.contentResolver.update(uri, values, null, null) > 0) {
-                    DeleteMediaResult.Deleted
-                } else {
-                    logMediaActionFailure("DELETE", item, IllegalStateException("MediaStore trash update returned 0 rows"))
-                    DeleteMediaResult.Failed
-                }
+    private fun trashLocalMedia(context: Context, item: MediaItem, uri: Uri): DeleteMediaResult {
+        val canManageMedia = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && MediaStore.canManageMedia(context)
+        val ownerPackage = queryOwnerPackage(context, uri)
+        val ownedByApp = ownerPackage == context.packageName
+        val baseMeta = mediaActionMetadata("DELETE", item) + mapOf(
+            "owner_package" to ownerPackage,
+            "owned_by_app" to ownedByApp.toString(),
+            "can_manage_media" to canManageMedia.toString(),
+            "permission_granted" to permissions.canReadMedia().toString()
+        )
+        DeveloperLogger.info(
+            LogCategory.MEDIASTORE,
+            "MEDIA_DELETE_START",
+            "Starting local MediaStore trash operation",
+            localMediaId = item.id,
+            metadata = baseMeta + mapOf("operation" to "start")
+        )
+        return try {
+            when {
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.R -> trashOnApiRPlus(context, item, uri, baseMeta)
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q -> deleteOnApiQ(context, item, uri, baseMeta)
+                else -> deleteLegacy(context, item, uri, baseMeta)
             }
+        } catch (error: RecoverableSecurityException) {
+            requestSystemTrashConfirmation(context, item, uri, baseMeta, error)
+        } catch (error: SecurityException) {
+            requestSystemTrashConfirmation(context, item, uri, baseMeta, error)
+        } catch (error: FileNotFoundException) {
+            logMediaActionFailure("DELETE", item, error, baseMeta + mapOf("result" to "NOT_FOUND"))
+            DeleteMediaResult.NotFound
         } catch (error: Exception) {
-            logMediaActionFailure("DELETE", item, error, mapOf("android_flow" to if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) "create_trash_request" else "trash_update"))
+            logMediaActionFailure("DELETE", item, error, baseMeta + mapOf("result" to "FAILED"))
             DeleteMediaResult.Failed
         }
     }
 
+    private fun trashOnApiRPlus(
+        context: Context,
+        item: MediaItem,
+        uri: Uri,
+        baseMeta: Map<String, String?>
+    ): DeleteMediaResult {
+        return if (tryDirectTrash(context, uri)) {
+            logTrashResult(item, baseMeta, "direct_is_trashed", "SUCCESS", systemConfirmation = false)
+            DeleteMediaResult.Success
+        } else {
+            logMediaActionFailure(
+                "DELETE",
+                item,
+                FileNotFoundException("MediaStore trash update returned 0 rows"),
+                baseMeta + mapOf("android_flow" to "direct_is_trashed", "result" to "NOT_FOUND")
+            )
+            DeleteMediaResult.NotFound
+        }
+    }
+
+    private fun deleteOnApiQ(
+        context: Context,
+        item: MediaItem,
+        uri: Uri,
+        baseMeta: Map<String, String?>
+    ): DeleteMediaResult {
+        return try {
+            if (context.contentResolver.delete(uri, null, null) > 0) {
+                logTrashResult(item, baseMeta, "scoped_delete", "SUCCESS", systemConfirmation = false)
+                DeleteMediaResult.Success
+            } else {
+                logMediaActionFailure(
+                    "DELETE",
+                    item,
+                    FileNotFoundException("MediaStore delete returned 0 rows"),
+                    baseMeta + mapOf("android_flow" to "scoped_delete", "result" to "NOT_FOUND")
+                )
+                DeleteMediaResult.NotFound
+            }
+        } catch (error: RecoverableSecurityException) {
+            requestSystemTrashConfirmation(context, item, uri, baseMeta, error)
+        }
+    }
+
+    private fun deleteLegacy(
+        context: Context,
+        item: MediaItem,
+        uri: Uri,
+        baseMeta: Map<String, String?>
+    ): DeleteMediaResult {
+        return if (context.contentResolver.delete(uri, null, null) > 0) {
+            logTrashResult(item, baseMeta, "legacy_delete", "SUCCESS", systemConfirmation = false)
+            DeleteMediaResult.Success
+        } else {
+            logMediaActionFailure(
+                "DELETE",
+                item,
+                FileNotFoundException("MediaStore delete returned 0 rows"),
+                baseMeta + mapOf("android_flow" to "legacy_delete", "result" to "NOT_FOUND")
+            )
+            DeleteMediaResult.NotFound
+        }
+    }
+
+    private fun tryDirectTrash(context: Context, uri: Uri): Boolean {
+        val values = ContentValues().apply {
+            put(MediaStore.MediaColumns.IS_TRASHED, 1)
+        }
+        return context.contentResolver.update(uri, values, null, null) > 0
+    }
+
+    private fun requestSystemTrashConfirmation(
+        context: Context,
+        item: MediaItem,
+        uri: Uri,
+        baseMeta: Map<String, String?>,
+        error: Exception?
+    ): DeleteMediaResult {
+        return try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                val sender = MediaStore.createTrashRequest(context.contentResolver, listOf(uri), true).intentSender
+                logTrashResult(item, baseMeta, "create_trash_request", "REQUIRES_SYSTEM_CONFIRMATION", systemConfirmation = true, error = error)
+                DeleteMediaResult.RequiresSystemConfirmation(sender, alreadyPerformedOnApproval = true)
+            } else if (error is RecoverableSecurityException) {
+                val sender = error.userAction.actionIntent.intentSender
+                logTrashResult(item, baseMeta, "recoverable_security_intent", "REQUIRES_SYSTEM_CONFIRMATION", systemConfirmation = true, error = error)
+                DeleteMediaResult.RequiresSystemConfirmation(sender, alreadyPerformedOnApproval = false)
+            } else {
+                val denied = error ?: SecurityException("No write access to this MediaStore item")
+                logMediaActionFailure(
+                    "DELETE",
+                    item,
+                    denied,
+                    baseMeta + mapOf(
+                        "android_flow" to "no_system_confirmation_available",
+                        "result" to "PERMISSION_DENIED",
+                        "system_confirmation_required" to "true"
+                    )
+                )
+                DeleteMediaResult.PermissionDenied
+            }
+        } catch (requestError: Exception) {
+            logMediaActionFailure(
+                "DELETE",
+                item,
+                requestError,
+                baseMeta + mapOf(
+                    "android_flow" to "create_trash_request",
+                    "result" to "FAILED",
+                    "system_confirmation_required" to "true",
+                    "cause_exception" to error?.javaClass?.simpleName
+                )
+            )
+            DeleteMediaResult.Failed
+        }
+    }
+
+    private fun queryOwnerPackage(context: Context, uri: Uri): String? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return null
+        return try {
+            context.contentResolver.query(
+                uri,
+                arrayOf(MediaStore.MediaColumns.OWNER_PACKAGE_NAME),
+                null,
+                null,
+                null
+            )?.use { cursor ->
+                if (!cursor.moveToFirst()) return@use null
+                val index = cursor.getColumnIndex(MediaStore.MediaColumns.OWNER_PACKAGE_NAME)
+                if (index >= 0) cursor.getString(index) else null
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun logTrashResult(
+        item: MediaItem,
+        baseMeta: Map<String, String?>,
+        flow: String,
+        result: String,
+        systemConfirmation: Boolean,
+        error: Exception? = null
+    ) {
+        val metadata = baseMeta + mapOf(
+            "android_flow" to flow,
+            "operation" to flow,
+            "result" to result,
+            "system_confirmation_required" to systemConfirmation.toString(),
+            "exception_class" to error?.javaClass?.name,
+            "exception_message" to error?.message
+        )
+        DeveloperLogger.info(
+            LogCategory.MEDIASTORE,
+            "MEDIA_DELETE_$result",
+            if (systemConfirmation) "Local MediaStore trash requires Android confirmation" else "Local MediaStore trash result: $result",
+            localMediaId = item.id,
+            throwable = error,
+            metadata = metadata
+        )
+    }
+
     suspend fun finalizeLocalDelete(id: String): Boolean = withContext(Dispatchers.IO) {
+        locallyHiddenIds += id
         val existed = _media.value.any { it.id == id }
-        if (!existed) return@withContext false
         _media.update { items -> items.filter { it.id != id } }
         favorites.retainAll(_media.value.mapTo(HashSet()) { it.id })
         rebuildAlbums()
         // Local MediaStore/Room refresh only. Supabase media_assets and archive data remain untouched.
         refresh(force = true)
-        true
+        existed || !_media.value.any { it.id == id }
     }
 
     suspend fun deleteMedia(context: Context, id: String): Boolean =
-        deleteMediaWithResult(context, id) is DeleteMediaResult.Deleted
+        deleteMediaWithResult(context, id) is DeleteMediaResult.Success
 
     fun hasMediaReadPermission(): Boolean = permissions.canReadMedia()
     fun probeMediaUri(rawUri: String) = mediaStore.probeUri(rawUri)
@@ -347,7 +531,17 @@ class MediaRepository(
     )
 
     private fun logMediaActionFailure(action: String, item: MediaItem, error: Throwable, extra: Map<String, String?> = emptyMap()) {
-        DeveloperLogger.error(LogCategory.MEDIASTORE, "MEDIA_${action}_FAILED", "Media Viewer $action failed", localMediaId = item.id, throwable = error, metadata = mediaActionMetadata(action, item) + extra)
+        DeveloperLogger.error(
+            LogCategory.MEDIASTORE,
+            "MEDIA_${action}_FAILED",
+            "Media Viewer $action failed",
+            localMediaId = item.id,
+            throwable = error,
+            metadata = mediaActionMetadata(action, item) + extra + mapOf(
+                "exception_class" to error.javaClass.name,
+                "exception_message" to error.message
+            )
+        )
     }
 
     suspend fun copyMedia(context: Context, id: String, destFolderUri: Uri): Boolean = withContext(Dispatchers.IO) {
