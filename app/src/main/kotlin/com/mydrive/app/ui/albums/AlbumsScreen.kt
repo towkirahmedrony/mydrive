@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.grid.GridCells
@@ -29,6 +30,7 @@ import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.DeleteOutline
 import androidx.compose.material.icons.outlined.PhotoLibrary
 import androidx.compose.material.icons.outlined.Search
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -43,6 +45,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
@@ -58,6 +61,19 @@ import com.mydrive.app.ui.theme.Copper
 import com.mydrive.app.ui.theme.Spacing
 import com.mydrive.app.ui.util.formatFileSize
 
+/**
+ * Compact, gallery-like album grid.
+ *
+ * Phones show 3 folders per row; wider screens/tablets add columns so the available
+ * width is used instead of stretching two oversized cards.
+ */
+private fun albumGridColumnCount(screenWidthDp: Int): Int = when {
+    screenWidthDp >= 900 -> 6
+    screenWidthDp >= 720 -> 5
+    screenWidthDp >= 600 -> 4
+    else -> 3
+}
+
 @Composable
 fun AlbumsScreen(
     viewModel: AlbumsViewModel,
@@ -70,6 +86,7 @@ fun AlbumsScreen(
     val lifecycleOwner = LocalLifecycleOwner.current
     val colors = MaterialTheme.colorScheme
     val gridState = rememberSaveable(saver = LazyGridState.Saver) { LazyGridState() }
+    val columnCount = albumGridColumnCount(LocalConfiguration.current.screenWidthDp)
 
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -150,21 +167,21 @@ fun AlbumsScreen(
         }
 
         LazyVerticalGrid(
-            columns = GridCells.Fixed(2),
+            columns = GridCells.Fixed(columnCount),
             state = gridState,
             modifier = Modifier.weight(1f),
             contentPadding = PaddingValues(
                 start = Spacing.md,
                 end = Spacing.md,
-                top = Spacing.xs,
-                bottom = Spacing.sm
+                top = Spacing.xxs,
+                bottom = Spacing.lg
             ),
-            horizontalArrangement = Arrangement.spacedBy(Spacing.sm),
-            verticalArrangement = Arrangement.spacedBy(Spacing.md)
+            horizontalArrangement = Arrangement.spacedBy(Spacing.xs),
+            verticalArrangement = Arrangement.spacedBy(Spacing.sm)
         ) {
             when {
                 state.isLoading && state.albums.isEmpty() && state.query.isBlank() -> {
-                    item(key = "empty-loading", span = { GridItemSpan(2) }) {
+                    item(key = "empty-loading", span = { GridItemSpan(maxLineSpan) }, contentType = "empty") {
                         EmptyState(
                             title = "No albums found",
                             message = "Albums from your device will appear here.",
@@ -173,7 +190,7 @@ fun AlbumsScreen(
                     }
                 }
                 state.errorMessage != null && state.albums.isEmpty() -> {
-                    item(key = "empty-error", span = { GridItemSpan(2) }) {
+                    item(key = "empty-error", span = { GridItemSpan(maxLineSpan) }, contentType = "empty") {
                         EmptyState(
                             title = "Couldn't load albums",
                             message = state.errorMessage ?: "Please try again.",
@@ -182,7 +199,7 @@ fun AlbumsScreen(
                     }
                 }
                 state.albums.isEmpty() -> {
-                    item(key = "empty-albums", span = { GridItemSpan(2) }) {
+                    item(key = "empty-albums", span = { GridItemSpan(maxLineSpan) }, contentType = "empty") {
                         EmptyState(
                             title = "No albums found",
                             message = if (state.query.isNotBlank()) {
@@ -195,7 +212,11 @@ fun AlbumsScreen(
                     }
                 }
                 else -> {
-                    items(state.albums, key = { it.id }) { album ->
+                    items(
+                        items = state.albums,
+                        key = { album -> "album-${album.id}" },
+                        contentType = { "album" }
+                    ) { album ->
                         AlbumCard(
                             album = album,
                             onClick = { onAlbumClick(album.id) }
@@ -203,20 +224,24 @@ fun AlbumsScreen(
                     }
                 }
             }
-        }
-        if (state.query.isBlank()) {
-            TrashAlbumEntry(
-                count = state.trashCount,
-                sizeBytes = state.trashSizeBytes,
-                onClick = onTrashClick,
-                modifier = Modifier.padding(horizontal = Spacing.md, vertical = Spacing.sm)
-            )
+            // The Trash Bin is the last entry of the scrollable album content, so it is
+            // revealed after scrolling past the folders and scrolls with the page.
+            if (state.query.isBlank()) {
+                item(key = "trash-section", span = { GridItemSpan(maxLineSpan) }, contentType = "trash") {
+                    TrashSection(
+                        count = state.trashCount,
+                        sizeBytes = state.trashSizeBytes,
+                        onClick = onTrashClick,
+                        modifier = Modifier.padding(top = Spacing.sm)
+                    )
+                }
+            }
         }
     }
 }
 
 @Composable
-private fun TrashAlbumEntry(
+private fun TrashSection(
     count: Int,
     sizeBytes: Long,
     onClick: () -> Unit,
@@ -230,45 +255,58 @@ private fun TrashAlbumEntry(
             append(formatFileSize(sizeBytes))
         }
     }
-    Row(
-        modifier = modifier
-            .fillMaxWidth()
-            .clip(CardShape)
-            .background(colors.surfaceVariant)
-            .border(1.dp, colors.outlineVariant, CardShape)
-            .clickable(onClick = onClick)
-            .padding(horizontal = Spacing.md, vertical = Spacing.sm),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Box(
+    Column(modifier = modifier.fillMaxWidth()) {
+        HorizontalDivider(
+            thickness = 1.dp,
+            color = colors.outlineVariant
+        )
+        Text(
+            text = "Trash Bin",
+            style = MaterialTheme.typography.labelLarge,
+            color = colors.onSurfaceVariant,
+            modifier = Modifier.padding(start = Spacing.xxs, top = Spacing.sm, bottom = Spacing.xs)
+        )
+        Row(
             modifier = Modifier
-                .size(44.dp)
-                .clip(RoundedCornerShape(12.dp))
-                .background(colors.background),
-            contentAlignment = Alignment.Center
+                .fillMaxWidth()
+                .heightIn(min = 56.dp)
+                .clip(CardShape)
+                .background(colors.surfaceVariant)
+                .border(1.dp, colors.outlineVariant, CardShape)
+                .clickable(onClick = onClick)
+                .padding(horizontal = Spacing.sm, vertical = Spacing.xs),
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            Icon(
-                imageVector = Icons.Outlined.DeleteOutline,
-                contentDescription = null,
-                tint = colors.onSurfaceVariant,
-                modifier = Modifier.size(22.dp)
-            )
-        }
-        Column(
-            modifier = Modifier
-                .weight(1f)
-                .padding(start = Spacing.md)
-        ) {
-            Text(
-                text = "Trash",
-                style = MaterialTheme.typography.titleSmall,
-                color = colors.onBackground
-            )
-            Text(
-                text = subtitle,
-                style = MaterialTheme.typography.labelSmall,
-                color = colors.onSurfaceVariant
-            )
+            Box(
+                modifier = Modifier
+                    .size(40.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(colors.background),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Outlined.DeleteOutline,
+                    contentDescription = null,
+                    tint = colors.onSurfaceVariant,
+                    modifier = Modifier.size(20.dp)
+                )
+            }
+            Column(
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(start = Spacing.md)
+            ) {
+                Text(
+                    text = "Trash",
+                    style = MaterialTheme.typography.titleSmall,
+                    color = colors.onBackground
+                )
+                Text(
+                    text = subtitle,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = colors.onSurfaceVariant
+                )
+            }
         }
     }
 }

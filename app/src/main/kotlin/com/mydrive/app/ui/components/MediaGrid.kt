@@ -24,6 +24,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.mydrive.app.data.model.AlbumFolder
 import com.mydrive.app.data.model.BackupState
@@ -165,7 +166,8 @@ fun AlbumCard(
             style = MaterialTheme.typography.titleSmall,
             color = colors.onBackground,
             modifier = Modifier.padding(top = Spacing.xs, start = Spacing.xs, end = Spacing.xs),
-            maxLines = 1
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
         )
         Box(
             modifier = Modifier
