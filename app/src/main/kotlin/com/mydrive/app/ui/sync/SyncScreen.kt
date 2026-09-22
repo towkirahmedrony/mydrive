@@ -537,7 +537,7 @@ private fun JobThumbnail(job: SyncJob) {
             .clip(RoundedCornerShape(Radius.sm))
     ) {
         MediaImage(
-            uri = job.media.uri,
+            uri = job.media.displayUri,
             seed = job.media.thumbnailSeed,
             type = job.media.type,
             modifier = Modifier.fillMaxSize(),

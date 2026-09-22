@@ -73,8 +73,20 @@ data class MediaItem(
     val cloudinaryAssetId: String? = null,
     val cloudinaryPublicId: String? = null,
     val isTrashed: Boolean = false,
-    val dateExpiresMillis: Long = 0L
-)
+    val dateExpiresMillis: Long = 0L,
+    val remoteMediaId: String? = null,
+    val thumbnailUrl: String? = null,
+    val originLocal: Boolean = true,
+    val hiddenFromLibrary: Boolean = false
+) {
+    val displayUri: String
+        get() = when {
+            uri.isNotBlank() && originLocal -> uri
+            !thumbnailUrl.isNullOrBlank() -> thumbnailUrl
+            uri.isNotBlank() -> uri
+            else -> thumbnailUrl.orEmpty()
+        }
+}
 
 data class TrashSummary(
     val count: Int = 0,

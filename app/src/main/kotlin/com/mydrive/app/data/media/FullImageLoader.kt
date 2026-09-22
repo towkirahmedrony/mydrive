@@ -43,9 +43,37 @@ object FullImageLoader {
             return@withContext null
         }
 
-        val bitmap = decode(context.applicationContext, uri, maxDimPx) ?: return@withContext null
+        val bitmap = if (uri.scheme == "http" || uri.scheme == "https") {
+            decodeHttp(uri, maxDimPx)
+        } else {
+            decode(context.applicationContext, uri, maxDimPx)
+        } ?: return@withContext null
         cache.put(key, bitmap)
         bitmap
+    }
+
+    private fun decodeHttp(uri: Uri, maxDimPx: Int): Bitmap? {
+        return try {
+            val connection = java.net.URL(uri.toString()).openConnection().apply {
+                connectTimeout = 10_000
+                readTimeout = 15_000
+            }
+            connection.getInputStream().use { input ->
+                val bytes = input.readBytes()
+                val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+                val maxDimension = maxOf(bounds.outWidth, bounds.outHeight).coerceAtLeast(1)
+                var sample = 1
+                while (maxDimension / sample > maxDimPx) sample *= 2
+                val opts = BitmapFactory.Options().apply {
+                    inSampleSize = sample
+                    inPreferredConfig = Bitmap.Config.ARGB_8888
+                }
+                BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
+            }
+        } catch (_: Exception) {
+            null
+        }
     }
 
     private fun decode(context: Context, uri: Uri, maxDimPx: Int): Bitmap? {

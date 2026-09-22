@@ -92,7 +92,7 @@ class SyncViewModel(
     }
 
     private val coreState = combine(
-        repository.media,
+        repository.deviceMedia,
         repository.loadState,
         syncRepository.records,
         syncRepository.paused,
@@ -122,7 +122,7 @@ class SyncViewModel(
             }
             val eligible = withContext(Dispatchers.Default) {
                 val records = syncRepository.records.value
-                repository.media.value
+                repository.deviceMedia.value
                     .filter { item ->
                         val state = records[item.id]?.state?.toBackupState()?.resumeLocally()
                             ?: item.backupState

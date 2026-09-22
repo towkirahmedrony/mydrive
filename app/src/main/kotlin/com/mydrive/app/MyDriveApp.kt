@@ -17,8 +17,10 @@ import com.mydrive.app.data.remote.SupabaseConfig
 import com.mydrive.app.data.remote.SupabaseModule
 import com.mydrive.app.data.remote.TelegramApiVerifier
 import com.mydrive.app.data.worker.UploadWorkScheduler
+import com.mydrive.app.data.local.LibraryVisibilityStore
 import com.mydrive.app.data.repository.AuthRepository
 import com.mydrive.app.data.repository.BackupRepository
+import com.mydrive.app.data.repository.MediaAssetsRepository
 import com.mydrive.app.data.repository.MediaRepository
 import com.mydrive.app.data.repository.SyncRepository
 import com.mydrive.app.debug.DeveloperLogDatabase
@@ -42,6 +44,10 @@ class MyDriveApp : Application() {
 
     private val networkMonitor: NetworkMonitor by lazy { NetworkMonitor(this) }
 
+    val mediaAssetsRepository: MediaAssetsRepository by lazy {
+        MediaAssetsRepository(supabaseClient, sessionProvider)
+    }
+
     val mediaRepository: MediaRepository by lazy {
         MediaRepository(
             mediaStore = MediaStoreDataSource(this),
@@ -50,6 +56,8 @@ class MyDriveApp : Application() {
             syncRepository = syncRepository,
             telegramSettingsStore = telegramSettingsStore,
             telegramApiVerifier = TelegramApiVerifier(networkMonitor),
+            mediaAssetsRepository = mediaAssetsRepository,
+            visibilityStore = LibraryVisibilityStore(this),
             scope = applicationScope
         )
     }

@@ -142,7 +142,7 @@ fun ViewerVideoPlayer(
                 MediaUnavailableState()
             } else {
                 MediaImage(
-                    uri = item.uri,
+                    uri = item.displayUri,
                     seed = item.thumbnailSeed,
                     type = item.type,
                     modifier = Modifier.fillMaxSize(),

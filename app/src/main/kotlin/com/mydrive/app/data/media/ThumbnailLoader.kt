@@ -38,9 +38,34 @@ object ThumbnailLoader {
         } catch (_: Exception) {
             return@withContext null
         }
-        val bitmap = decode(context.applicationContext, uri, sizePx) ?: return@withContext null
+        val bitmap = if (uri.scheme == "http" || uri.scheme == "https") {
+            decodeHttp(uri, sizePx)
+        } else {
+            decode(context.applicationContext, uri, sizePx)
+        } ?: return@withContext null
         cache.put(key, bitmap)
         bitmap
+    }
+
+    private fun decodeHttp(uri: Uri, sizePx: Int): Bitmap? {
+        return try {
+            val connection = java.net.URL(uri.toString()).openConnection().apply {
+                connectTimeout = 8_000
+                readTimeout = 8_000
+            }
+            connection.getInputStream().use { input ->
+                val bytes = input.readBytes()
+                val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+                val maxDim = maxOf(bounds.outWidth, bounds.outHeight).coerceAtLeast(1)
+                var sample = 1
+                while (maxDim / sample > sizePx * 2) sample *= 2
+                val opts = BitmapFactory.Options().apply { inSampleSize = sample }
+                BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
+            }
+        } catch (_: Exception) {
+            null
+        }
     }
 
     private fun decode(context: Context, uri: Uri, sizePx: Int): Bitmap? {

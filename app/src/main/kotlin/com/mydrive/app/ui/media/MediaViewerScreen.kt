@@ -1,7 +1,6 @@
 package com.mydrive.app.ui.media
 
 import android.app.Activity
-import android.os.Build
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.IntentSenderRequest
@@ -33,6 +32,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.ContentCopy
+import androidx.compose.material.icons.outlined.CloudOff
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.DriveFileRenameOutline
 import androidx.compose.material.icons.outlined.Edit
@@ -46,11 +46,11 @@ import androidx.compose.material.icons.outlined.Pause
 import androidx.compose.material.icons.outlined.PlayArrow
 import androidx.compose.material.icons.outlined.RotateLeft
 import androidx.compose.material.icons.outlined.RotateRight
+import androidx.compose.material.icons.outlined.PhonelinkErase
 import androidx.compose.material.icons.outlined.Share
+import androidx.compose.material.icons.outlined.Smartphone
 import androidx.compose.material.icons.outlined.Wallpaper
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -92,6 +92,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.mydrive.app.data.media.FullImageLoader
 import com.mydrive.app.data.model.MediaItem
 import com.mydrive.app.data.model.MediaType
+import com.mydrive.app.data.repository.RemoveMediaAction
 import com.mydrive.app.ui.components.MediaImage
 import com.mydrive.app.ui.theme.Copper
 import com.mydrive.app.ui.theme.Ink
@@ -237,10 +238,10 @@ fun MediaViewerScreen(
             state.items.getOrNull(index + 1),
             state.items.getOrNull(index - 1)
         )
-            .filter { it.type == MediaType.PHOTO && it.uri.isNotBlank() }
+            .filter { it.type == MediaType.PHOTO && it.displayUri.isNotBlank() }
             .forEach { neighbor ->
                 prefetchScope.launch {
-                    FullImageLoader.load(context, neighbor.uri, target)
+                    FullImageLoader.load(context, neighbor.displayUri, target)
                 }
             }
     }
@@ -410,11 +411,11 @@ fun MediaViewerScreen(
     // Compose compiler inference issue with nested nullable smart casts here.
     val pendingDelete = operation as? MediaOperation.DeleteConfirm
     state.items.firstOrNull { it.id == pendingDelete?.itemId }?.let { deleteItem ->
-        DeleteConfirmationSheet(
+        RemovePhotoSheet(
             item = deleteItem,
             onDismiss = { viewModel.dismissOperation() },
-            onConfirm = {
-                viewModel.confirmDelete(deleteItem.id) { nextIndex ->
+            onChoose = { action ->
+                viewModel.confirmRemove(deleteItem.id, action) { nextIndex ->
                     if (nextIndex == null) {
                         onBack()
                     } else {
@@ -516,22 +517,15 @@ fun MediaViewerScreen(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun DeleteConfirmationSheet(
+private fun RemovePhotoSheet(
     item: MediaItem,
     onDismiss: () -> Unit,
-    onConfirm: () -> Unit
+    onChoose: (RemoveMediaAction) -> Unit
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val isVideo = item.type == MediaType.VIDEO
-    val usesTrash = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R
-    val title = if (usesTrash) "Move to Trash?" else "Delete this item?"
     val kind = if (isVideo) "video" else "photo"
-    val body = if (usesTrash) {
-        "This $kind will be removed from your gallery and moved to Trash."
-    } else {
-        "This $kind will be permanently deleted from this device."
-    }
-    val confirmLabel = if (usesTrash) "Move to Trash" else "Delete"
+    val title = if (isVideo) "Remove video?" else "Remove photo?"
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState,
@@ -545,96 +539,138 @@ private fun DeleteConfirmationSheet(
             modifier = Modifier
                 .fillMaxWidth()
                 .navigationBarsPadding()
-                .padding(horizontal = Spacing.lg, vertical = Spacing.md),
-            horizontalAlignment = Alignment.CenterHorizontally
+                .padding(horizontal = Spacing.lg, vertical = Spacing.md)
         ) {
             Box(
                 modifier = Modifier
+                    .align(Alignment.CenterHorizontally)
                     .padding(bottom = Spacing.md)
                     .size(width = 36.dp, height = 4.dp)
                     .clip(RoundedCornerShape(100.dp))
                     .background(MaterialTheme.colorScheme.outline.copy(alpha = 0.45f))
             )
-            Box(
-                modifier = Modifier
-                    .size(72.dp)
-                    .clip(MediaShape)
-                    .background(MaterialTheme.colorScheme.surfaceVariant)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                MediaImage(
-                    uri = item.uri,
-                    seed = item.thumbnailSeed,
-                    type = item.type,
-                    modifier = Modifier.fillMaxSize(),
-                    contentScale = ContentScale.Crop,
-                    sizePx = 144,
-                    contentDescription = item.filename
-                )
-                if (isVideo) {
-                    Box(
-                        modifier = Modifier
-                            .align(Alignment.BottomEnd)
-                            .padding(6.dp)
-                            .size(18.dp)
-                            .clip(CircleShape)
-                            .background(Color.Black.copy(alpha = 0.62f)),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            imageVector = Icons.Outlined.PlayArrow,
-                            contentDescription = null,
-                            tint = Ivory,
-                            modifier = Modifier.size(12.dp)
-                        )
-                    }
+                Box(
+                    modifier = Modifier
+                        .size(56.dp)
+                        .clip(MediaShape)
+                        .background(MaterialTheme.colorScheme.surfaceVariant)
+                ) {
+                    MediaImage(
+                        uri = item.displayUri,
+                        seed = item.thumbnailSeed,
+                        type = item.type,
+                        modifier = Modifier.fillMaxSize(),
+                        contentScale = ContentScale.Crop,
+                        sizePx = 144,
+                        contentDescription = item.filename
+                    )
+                }
+                Spacer(Modifier.width(Spacing.md))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = title,
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Text(
+                        text = item.filename,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
                 }
             }
             Spacer(Modifier.height(Spacing.md))
             Text(
-                text = title,
-                style = MaterialTheme.typography.titleLarge,
-                fontWeight = FontWeight.SemiBold,
-                color = MaterialTheme.colorScheme.onSurface
-            )
-            Spacer(Modifier.height(Spacing.xs))
-            Text(
-                text = item.filename,
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-            Spacer(Modifier.height(Spacing.sm))
-            Text(
-                text = body,
+                text = "Choose what to remove. Backed-up files stay in Drive archive.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
-            Spacer(Modifier.height(Spacing.lg))
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(Spacing.sm)
-            ) {
-                OutlinedButton(
-                    onClick = onDismiss,
-                    modifier = Modifier.weight(1f),
-                    shape = RoundedCornerShape(100.dp)
-                ) {
-                    Text("Cancel")
-                }
-                Button(
-                    onClick = onConfirm,
-                    modifier = Modifier.weight(1f),
-                    shape = RoundedCornerShape(100.dp),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = StatusAttention,
-                        contentColor = Ivory
-                    )
-                ) {
-                    Text(confirmLabel, fontWeight = FontWeight.SemiBold)
-                }
-            }
             Spacer(Modifier.height(Spacing.sm))
+            RemoveChoiceRow(
+                icon = Icons.Outlined.Smartphone,
+                title = "Remove from device",
+                description = "Remove the local copy from this phone. The backed-up copy will remain in My Drive.",
+                onClick = { onChoose(RemoveMediaAction.DEVICE) }
+            )
+            RemoveChoiceRow(
+                icon = Icons.Outlined.CloudOff,
+                title = "Remove from My Drive",
+                description = "Hide this $kind from My Drive. The copy on this phone and the cloud backup remain unchanged.",
+                onClick = { onChoose(RemoveMediaAction.MY_DRIVE) }
+            )
+            RemoveChoiceRow(
+                icon = Icons.Outlined.PhonelinkErase,
+                title = "Remove from device & My Drive",
+                description = "Remove the local copy from this phone and hide this $kind from My Drive. The cloud backup is not deleted.",
+                destructive = true,
+                onClick = { onChoose(RemoveMediaAction.DEVICE_AND_MY_DRIVE) }
+            )
+            Spacer(Modifier.height(Spacing.sm))
+            OutlinedButton(
+                onClick = onDismiss,
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(100.dp)
+            ) {
+                Text("Cancel")
+            }
+            Spacer(Modifier.height(Spacing.xs))
+        }
+    }
+}
+
+@Composable
+private fun RemoveChoiceRow(
+    icon: ImageVector,
+    title: String,
+    description: String,
+    destructive: Boolean = false,
+    onClick: () -> Unit
+) {
+    val titleColor = if (destructive) StatusAttention else MaterialTheme.colorScheme.onSurface
+    val iconColor = if (destructive) StatusAttention else MaterialTheme.colorScheme.onSurface
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(16.dp))
+            .clickable(onClick = onClick)
+            .padding(vertical = Spacing.sm, horizontal = Spacing.xs),
+        verticalAlignment = Alignment.Top
+    ) {
+        Box(
+            modifier = Modifier
+                .size(40.dp)
+                .clip(CircleShape)
+                .background(if (destructive) StatusAttention.copy(alpha = 0.12f) else MaterialTheme.colorScheme.surfaceVariant),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = title,
+                tint = iconColor,
+                modifier = Modifier.size(22.dp)
+            )
+        }
+        Spacer(Modifier.width(Spacing.md))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = title,
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = titleColor
+            )
+            Spacer(Modifier.height(2.dp))
+            Text(
+                text = description,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
         }
     }
 }

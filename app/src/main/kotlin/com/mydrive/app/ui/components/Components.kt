@@ -227,7 +227,7 @@ fun MediaThumb(
             .semantics { contentDescription = description }
     ) {
         MediaImage(
-            uri = item.uri,
+            uri = item.displayUri,
             seed = item.thumbnailSeed,
             type = item.type,
             modifier = Modifier.fillMaxSize(),

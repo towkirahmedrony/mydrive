@@ -13,7 +13,9 @@ import android.os.Build
 import android.provider.MediaStore
 import java.io.FileNotFoundException
 import androidx.exifinterface.media.ExifInterface
+import com.mydrive.app.data.local.CloudLibraryEntry
 import com.mydrive.app.data.local.FavoritesStore
+import com.mydrive.app.data.local.LibraryVisibilityStore
 import com.mydrive.app.data.local.SyncRecord
 import com.mydrive.app.data.local.TelegramSettingsStore
 import com.mydrive.app.data.media.MediaAccess
@@ -82,6 +84,19 @@ data class TrashOperationProgress(
     val total: Int = 0
 )
 
+enum class RemoveMediaAction {
+    DEVICE,
+    MY_DRIVE,
+    DEVICE_AND_MY_DRIVE
+}
+
+sealed class RemoveFromLibraryResult {
+    data object Success : RemoveFromLibraryResult()
+    data object NotFound : RemoveFromLibraryResult()
+    data object Unauthorized : RemoveFromLibraryResult()
+    data object Failed : RemoveFromLibraryResult()
+}
+
 class MediaRepository(
     private val mediaStore: MediaStoreDataSource,
     private val favorites: FavoritesStore,
@@ -89,11 +104,16 @@ class MediaRepository(
     private val syncRepository: SyncRepository,
     private val telegramSettingsStore: TelegramSettingsStore,
     private val telegramApiVerifier: TelegramApiVerifier,
+    private val mediaAssetsRepository: MediaAssetsRepository,
+    private val visibilityStore: LibraryVisibilityStore,
     scope: CoroutineScope
 ) {
 
     private val _media = MutableStateFlow<List<MediaItem>>(emptyList())
     val media: StateFlow<List<MediaItem>> = _media.asStateFlow()
+
+    private val _deviceMedia = MutableStateFlow<List<MediaItem>>(emptyList())
+    val deviceMedia: StateFlow<List<MediaItem>> = _deviceMedia.asStateFlow()
 
     private val _albums = MutableStateFlow<List<AlbumFolder>>(emptyList())
     val albums: StateFlow<List<AlbumFolder>> = _albums.asStateFlow()
@@ -140,12 +160,17 @@ class MediaRepository(
     init {
         scope.launch {
             syncRepository.records.collect { records ->
-                val current = _media.value
-                if (current.isEmpty()) return@collect
-                val updated = current.map { it.withRecord(records[it.id]) }
-                if (updated != current) {
-                    _media.value = updated
-                    updateStorage(updated)
+                val currentLibrary = _media.value
+                val currentDevice = _deviceMedia.value
+                if (currentLibrary.isEmpty() && currentDevice.isEmpty()) return@collect
+                val updatedLibrary = currentLibrary.map { it.withRecord(records[it.id]) }
+                val updatedDevice = currentDevice.map { it.withRecord(records[it.id]) }
+                if (updatedLibrary != currentLibrary) {
+                    _media.value = updatedLibrary
+                    updateStorage(updatedLibrary)
+                }
+                if (updatedDevice != currentDevice) {
+                    _deviceMedia.value = updatedDevice
                 }
             }
         }
@@ -157,7 +182,8 @@ class MediaRepository(
     @Volatile
     private var viewerSessionIds: List<String>? = null
 
-    fun mediaById(id: String): MediaItem? = _media.value.firstOrNull { it.id == id }
+    fun mediaById(id: String): MediaItem? =
+        _media.value.firstOrNull { it.id == id } ?: _deviceMedia.value.firstOrNull { it.id == id }
     fun trashedMediaById(id: String): MediaItem? = _trashedMedia.value.firstOrNull { it.id == id }
     fun albumById(id: String): AlbumFolder? = _albums.value.firstOrNull { it.id == id }
     fun albums(): List<AlbumFolder> = _albums.value
@@ -224,7 +250,7 @@ class MediaRepository(
             if (!force && _media.value.isNotEmpty() && now - lastRefreshAt < MIN_REFRESH_INTERVAL_MS) { applyAccessState(); return }
             applyAccessState()
             if (!permissions.canReadMedia()) {
-                _media.value = emptyList(); _albums.value = emptyList(); _storage.value = StorageSummary(0, 0, 0, 0)
+                _media.value = emptyList(); _deviceMedia.value = emptyList(); _albums.value = emptyList(); _storage.value = StorageSummary(0, 0, 0, 0)
                 publishTrash(emptyList())
                 _loadState.update { it.copy(isLoading = false, errorMessage = null) }
                 return
@@ -238,26 +264,30 @@ class MediaRepository(
                 val scannedIds = scanned.mapTo(HashSet(scanned.size)) { it.id }
                 val trashedIds = trashed.mapTo(HashSet(trashed.size)) { it.id }
                 locallyHiddenIds.removeAll { it !in scannedIds && it !in trashedIds }
-                val items = scanned
+                val records = syncRepository.records.value
+                val deviceItems = scanned
                     .filter { it.id !in locallyHiddenIds }
-                    .map { item -> item.copy(isFavorite = item.id in favoriteIds) }
-                syncRepository.reconcileMedia(items)
+                    .map { item -> item.copy(isFavorite = item.id in favoriteIds).withRecord(records[item.id]) }
+                syncRepository.reconcileMedia(deviceItems)
                 if (permissions.access() == MediaAccess.GRANTED) {
-                    val presentIds = withContext(Dispatchers.Default) { items.mapTo(HashSet(items.size)) { it.id } }
-                    favorites.retainAll(presentIds)
+                    val presentIds = withContext(Dispatchers.Default) { deviceItems.mapTo(HashSet(deviceItems.size)) { it.id } }
+                    favorites.retainAll(presentIds + visibilityStore.hiddenLocalIds() + visibilityStore.cloudEntries().keys)
                     // Keep local backup metadata for items only moved to device Trash.
                     syncRepository.reconcile(presentIds + locallyHiddenIds + trashedIds)
                 }
-                val records = syncRepository.records.value
-                val merged = items.map { it.withRecord(records[it.id]) }
-                _media.value = merged; _albums.value = buildAlbums(merged); lastRefreshAt = now; updateStorage(merged)
+                val libraryItems = composeLibrary(deviceItems, trashed, favoriteIds, records)
+                _deviceMedia.value = deviceItems
+                _media.value = libraryItems
+                _albums.value = buildAlbums(libraryItems)
+                lastRefreshAt = now
+                updateStorage(libraryItems)
                 publishTrash(trashed)
                 _loadState.update { it.copy(isLoading = false, errorMessage = null) }
             } catch (_: MediaQueryException) {
                 val keepExisting = _media.value.isNotEmpty()
                 _loadState.update { it.copy(isLoading = false, errorMessage = if (keepExisting) null else "Couldn't load your photos and videos.") }
             } catch (_: SecurityException) {
-                applyAccessState(); _media.value = emptyList(); _albums.value = emptyList()
+                applyAccessState(); _media.value = emptyList(); _deviceMedia.value = emptyList(); _albums.value = emptyList()
                 publishTrash(emptyList())
                 _loadState.update { it.copy(isLoading = false, errorMessage = null) }
             }
@@ -277,19 +307,20 @@ class MediaRepository(
 
     private fun buildAlbums(items: List<MediaItem>): List<AlbumFolder> = items.groupBy { it.albumId }.map { (albumId, albumItems) ->
         val cover = albumItems.maxByOrNull { it.capturedAtMillis }
-        AlbumFolder(id = albumId, name = cover?.albumName?.ifBlank { "Other" } ?: "Other", coverSeed = cover?.thumbnailSeed ?: 0, coverType = cover?.type ?: MediaType.PHOTO, mediaCount = albumItems.size, coverUri = cover?.uri.orEmpty())
+        AlbumFolder(id = albumId, name = cover?.albumName?.ifBlank { "Other" } ?: "Other", coverSeed = cover?.thumbnailSeed ?: 0, coverType = cover?.type ?: MediaType.PHOTO, mediaCount = albumItems.size, coverUri = cover?.displayUri.orEmpty())
     }.sortedByDescending { it.mediaCount }
 
     private fun updateStorage(items: List<MediaItem>) {
         val photos = items.count { it.type == MediaType.PHOTO }
         val videos = items.count { it.type == MediaType.VIDEO }
-        _storage.value = StorageSummary(totalMedia = items.size, photos = photos, videos = videos, pendingUploads = items.count { it.backupState != BackupState.COMPLETED })
-        _todayStats.value = TodayStats(photosBackedUp = 0, videosBackedUp = 0, pending = items.count { it.backupState != BackupState.COMPLETED }, failed = items.count { it.backupState == BackupState.FAILED })
+        val deviceItems = _deviceMedia.value
+        _storage.value = StorageSummary(totalMedia = items.size, photos = photos, videos = videos, pendingUploads = deviceItems.count { it.backupState != BackupState.COMPLETED })
+        _todayStats.value = TodayStats(photosBackedUp = 0, videosBackedUp = 0, pending = deviceItems.count { it.backupState != BackupState.COMPLETED }, failed = deviceItems.count { it.backupState == BackupState.FAILED })
         refreshSyncSummary()
     }
 
     private fun refreshSyncSummary() {
-        val items = _media.value
+        val items = _deviceMedia.value
         _syncSummary.update { it.copy(inProgressCount = items.count { it.backupState.isActive }, completedToday = 0) }
     }
 
@@ -299,13 +330,210 @@ class MediaRepository(
             return copy(backupState = BackupState.NOT_STARTED, backupCompleted = false, progress = 0f, errorMessage = null, cloudinaryAssetId = null, cloudinaryPublicId = null)
         }
         val state = record.state.toBackupState().resumeLocally()
-        return copy(backupState = state, backupCompleted = state == BackupState.COMPLETED, progress = 0f, errorMessage = record.errorMessage, cloudinaryAssetId = record.cloudinaryAssetId, cloudinaryPublicId = record.cloudinaryPublicId)
+        return copy(
+            backupState = state,
+            backupCompleted = state == BackupState.COMPLETED,
+            progress = 0f,
+            errorMessage = record.errorMessage,
+            cloudinaryAssetId = record.cloudinaryAssetId,
+            cloudinaryPublicId = record.cloudinaryPublicId,
+            remoteMediaId = remoteMediaId ?: record.remoteMediaId,
+            thumbnailUrl = thumbnailUrl ?: record.cloudinarySecureUrl
+        )
     }
+
+    private suspend fun composeLibrary(
+        deviceItems: List<MediaItem>,
+        trashed: List<MediaItem>,
+        favoriteIds: Set<String>,
+        records: Map<String, SyncRecord>
+    ): List<MediaItem> {
+        val remoteRows = mediaAssetsRepository.loadOwnerAssets()
+        val hidden = HashSet(visibilityStore.hiddenLocalIds())
+        val byLocalMediaId = remoteRows.mapNotNull { row ->
+            row.localMediaId?.takeIf { it > 0L }?.let { it to row }
+        }.toMap()
+        val byRemoteId = remoteRows.associateBy { it.id }
+        val byClientUpload = remoteRows.mapNotNull { row ->
+            row.clientUploadId?.takeIf { it.isNotBlank() }?.let { it to row }
+        }.toMap()
+
+        fun matchRow(item: MediaItem, record: SyncRecord?) =
+            byLocalMediaId[item.mediaStoreId]
+                ?: record?.remoteMediaId?.let { byRemoteId[it] }
+                ?: item.remoteMediaId?.let { byRemoteId[it] }
+                ?: record?.clientUploadId?.let { byClientUpload[it] }
+
+        for (item in deviceItems + trashed) {
+            val record = records[item.id]
+            val row = matchRow(item, record)
+            if (row != null) {
+                rememberCloudFromItem(item, row, record)
+                if (row.isHiddenFromLibrary) hidden += item.id
+            }
+        }
+        for (row in remoteRows) {
+            if (!row.isHiddenFromLibrary) continue
+            records.entries.firstOrNull { it.value.remoteMediaId == row.id }?.key?.let { hidden += it }
+            records.entries.firstOrNull { it.value.clientUploadId == row.clientUploadId }?.key?.let { hidden += it }
+        }
+        visibilityStore.replaceHidden(hidden)
+
+        val library = ArrayList<MediaItem>(deviceItems.size)
+        val present = HashSet<String>()
+        for (item in deviceItems) {
+            if (item.id in hidden) continue
+            val record = records[item.id]
+            val row = matchRow(item, record)
+            library += item.copy(
+                remoteMediaId = row?.id ?: record?.remoteMediaId,
+                thumbnailUrl = row?.thumbnailUrl ?: row?.storageUrl ?: record?.cloudinarySecureUrl,
+                originLocal = true,
+                hiddenFromLibrary = false
+            )
+            present += item.id
+        }
+
+        val deviceIds = deviceItems.mapTo(HashSet()) { it.id }
+        for (item in trashed) {
+            if (item.id in hidden || item.id in present || item.id in deviceIds) continue
+            val record = records[item.id]
+            val row = matchRow(item, record)
+            val cloud = visibilityStore.cloudEntry(item.id)
+            if (row != null && !row.isHiddenFromLibrary && row.status != "DELETED") {
+                rememberCloudFromItem(item, row, record)
+                library += cloudMediaItem(item, row, record, favoriteIds)
+                present += item.id
+            } else if (cloud != null && row?.status != "DELETED") {
+                library += cloud.toMediaItem(favoriteIds, record)
+                present += item.id
+            }
+        }
+
+        for ((localId, entry) in visibilityStore.cloudEntries()) {
+            if (localId in hidden || localId in present || localId in deviceIds) continue
+            library += entry.toMediaItem(favoriteIds, records[localId])
+        }
+        return library.sortedByDescending { it.capturedAtMillis }
+    }
+
+    private fun rememberCloudCopy(id: String) {
+        val item = lookupAnyItem(id) ?: return
+        val record = syncRepository.records.value[id]
+        val preview = item.thumbnailUrl
+            ?: record?.cloudinarySecureUrl
+            ?: item.uri.takeIf { it.startsWith("http") }
+        if (preview.isNullOrBlank()) return
+        visibilityStore.putCloud(
+            CloudLibraryEntry(
+                localId = id,
+                remoteMediaId = item.remoteMediaId ?: record?.remoteMediaId.orEmpty(),
+                uri = preview,
+                thumbnailUrl = preview,
+                filename = item.filename,
+                mimeType = item.mimeType,
+                fileSizeBytes = item.fileSizeBytes,
+                width = item.width,
+                height = item.height,
+                durationMillis = item.durationMillis,
+                capturedAtMillis = item.capturedAtMillis,
+                albumId = item.albumId,
+                albumName = item.albumName,
+                type = item.type.name
+            )
+        )
+    }
+
+    private fun rememberCloudFromItem(
+        item: MediaItem,
+        row: com.mydrive.app.data.remote.dto.MediaAssetRow,
+        record: SyncRecord?
+    ) {
+        val preview = row.thumbnailUrl ?: row.storageUrl ?: record?.cloudinarySecureUrl
+        if (preview.isNullOrBlank()) return
+        visibilityStore.putCloud(
+            CloudLibraryEntry(
+                localId = item.id,
+                remoteMediaId = row.id,
+                uri = preview,
+                thumbnailUrl = preview,
+                filename = item.filename,
+                mimeType = item.mimeType.ifBlank { row.mimeType.orEmpty() },
+                fileSizeBytes = item.fileSizeBytes.takeIf { it > 0L } ?: row.fileSize ?: 0L,
+                width = item.width.takeIf { it > 0 } ?: row.width ?: 0,
+                height = item.height.takeIf { it > 0 } ?: row.height ?: 0,
+                durationMillis = item.durationMillis ?: row.durationMs,
+                capturedAtMillis = item.capturedAtMillis,
+                albumId = item.albumId,
+                albumName = item.albumName,
+                type = item.type.name
+            )
+        )
+    }
+
+    private fun cloudMediaItem(
+        item: MediaItem,
+        row: com.mydrive.app.data.remote.dto.MediaAssetRow,
+        record: SyncRecord?,
+        favoriteIds: Set<String>
+    ): MediaItem {
+        val preview = row.thumbnailUrl ?: row.storageUrl ?: record?.cloudinarySecureUrl ?: item.uri
+        return item.copy(
+            uri = preview,
+            thumbnailUrl = preview,
+            remoteMediaId = row.id,
+            originLocal = false,
+            isTrashed = false,
+            hiddenFromLibrary = false,
+            isFavorite = item.id in favoriteIds,
+            backupState = BackupState.COMPLETED,
+            backupCompleted = true
+        )
+    }
+
+    private fun CloudLibraryEntry.toMediaItem(favoriteIds: Set<String>, record: SyncRecord?): MediaItem {
+        val mediaType = runCatching { MediaType.valueOf(type) }.getOrDefault(MediaType.PHOTO)
+        val preview = thumbnailUrl ?: uri
+        return MediaItem(
+            id = localId,
+            filename = filename,
+            type = mediaType,
+            fileSizeBytes = fileSizeBytes,
+            capturedAtMillis = capturedAtMillis,
+            device = "My Drive",
+            resolution = if (width > 0 && height > 0) "$width x $height" else "Unknown",
+            durationSeconds = durationMillis?.div(1000L)?.toInt(),
+            isFavorite = localId in favoriteIds,
+            backupState = BackupState.COMPLETED,
+            backupCompleted = true,
+            thumbnailSeed = localId.hashCode(),
+            albumId = albumId,
+            albumName = albumName,
+            uri = preview,
+            mimeType = mimeType,
+            width = width,
+            height = height,
+            durationMillis = durationMillis,
+            remoteMediaId = remoteMediaId.takeIf { it.isNotBlank() } ?: record?.remoteMediaId,
+            thumbnailUrl = preview,
+            originLocal = false,
+            hiddenFromLibrary = false
+        )
+    }
+
+    private fun lookupDeviceItem(id: String): MediaItem? =
+        _deviceMedia.value.firstOrNull { it.id == id }
+            ?: _media.value.firstOrNull { it.id == id && it.originLocal }
+
+    private fun lookupAnyItem(id: String): MediaItem? =
+        _media.value.firstOrNull { it.id == id }
+            ?: _deviceMedia.value.firstOrNull { it.id == id }
+            ?: _trashedMedia.value.firstOrNull { it.id == id }
 
     fun retryBackup(id: String) { syncRepository.retry(id) }
 
     suspend fun deleteMediaWithResult(context: Context, id: String): DeleteMediaResult = withContext(Dispatchers.IO) {
-        val item = _media.value.firstOrNull { it.id == id }
+        val item = lookupDeviceItem(id)
         if (item == null) {
             DeveloperLogger.info(
                 LogCategory.MEDIASTORE,
@@ -548,13 +776,71 @@ class MediaRepository(
 
     suspend fun finalizeLocalDelete(id: String): Boolean = withContext(Dispatchers.IO) {
         locallyHiddenIds += id
-        val existed = _media.value.any { it.id == id }
-        _media.update { items -> items.filter { it.id != id } }
-        favorites.retainAll(_media.value.mapTo(HashSet()) { it.id })
-        rebuildAlbums()
-        // Local MediaStore/Room refresh only. Supabase media_assets and archive data remain untouched.
+        val existedOnDevice = _deviceMedia.value.any { it.id == id }
+        _deviceMedia.update { items -> items.filter { it.id != id } }
+        rememberCloudCopy(id)
+        // Local MediaStore/Room refresh only. user_hidden_at, media_assets, and archive data remain untouched.
         refresh(force = true)
-        existed || !_media.value.any { it.id == id }
+        existedOnDevice || _media.value.any { it.id == id } || !_deviceMedia.value.any { it.id == id }
+    }
+
+    suspend fun hideFromMyDrive(id: String): RemoveFromLibraryResult = withContext(Dispatchers.IO) {
+        val item = lookupAnyItem(id) ?: return@withContext RemoveFromLibraryResult.NotFound
+        val record = syncRepository.records.value[id]
+        val remoteId = item.remoteMediaId ?: record?.remoteMediaId
+        val result = mediaAssetsRepository.hideMatchingAsset(
+            remoteMediaId = remoteId,
+            localMediaId = item.mediaStoreId.takeIf { it > 0L },
+            clientUploadId = record?.clientUploadId
+        )
+        val keepLocalHide = when (result) {
+            HideMediaResult.Success -> true
+            HideMediaResult.NotFound -> remoteId.isNullOrBlank()
+            HideMediaResult.Unauthorized -> false
+            HideMediaResult.Failed -> false
+        }
+        if (keepLocalHide) {
+            visibilityStore.hideLocal(id)
+            _media.update { items -> items.filter { it.id != id } }
+            rebuildAlbums()
+        }
+        when (result) {
+            HideMediaResult.Success -> {
+                DeveloperLogger.info(
+                    LogCategory.DATABASE,
+                    "MEDIA_HIDDEN_FROM_LIBRARY",
+                    "Hidden from My Drive library via user_hidden_at; device and archive unchanged",
+                    localMediaId = id,
+                    metadata = mapOf(
+                        "remote_media_id" to remoteId,
+                        "status_changed" to "false",
+                        "deleted_at_changed" to "false"
+                    )
+                )
+                RemoveFromLibraryResult.Success
+            }
+            HideMediaResult.NotFound -> if (keepLocalHide) RemoveFromLibraryResult.Success else RemoveFromLibraryResult.NotFound
+            HideMediaResult.Unauthorized -> RemoveFromLibraryResult.Unauthorized
+            HideMediaResult.Failed -> RemoveFromLibraryResult.Failed
+        }
+    }
+
+    suspend fun unhideFromMyDrive(id: String): RemoveFromLibraryResult = withContext(Dispatchers.IO) {
+        val item = lookupAnyItem(id)
+        val record = syncRepository.records.value[id]
+        visibilityStore.unhideLocal(id)
+        val result = mediaAssetsRepository.unhideMatchingAsset(
+            remoteMediaId = item?.remoteMediaId ?: record?.remoteMediaId,
+            localMediaId = item?.mediaStoreId?.takeIf { it > 0L },
+            clientUploadId = record?.clientUploadId
+        )
+        refresh(force = true)
+        when (result) {
+            HideMediaResult.Success -> RemoveFromLibraryResult.Success
+            HideMediaResult.NotFound -> RemoveFromLibraryResult.NotFound
+            HideMediaResult.Unauthorized -> RemoveFromLibraryResult.Unauthorized
+            HideMediaResult.Failed -> RemoveFromLibraryResult.Failed
+        }
     }
 
     suspend fun restoreTrashedMedia(context: Context, id: String): TrashMutationResult = withContext(Dispatchers.IO) {
@@ -795,7 +1081,7 @@ class MediaRepository(
     }
 
     suspend fun copyMedia(context: Context, id: String, destFolderUri: Uri): Boolean = withContext(Dispatchers.IO) {
-        val item = _media.value.firstOrNull { it.id == id } ?: return@withContext false
+        val item = lookupDeviceItem(id) ?: return@withContext false
         val sourceUri = Uri.parse(item.uri)
         try {
             val mimeType = item.mimeType.ifBlank { if (item.type == MediaType.VIDEO) "video/*" else "image/*" }
@@ -827,7 +1113,7 @@ class MediaRepository(
     }
 
     suspend fun renameMedia(context: Context, id: String, newName: String): Boolean = withContext(Dispatchers.IO) {
-        val item = _media.value.firstOrNull { it.id == id } ?: return@withContext false
+        val item = lookupDeviceItem(id) ?: return@withContext false
         var trimmed = newName.trim()
         if (trimmed.isBlank()) return@withContext false
 
@@ -851,6 +1137,9 @@ class MediaRepository(
 
         if (updated) {
             val updatedItem = item.copy(filename = trimmed)
+            _deviceMedia.update { items ->
+                items.map { if (it.id == id) updatedItem else it }
+            }
             _media.update { items ->
                 items.map { if (it.id == id) updatedItem else it }
             }
@@ -861,7 +1150,7 @@ class MediaRepository(
     }
 
     suspend fun rotateMedia(context: Context, id: String, degrees: Float): Boolean = withContext(Dispatchers.IO) {
-        val item = _media.value.firstOrNull { it.id == id } ?: return@withContext false
+        val item = lookupDeviceItem(id) ?: return@withContext false
         if (item.type != MediaType.PHOTO) return@withContext false
         val uri = Uri.parse(item.uri)
         try {
@@ -903,20 +1192,19 @@ class MediaRepository(
 
             if (written) {
                 val swap = degrees == 90f || degrees == -90f || degrees == 270f || degrees == -270f
-                _media.update { items ->
-                    items.map { current ->
-                        if (current.id == id) {
-                            val newW = if (swap) current.height else current.width
-                            val newH = if (swap) current.width else current.height
-                            current.copy(
-                                width = newW,
-                                height = newH,
-                                resolution = if (newW > 0 && newH > 0) "$newW x $newH" else current.resolution,
-                                dateModifiedMillis = System.currentTimeMillis()
-                            )
-                        } else current
-                    }
+                fun applyRotation(current: MediaItem): MediaItem {
+                    if (current.id != id) return current
+                    val newW = if (swap) current.height else current.width
+                    val newH = if (swap) current.width else current.height
+                    return current.copy(
+                        width = newW,
+                        height = newH,
+                        resolution = if (newW > 0 && newH > 0) "$newW x $newH" else current.resolution,
+                        dateModifiedMillis = System.currentTimeMillis()
+                    )
                 }
+                _deviceMedia.update { items -> items.map(::applyRotation) }
+                _media.update { items -> items.map(::applyRotation) }
                 com.mydrive.app.data.media.FullImageLoader.clearCache()
             }
             written

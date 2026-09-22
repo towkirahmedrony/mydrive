@@ -111,7 +111,7 @@ fun MediaDetailsScreen(
                 contentAlignment = Alignment.Center
             ) {
                 MediaImage(
-                    uri = item.uri,
+                    uri = item.displayUri,
                     seed = item.thumbnailSeed,
                     type = item.type,
                     modifier = Modifier.fillMaxSize(),

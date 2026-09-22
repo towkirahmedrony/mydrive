@@ -98,20 +98,20 @@ fun ZoomablePhoto(
 
     var bitmap by remember(item.id) {
         mutableStateOf(
-            FullImageLoader.peek(item.uri)
-                ?: ThumbnailLoader.peek(item.uri, placeholderPx)
-                ?: ThumbnailLoader.peek(item.uri, 256)
+            FullImageLoader.peek(item.displayUri)
+                ?: ThumbnailLoader.peek(item.displayUri, placeholderPx)
+                ?: ThumbnailLoader.peek(item.displayUri, 256)
         )
     }
 
     LaunchedEffect(item.id, placeholderPx) {
-        if (item.uri.isBlank()) {
+        if (item.displayUri.isBlank()) {
             loadFailed = true
             latestOnUnavailable()
             return@LaunchedEffect
         }
         if (bitmap == null) {
-            val loaded = ThumbnailLoader.load(context, item.uri, placeholderPx)
+            val loaded = ThumbnailLoader.load(context, item.displayUri, placeholderPx)
             if (loaded != null) {
                 bitmap = loaded
             }
@@ -119,8 +119,8 @@ fun ZoomablePhoto(
     }
 
     LaunchedEffect(item.id, fullTargetPx) {
-        if (item.uri.isBlank() || fullTargetPx <= 0) return@LaunchedEffect
-        val full = FullImageLoader.load(context, item.uri, fullTargetPx)
+        if (item.displayUri.isBlank() || fullTargetPx <= 0) return@LaunchedEffect
+        val full = FullImageLoader.load(context, item.displayUri, fullTargetPx)
         if (full != null) {
             bitmap = full
         } else if (bitmap == null) {
