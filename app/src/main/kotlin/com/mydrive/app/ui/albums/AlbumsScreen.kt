@@ -18,12 +18,15 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.DeleteOutline
 import androidx.compose.material.icons.outlined.PhotoLibrary
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material3.Icon
@@ -50,13 +53,16 @@ import com.mydrive.app.ui.components.AlbumCard
 import com.mydrive.app.ui.components.EmptyState
 import com.mydrive.app.ui.components.SearchField
 import com.mydrive.app.ui.permission.MediaPermissionScreen
+import com.mydrive.app.ui.theme.CardShape
 import com.mydrive.app.ui.theme.Copper
 import com.mydrive.app.ui.theme.Spacing
+import com.mydrive.app.ui.util.formatFileSize
 
 @Composable
 fun AlbumsScreen(
     viewModel: AlbumsViewModel,
-    onAlbumClick: (String) -> Unit
+    onAlbumClick: (String) -> Unit,
+    onTrashClick: () -> Unit
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     var searchOpen by rememberSaveable { mutableStateOf(false) }
@@ -143,46 +149,52 @@ fun AlbumsScreen(
             )
         }
 
-        when {
-            state.isLoading && state.albums.isEmpty() && state.query.isBlank() -> {
-                EmptyState(
-                    title = "No albums found",
-                    message = "Albums from your device will appear here.",
-                    icon = Icons.Outlined.PhotoLibrary
-                )
-            }
-            state.errorMessage != null && state.albums.isEmpty() -> {
-                EmptyState(
-                    title = "Couldn't load albums",
-                    message = state.errorMessage ?: "Please try again.",
-                    icon = Icons.Outlined.PhotoLibrary
-                )
-            }
-            state.albums.isEmpty() -> {
-                EmptyState(
-                    title = "No albums found",
-                    message = if (state.query.isNotBlank()) {
-                        "No matches for that name."
-                    } else {
-                        "Albums from your device will appear here."
-                    },
-                    icon = Icons.Outlined.PhotoLibrary
-                )
-            }
-            else -> {
-                LazyVerticalGrid(
-                    columns = GridCells.Fixed(2),
-                    state = gridState,
-                    modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(
-                        start = Spacing.md,
-                        end = Spacing.md,
-                        top = Spacing.xs,
-                        bottom = Spacing.lg
-                    ),
-                    horizontalArrangement = Arrangement.spacedBy(Spacing.sm),
-                    verticalArrangement = Arrangement.spacedBy(Spacing.md)
-                ) {
+        LazyVerticalGrid(
+            columns = GridCells.Fixed(2),
+            state = gridState,
+            modifier = Modifier.weight(1f),
+            contentPadding = PaddingValues(
+                start = Spacing.md,
+                end = Spacing.md,
+                top = Spacing.xs,
+                bottom = Spacing.sm
+            ),
+            horizontalArrangement = Arrangement.spacedBy(Spacing.sm),
+            verticalArrangement = Arrangement.spacedBy(Spacing.md)
+        ) {
+            when {
+                state.isLoading && state.albums.isEmpty() && state.query.isBlank() -> {
+                    item(key = "empty-loading", span = { GridItemSpan(2) }) {
+                        EmptyState(
+                            title = "No albums found",
+                            message = "Albums from your device will appear here.",
+                            icon = Icons.Outlined.PhotoLibrary
+                        )
+                    }
+                }
+                state.errorMessage != null && state.albums.isEmpty() -> {
+                    item(key = "empty-error", span = { GridItemSpan(2) }) {
+                        EmptyState(
+                            title = "Couldn't load albums",
+                            message = state.errorMessage ?: "Please try again.",
+                            icon = Icons.Outlined.PhotoLibrary
+                        )
+                    }
+                }
+                state.albums.isEmpty() -> {
+                    item(key = "empty-albums", span = { GridItemSpan(2) }) {
+                        EmptyState(
+                            title = "No albums found",
+                            message = if (state.query.isNotBlank()) {
+                                "No matches for that name."
+                            } else {
+                                "Albums from your device will appear here."
+                            },
+                            icon = Icons.Outlined.PhotoLibrary
+                        )
+                    }
+                }
+                else -> {
                     items(state.albums, key = { it.id }) { album ->
                         AlbumCard(
                             album = album,
@@ -191,6 +203,72 @@ fun AlbumsScreen(
                     }
                 }
             }
+        }
+        if (state.query.isBlank()) {
+            TrashAlbumEntry(
+                count = state.trashCount,
+                sizeBytes = state.trashSizeBytes,
+                onClick = onTrashClick,
+                modifier = Modifier.padding(horizontal = Spacing.md, vertical = Spacing.sm)
+            )
+        }
+    }
+}
+
+@Composable
+private fun TrashAlbumEntry(
+    count: Int,
+    sizeBytes: Long,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val colors = MaterialTheme.colorScheme
+    val subtitle = buildString {
+        append(if (count == 1) "1 item" else "$count items")
+        if (sizeBytes > 0L) {
+            append(" · ")
+            append(formatFileSize(sizeBytes))
+        }
+    }
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .clip(CardShape)
+            .background(colors.surfaceVariant)
+            .border(1.dp, colors.outlineVariant, CardShape)
+            .clickable(onClick = onClick)
+            .padding(horizontal = Spacing.md, vertical = Spacing.sm),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(
+            modifier = Modifier
+                .size(44.dp)
+                .clip(RoundedCornerShape(12.dp))
+                .background(colors.background),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                imageVector = Icons.Outlined.DeleteOutline,
+                contentDescription = null,
+                tint = colors.onSurfaceVariant,
+                modifier = Modifier.size(22.dp)
+            )
+        }
+        Column(
+            modifier = Modifier
+                .weight(1f)
+                .padding(start = Spacing.md)
+        ) {
+            Text(
+                text = "Trash",
+                style = MaterialTheme.typography.titleSmall,
+                color = colors.onBackground
+            )
+            Text(
+                text = subtitle,
+                style = MaterialTheme.typography.labelSmall,
+                color = colors.onSurfaceVariant
+            )
         }
     }
 }

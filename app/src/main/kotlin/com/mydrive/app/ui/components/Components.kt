@@ -1,8 +1,10 @@
 package com.mydrive.app.ui.components
 
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -26,6 +28,7 @@ import androidx.compose.material.icons.outlined.CloudDone
 import androidx.compose.material.icons.outlined.CloudQueue
 import androidx.compose.material.icons.outlined.CloudUpload
 import androidx.compose.material.icons.outlined.ErrorOutline
+import androidx.compose.material.icons.outlined.CheckCircle
 import androidx.compose.material.icons.outlined.Favorite
 import androidx.compose.material.icons.outlined.Inbox
 import androidx.compose.material.icons.outlined.PlayArrow
@@ -194,13 +197,23 @@ fun BackupStateChip(state: BackupState, modifier: Modifier = Modifier) {
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun MediaThumb(
     item: MediaItem,
     modifier: Modifier = Modifier,
-    onClick: (() -> Unit)? = null
+    onClick: (() -> Unit)? = null,
+    onLongClick: (() -> Unit)? = null,
+    selected: Boolean = false,
+    showStatusOverlays: Boolean = true
 ) {
-    val clickMod = if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier
+    val clickMod = when {
+        onClick != null || onLongClick != null -> Modifier.combinedClickable(
+            onClick = { onClick?.invoke() },
+            onLongClick = { onLongClick?.invoke() }
+        )
+        else -> Modifier
+    }
     val description = if (item.type == MediaType.VIDEO) {
         "Video ${item.filename}"
     } else {
@@ -257,7 +270,7 @@ fun MediaThumb(
                 }
             }
         }
-        if (item.isFavorite) {
+        if (showStatusOverlays && item.isFavorite) {
             Icon(
                 Icons.Outlined.Favorite,
                 contentDescription = "Favorite",
@@ -268,12 +281,30 @@ fun MediaThumb(
                     .size(14.dp)
             )
         }
-        Box(
-            modifier = Modifier
-                .align(Alignment.TopStart)
-                .padding(Spacing.xs)
-        ) {
-            MiniSyncDot(item.backupState)
+        if (showStatusOverlays) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .padding(Spacing.xs)
+            ) {
+                MiniSyncDot(item.backupState)
+            }
+        }
+        if (selected) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Ink.copy(alpha = 0.42f))
+            )
+            Icon(
+                Icons.Outlined.CheckCircle,
+                contentDescription = "Selected",
+                tint = Copper,
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(Spacing.xs)
+                    .size(22.dp)
+            )
         }
     }
 }

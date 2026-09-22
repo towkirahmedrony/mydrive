@@ -76,6 +76,10 @@ import com.mydrive.app.ui.sync.SyncScreen
 import com.mydrive.app.ui.sync.SyncViewModel
 import com.mydrive.app.ui.theme.Copper
 import com.mydrive.app.ui.theme.Radius
+import com.mydrive.app.ui.trash.TrashScreen
+import com.mydrive.app.ui.trash.TrashViewModel
+import com.mydrive.app.ui.trash.TrashViewerScreen
+import com.mydrive.app.ui.trash.TrashViewerViewModel
 import kotlin.math.roundToInt
 
 private data class TabItem(
@@ -105,7 +109,8 @@ fun AppNavHost(
     val navController = rememberNavController()
     val navBackStackEntry by navController.currentBackStackEntryAsState()
     val currentDestination = navBackStackEntry?.destination
-    val isViewer = currentDestination?.route?.startsWith("viewer") == true
+    val isViewer = currentDestination?.route?.startsWith("viewer") == true ||
+        currentDestination?.route?.startsWith("trash-viewer") == true
     val isDeveloperConsole = currentDestination?.route == AppDestination.DeveloperConsole.route
     val showBottomBar = !isViewer && !isDeveloperConsole && currentDestination?.route in bottomDestinations.map { it.route }
     val colors = MaterialTheme.colorScheme
@@ -189,7 +194,8 @@ fun AppNavHost(
                 val vm: AlbumsViewModel = viewModel(factory = AlbumsViewModel.factory(repository))
                 AlbumsScreen(
                     viewModel = vm,
-                    onAlbumClick = { id -> navController.navigate(AppDestination.AlbumDetail.create(id)) }
+                    onAlbumClick = { id -> navController.navigate(AppDestination.AlbumDetail.create(id)) },
+                    onTrashClick = { navController.navigate(AppDestination.Trash.route) }
                 )
             }
             composable(AppDestination.Sync.route) {
@@ -257,6 +263,31 @@ fun AppNavHost(
                         repository.beginViewerSession(vm.visibleItemIds())
                         navController.navigate(AppDestination.MediaViewer.create(id, albumId))
                     }
+                )
+            }
+            composable(AppDestination.Trash.route) {
+                val app = LocalContext.current.applicationContext as MyDriveApp
+                val vm: TrashViewModel = viewModel(factory = TrashViewModel.factory(repository, app))
+                TrashScreen(
+                    viewModel = vm,
+                    onBack = { navController.popBackStack() },
+                    onMediaClick = { id ->
+                        navController.navigate(AppDestination.TrashViewer.create(id))
+                    }
+                )
+            }
+            composable(
+                route = AppDestination.TrashViewer.route,
+                arguments = listOf(navArgument("mediaId") { type = NavType.StringType })
+            ) { entry ->
+                val mediaId = android.net.Uri.decode(entry.arguments?.getString("mediaId").orEmpty())
+                val app = LocalContext.current.applicationContext as MyDriveApp
+                val vm: TrashViewerViewModel = viewModel(
+                    factory = TrashViewerViewModel.factory(repository, mediaId, app)
+                )
+                TrashViewerScreen(
+                    viewModel = vm,
+                    onBack = { navController.popBackStack() }
                 )
             }
             composable(AppDestination.TelegramSettings.route) {

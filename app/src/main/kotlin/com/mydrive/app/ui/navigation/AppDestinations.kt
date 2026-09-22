@@ -21,6 +21,10 @@ sealed class AppDestination(val route: String) {
     data object AlbumDetail : AppDestination("album/{albumId}") {
         fun create(albumId: String) = "album/${Uri.encode(albumId)}"
     }
+    data object Trash : AppDestination("trash")
+    data object TrashViewer : AppDestination("trash-viewer/{mediaId}") {
+        fun create(mediaId: String) = "trash-viewer/${Uri.encode(mediaId)}"
+    }
     data object TelegramSettings : AppDestination("settings/telegram")
     data object DeveloperConsole : AppDestination("settings/developer-console")
 }

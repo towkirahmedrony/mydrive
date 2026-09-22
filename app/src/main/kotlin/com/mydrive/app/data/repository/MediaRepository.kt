@@ -34,6 +34,7 @@ import com.mydrive.app.data.model.SyncSummary
 import com.mydrive.app.data.model.TelegramSettings
 import com.mydrive.app.data.model.TelegramConnectionState
 import com.mydrive.app.data.model.TodayStats
+import com.mydrive.app.data.model.TrashSummary
 import com.mydrive.app.data.model.UserProfile
 import com.mydrive.app.data.model.isActive
 import com.mydrive.app.data.remote.TelegramApiVerifier
@@ -63,6 +64,24 @@ sealed class DeleteMediaResult {
     data object Failed : DeleteMediaResult()
 }
 
+sealed class TrashMutationResult {
+    data object Success : TrashMutationResult()
+    data class RequiresSystemConfirmation(
+        val intentSender: IntentSender,
+        val alreadyPerformedOnApproval: Boolean
+    ) : TrashMutationResult()
+    data object NotFound : TrashMutationResult()
+    data object PermissionDenied : TrashMutationResult()
+    data object Failed : TrashMutationResult()
+    data object Unsupported : TrashMutationResult()
+}
+
+data class TrashOperationProgress(
+    val inProgress: Boolean = false,
+    val processed: Int = 0,
+    val total: Int = 0
+)
+
 class MediaRepository(
     private val mediaStore: MediaStoreDataSource,
     private val favorites: FavoritesStore,
@@ -78,6 +97,15 @@ class MediaRepository(
 
     private val _albums = MutableStateFlow<List<AlbumFolder>>(emptyList())
     val albums: StateFlow<List<AlbumFolder>> = _albums.asStateFlow()
+
+    private val _trashedMedia = MutableStateFlow<List<MediaItem>>(emptyList())
+    val trashedMedia: StateFlow<List<MediaItem>> = _trashedMedia.asStateFlow()
+
+    private val _trashSummary = MutableStateFlow(TrashSummary())
+    val trashSummary: StateFlow<TrashSummary> = _trashSummary.asStateFlow()
+
+    private val _trashProgress = MutableStateFlow(TrashOperationProgress())
+    val trashProgress: StateFlow<TrashOperationProgress> = _trashProgress.asStateFlow()
 
     private val _loadState = MutableStateFlow(initialLoadState())
     val loadState: StateFlow<MediaLoadState> = _loadState.asStateFlow()
@@ -130,10 +158,17 @@ class MediaRepository(
     private var viewerSessionIds: List<String>? = null
 
     fun mediaById(id: String): MediaItem? = _media.value.firstOrNull { it.id == id }
+    fun trashedMediaById(id: String): MediaItem? = _trashedMedia.value.firstOrNull { it.id == id }
     fun albumById(id: String): AlbumFolder? = _albums.value.firstOrNull { it.id == id }
     fun albums(): List<AlbumFolder> = _albums.value
     fun beginViewerSession(ids: List<String>) { viewerSessionIds = ids }
     fun viewerSessionIds(): List<String>? = viewerSessionIds
+    fun mediaForTrashViewer(startId: String): List<MediaItem> {
+        val current = _trashedMedia.value
+        if (current.any { it.id == startId }) return current
+        val start = current.firstOrNull { it.id == startId } ?: trashedMediaById(startId)
+        return if (start != null) listOf(start) else current
+    }
 
     fun mediaForViewer(startId: String, albumId: String?): List<MediaItem> {
         val current = _media.value
@@ -190,6 +225,7 @@ class MediaRepository(
             applyAccessState()
             if (!permissions.canReadMedia()) {
                 _media.value = emptyList(); _albums.value = emptyList(); _storage.value = StorageSummary(0, 0, 0, 0)
+                publishTrash(emptyList())
                 _loadState.update { it.copy(isLoading = false, errorMessage = null) }
                 return
             }
@@ -198,8 +234,10 @@ class MediaRepository(
             try {
                 val favoriteIds = favorites.ids.value
                 val scanned = mediaStore.loadMedia()
+                val trashed = mediaStore.loadTrashedMedia()
                 val scannedIds = scanned.mapTo(HashSet(scanned.size)) { it.id }
-                locallyHiddenIds.removeAll { it !in scannedIds }
+                val trashedIds = trashed.mapTo(HashSet(trashed.size)) { it.id }
+                locallyHiddenIds.removeAll { it !in scannedIds && it !in trashedIds }
                 val items = scanned
                     .filter { it.id !in locallyHiddenIds }
                     .map { item -> item.copy(isFavorite = item.id in favoriteIds) }
@@ -208,17 +246,19 @@ class MediaRepository(
                     val presentIds = withContext(Dispatchers.Default) { items.mapTo(HashSet(items.size)) { it.id } }
                     favorites.retainAll(presentIds)
                     // Keep local backup metadata for items only moved to device Trash.
-                    syncRepository.reconcile(presentIds + locallyHiddenIds)
+                    syncRepository.reconcile(presentIds + locallyHiddenIds + trashedIds)
                 }
                 val records = syncRepository.records.value
                 val merged = items.map { it.withRecord(records[it.id]) }
                 _media.value = merged; _albums.value = buildAlbums(merged); lastRefreshAt = now; updateStorage(merged)
+                publishTrash(trashed)
                 _loadState.update { it.copy(isLoading = false, errorMessage = null) }
             } catch (_: MediaQueryException) {
                 val keepExisting = _media.value.isNotEmpty()
                 _loadState.update { it.copy(isLoading = false, errorMessage = if (keepExisting) null else "Couldn't load your photos and videos.") }
             } catch (_: SecurityException) {
                 applyAccessState(); _media.value = emptyList(); _albums.value = emptyList()
+                publishTrash(emptyList())
                 _loadState.update { it.copy(isLoading = false, errorMessage = null) }
             }
         }
@@ -515,6 +555,216 @@ class MediaRepository(
         // Local MediaStore/Room refresh only. Supabase media_assets and archive data remain untouched.
         refresh(force = true)
         existed || !_media.value.any { it.id == id }
+    }
+
+    suspend fun restoreTrashedMedia(context: Context, id: String): TrashMutationResult = withContext(Dispatchers.IO) {
+        mutateTrashedMedia(context, id, restore = true)
+    }
+
+    suspend fun permanentlyDeleteTrashedMedia(context: Context, id: String): TrashMutationResult = withContext(Dispatchers.IO) {
+        mutateTrashedMedia(context, id, restore = false)
+    }
+
+    suspend fun restoreTrashedMedia(context: Context, ids: Collection<String>): TrashMutationResult = withContext(Dispatchers.IO) {
+        mutateTrashedMediaBatch(context, ids, restore = true)
+    }
+
+    suspend fun permanentlyDeleteTrashedMedia(context: Context, ids: Collection<String>): TrashMutationResult = withContext(Dispatchers.IO) {
+        mutateTrashedMediaBatch(context, ids, restore = false)
+    }
+
+    suspend fun emptyTrash(context: Context): TrashMutationResult = withContext(Dispatchers.IO) {
+        val ids = _trashedMedia.value.map { it.id }
+        if (ids.isEmpty()) return@withContext TrashMutationResult.Success
+        mutateTrashedMediaBatch(context, ids, restore = false)
+    }
+
+    suspend fun finalizeTrashRestore(ids: Collection<String>) = withContext(Dispatchers.IO) {
+        if (ids.isEmpty()) return@withContext
+        val idSet = ids.toSet()
+        locallyHiddenIds.removeAll(idSet)
+        _trashedMedia.update { items -> items.filter { it.id !in idSet } }
+        publishTrash(_trashedMedia.value)
+        // Restore is local MediaStore only. Supabase media_assets remains untouched.
+        refresh(force = true)
+    }
+
+    suspend fun finalizePermanentTrashDelete(ids: Collection<String>) = withContext(Dispatchers.IO) {
+        if (ids.isEmpty()) return@withContext
+        val idSet = ids.toSet()
+        locallyHiddenIds.removeAll(idSet)
+        _trashedMedia.update { items -> items.filter { it.id !in idSet } }
+        publishTrash(_trashedMedia.value)
+        // Permanent local delete only. Supabase media_assets and archive data remain untouched.
+        refresh(force = true)
+    }
+
+    private fun publishTrash(items: List<MediaItem>) {
+        _trashedMedia.value = items
+        _trashSummary.value = TrashSummary(
+            count = items.size,
+            totalSizeBytes = items.sumOf { it.fileSizeBytes.coerceAtLeast(0L) }
+        )
+    }
+
+    private fun mutateTrashedMedia(context: Context, id: String, restore: Boolean): TrashMutationResult {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return TrashMutationResult.Unsupported
+        val item = _trashedMedia.value.firstOrNull { it.id == id }
+        if (item == null) return TrashMutationResult.NotFound
+        val uri = parseContentUri(item.uri) ?: return TrashMutationResult.Failed
+        if (!permissions.canReadMedia()) return TrashMutationResult.PermissionDenied
+        val action = if (restore) "RESTORE" else "PERMANENT_DELETE"
+        val baseMeta = mediaActionMetadata(action, item)
+        return try {
+            if (restore) {
+                if (tryDirectRestore(context, uri)) {
+                    logTrashMutation(item, baseMeta, "direct_restore", "SUCCESS")
+                    TrashMutationResult.Success
+                } else {
+                    requestTrashMutationConfirmation(context, listOf(uri), restore, item, baseMeta, null)
+                }
+            } else {
+                requestTrashMutationConfirmation(context, listOf(uri), restore, item, baseMeta, null)
+            }
+        } catch (error: RecoverableSecurityException) {
+            requestTrashMutationConfirmation(context, listOf(uri), restore, item, baseMeta, error)
+        } catch (error: SecurityException) {
+            requestTrashMutationConfirmation(context, listOf(uri), restore, item, baseMeta, error)
+        } catch (error: FileNotFoundException) {
+            logMediaActionFailure(action, item, error, baseMeta + mapOf("result" to "NOT_FOUND"))
+            TrashMutationResult.NotFound
+        } catch (error: Exception) {
+            logMediaActionFailure(action, item, error, baseMeta + mapOf("result" to "FAILED"))
+            TrashMutationResult.Failed
+        }
+    }
+
+    private fun mutateTrashedMediaBatch(
+        context: Context,
+        ids: Collection<String>,
+        restore: Boolean
+    ): TrashMutationResult {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return TrashMutationResult.Unsupported
+        val uniqueIds = ids.distinct()
+        if (uniqueIds.isEmpty()) return TrashMutationResult.Success
+        if (!permissions.canReadMedia()) return TrashMutationResult.PermissionDenied
+        val items = uniqueIds.mapNotNull { id -> _trashedMedia.value.firstOrNull { it.id == id } }
+        if (items.isEmpty()) return TrashMutationResult.NotFound
+        val uris = items.mapNotNull { parseContentUri(it.uri) }
+        if (uris.isEmpty()) return TrashMutationResult.Failed
+        val action = if (restore) "RESTORE" else "PERMANENT_DELETE"
+        val sample = items.first()
+        val baseMeta = mediaActionMetadata(action, sample) + mapOf("item_count" to items.size.toString())
+        _trashProgress.value = TrashOperationProgress(inProgress = true, processed = 0, total = items.size)
+        return try {
+            if (restore) {
+                val remaining = mutableListOf<Uri>()
+                var restored = 0
+                for (uri in uris) {
+                    if (tryDirectRestore(context, uri)) restored += 1 else remaining += uri
+                }
+                if (remaining.isEmpty()) {
+                    logTrashMutation(sample, baseMeta, "direct_restore_batch", "SUCCESS")
+                    _trashProgress.value = TrashOperationProgress()
+                    TrashMutationResult.Success
+                } else {
+                    requestTrashMutationConfirmation(context, remaining, restore = true, sample, baseMeta, null)
+                }
+            } else {
+                requestTrashMutationConfirmation(context, uris, restore = false, sample, baseMeta, null)
+            }
+        } catch (error: RecoverableSecurityException) {
+            requestTrashMutationConfirmation(context, uris, restore, sample, baseMeta, error)
+        } catch (error: SecurityException) {
+            requestTrashMutationConfirmation(context, uris, restore, sample, baseMeta, error)
+        } catch (error: Exception) {
+            _trashProgress.value = TrashOperationProgress()
+            logMediaActionFailure(action, sample, error, baseMeta + mapOf("result" to "FAILED"))
+            TrashMutationResult.Failed
+        }
+    }
+
+    fun clearTrashProgress() {
+        _trashProgress.value = TrashOperationProgress()
+    }
+
+    private fun tryDirectRestore(context: Context, uri: Uri): Boolean {
+        val values = ContentValues().apply {
+            put(MediaStore.MediaColumns.IS_TRASHED, 0)
+        }
+        return try {
+            context.contentResolver.update(uri, values, null, null) > 0
+        } catch (_: SecurityException) {
+            false
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private fun requestTrashMutationConfirmation(
+        context: Context,
+        uris: List<Uri>,
+        restore: Boolean,
+        item: MediaItem,
+        baseMeta: Map<String, String?>,
+        error: Exception?
+    ): TrashMutationResult {
+        return try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                val pending = if (restore) {
+                    MediaStore.createTrashRequest(context.contentResolver, uris, false)
+                } else {
+                    MediaStore.createDeleteRequest(context.contentResolver, uris)
+                }
+                val flow = if (restore) "create_restore_request" else "create_delete_request"
+                logTrashMutation(item, baseMeta, flow, "REQUIRES_SYSTEM_CONFIRMATION", error)
+                TrashMutationResult.RequiresSystemConfirmation(pending.intentSender, alreadyPerformedOnApproval = true)
+            } else if (error is RecoverableSecurityException) {
+                logTrashMutation(item, baseMeta, "recoverable_security_intent", "REQUIRES_SYSTEM_CONFIRMATION", error)
+                TrashMutationResult.RequiresSystemConfirmation(error.userAction.actionIntent.intentSender, alreadyPerformedOnApproval = false)
+            } else {
+                _trashProgress.value = TrashOperationProgress()
+                TrashMutationResult.PermissionDenied
+            }
+        } catch (requestError: Exception) {
+            _trashProgress.value = TrashOperationProgress()
+            logMediaActionFailure(
+                if (restore) "RESTORE" else "PERMANENT_DELETE",
+                item,
+                requestError,
+                baseMeta + mapOf("result" to "FAILED")
+            )
+            TrashMutationResult.Failed
+        }
+    }
+
+    private fun parseContentUri(raw: String): Uri? {
+        if (raw.isBlank()) return null
+        val uri = runCatching { Uri.parse(raw) }.getOrNull() ?: return null
+        return if (uri.scheme == ContentResolver.SCHEME_CONTENT && !uri.authority.isNullOrBlank()) uri else null
+    }
+
+    private fun logTrashMutation(
+        item: MediaItem,
+        baseMeta: Map<String, String?>,
+        flow: String,
+        result: String,
+        error: Exception? = null
+    ) {
+        DeveloperLogger.info(
+            LogCategory.MEDIASTORE,
+            "MEDIA_TRASH_$result",
+            "Local MediaStore trash mutation: $flow",
+            localMediaId = item.id,
+            throwable = error,
+            metadata = baseMeta + mapOf(
+                "android_flow" to flow,
+                "operation" to flow,
+                "result" to result,
+                "exception_class" to error?.javaClass?.name,
+                "exception_message" to error?.message
+            )
+        )
     }
 
     suspend fun deleteMedia(context: Context, id: String): Boolean =

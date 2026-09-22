@@ -43,6 +43,18 @@ fun formatDateTime(millis: Long): String {
     return SimpleDateFormat("MMM d, yyyy · h:mm a", Locale.US).format(Date(millis))
 }
 
+fun formatTrashExpiry(expiresMillis: Long, now: Long = System.currentTimeMillis()): String? {
+    if (expiresMillis <= 0L) return null
+    val remaining = expiresMillis - now
+    if (remaining <= 0L) return null
+    val days = remaining / 86_400_000L
+    return when {
+        days >= 2L -> "$days days left"
+        days == 1L -> "1 day left"
+        else -> "Expires soon"
+    }
+}
+
 fun formatTimeAgo(millis: Long, now: Long = System.currentTimeMillis()): String {
     val diff = (now - millis).coerceAtLeast(0)
     val minutes = diff / 60_000

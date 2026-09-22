@@ -1,9 +1,11 @@
 package com.mydrive.app.data.media
 
+import android.content.ContentResolver
 import android.content.ContentUris
 import android.content.Context
 import android.net.Uri
 import android.os.Build
+import android.os.Bundle
 import android.os.ParcelFileDescriptor
 import android.provider.MediaStore
 import com.mydrive.app.data.local.UploadQueueEntity
@@ -52,6 +54,25 @@ class MediaStoreDataSource(context: Context) {
             )
         )
         items
+    }
+
+    suspend fun loadTrashedMedia(): List<MediaItem> = withContext(Dispatchers.IO) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+            return@withContext emptyList()
+        }
+        val photos = try {
+            queryTrashedCollection(imageCollection(), MediaType.PHOTO, "img")
+        } catch (_: MediaQueryException) {
+            emptyList()
+        }
+        val videos = try {
+            queryTrashedCollection(videoCollection(), MediaType.VIDEO, "vid")
+        } catch (_: MediaQueryException) {
+            emptyList()
+        }
+        (photos + videos).sortedByDescending { item ->
+            item.dateExpiresMillis.takeIf { it > 0L } ?: item.dateModifiedMillis
+        }
     }
 
     /**
@@ -153,17 +174,68 @@ class MediaStoreDataSource(context: Context) {
         }
     }
 
+    private fun queryTrashedCollection(
+        collection: Uri,
+        type: MediaType,
+        idPrefix: String
+    ): List<MediaItem> {
+        val expiresSort = "${MediaStore.MediaColumns.DATE_EXPIRES} DESC"
+        val modifiedSort = "${MediaStore.MediaColumns.DATE_MODIFIED} DESC"
+        val selection = "${MediaStore.MediaColumns.IS_TRASHED}=1"
+        return try {
+            queryWithProjection(
+                collection = collection,
+                type = type,
+                idPrefix = idPrefix,
+                projection = buildProjection(type, includeTrashColumns = true),
+                sortOrder = expiresSort,
+                selection = selection,
+                matchTrashedOnly = true
+            ) ?: queryWithProjection(
+                collection = collection,
+                type = type,
+                idPrefix = idPrefix,
+                projection = buildProjection(type, includeTrashColumns = true),
+                sortOrder = modifiedSort,
+                selection = selection,
+                matchTrashedOnly = true
+            ) ?: queryWithProjection(
+                collection = collection,
+                type = type,
+                idPrefix = idPrefix,
+                projection = minimalProjection(type, includeTrashColumns = true),
+                sortOrder = modifiedSort,
+                selection = selection,
+                matchTrashedOnly = true
+            ) ?: emptyList()
+        } catch (_: SecurityException) {
+            emptyList()
+        }
+    }
+
     private fun queryWithProjection(
         collection: Uri,
         type: MediaType,
         idPrefix: String,
         projection: Array<String>,
         sortOrder: String,
-        selection: String?
+        selection: String?,
+        matchTrashedOnly: Boolean = false
     ): List<MediaItem>? {
         val items = mutableListOf<MediaItem>()
         val cursor = try {
-            appContext.contentResolver.query(collection, projection, selection, null, sortOrder)
+            if (matchTrashedOnly && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                val args = Bundle().apply {
+                    putString(ContentResolver.QUERY_ARG_SQL_SELECTION, selection)
+                    putString(ContentResolver.QUERY_ARG_SQL_SORT_ORDER, sortOrder)
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                        putInt(MediaStore.QUERY_ARG_MATCH_TRASHED, MediaStore.MATCH_ONLY)
+                    }
+                }
+                appContext.contentResolver.query(collection, projection, args, null)
+            } else {
+                appContext.contentResolver.query(collection, projection, selection, null, sortOrder)
+            }
         } catch (_: SecurityException) {
             return emptyList()
         } catch (_: IllegalArgumentException) {
@@ -192,6 +264,16 @@ class MediaStoreDataSource(context: Context) {
             }
             val durationCol = if (type == MediaType.VIDEO) {
                 it.getColumnIndex(MediaStore.MediaColumns.DURATION)
+            } else {
+                -1
+            }
+            val expiresCol = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                it.getColumnIndex(MediaStore.MediaColumns.DATE_EXPIRES)
+            } else {
+                -1
+            }
+            val trashedCol = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                it.getColumnIndex(MediaStore.MediaColumns.IS_TRASHED)
             } else {
                 -1
             }
@@ -230,6 +312,8 @@ class MediaStoreDataSource(context: Context) {
                     } else {
                         null
                     }
+                    val dateExpiresSec = if (expiresCol >= 0) it.getLong(expiresCol) else 0L
+                    val isTrashed = matchTrashedOnly || (trashedCol >= 0 && it.getInt(trashedCol) == 1)
                     items += MediaItem(
                         id = "$idPrefix-$mediaStoreId",
                         mediaStoreId = mediaStoreId,
@@ -250,7 +334,9 @@ class MediaStoreDataSource(context: Context) {
                         relativePath = relativePath,
                         albumId = albumId,
                         albumName = albumName,
-                        thumbnailSeed = (mediaStoreId % Int.MAX_VALUE).toInt()
+                        thumbnailSeed = (mediaStoreId % Int.MAX_VALUE).toInt(),
+                        isTrashed = isTrashed,
+                        dateExpiresMillis = if (dateExpiresSec > 0L) dateExpiresSec * 1000L else 0L
                     )
                 } catch (_: Exception) {
                 }
@@ -259,7 +345,7 @@ class MediaStoreDataSource(context: Context) {
         return items
     }
 
-    private fun buildProjection(type: MediaType): Array<String> {
+    private fun buildProjection(type: MediaType, includeTrashColumns: Boolean = false): Array<String> {
         val columns = mutableListOf(
             MediaStore.MediaColumns._ID,
             MediaStore.MediaColumns.DISPLAY_NAME,
@@ -279,10 +365,11 @@ class MediaStoreDataSource(context: Context) {
         if (type == MediaType.VIDEO) {
             columns += MediaStore.MediaColumns.DURATION
         }
+        appendTrashColumns(columns, includeTrashColumns)
         return columns.toTypedArray()
     }
 
-    private fun minimalProjection(type: MediaType): Array<String> {
+    private fun minimalProjection(type: MediaType, includeTrashColumns: Boolean = false): Array<String> {
         val columns = mutableListOf(
             MediaStore.MediaColumns._ID,
             MediaStore.MediaColumns.DISPLAY_NAME,
@@ -294,7 +381,18 @@ class MediaStoreDataSource(context: Context) {
         if (type == MediaType.VIDEO) {
             columns += MediaStore.MediaColumns.DURATION
         }
+        appendTrashColumns(columns, includeTrashColumns)
         return columns.toTypedArray()
+    }
+
+    private fun appendTrashColumns(columns: MutableList<String>, includeTrashColumns: Boolean) {
+        if (!includeTrashColumns) return
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            columns += MediaStore.MediaColumns.IS_TRASHED
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            columns += MediaStore.MediaColumns.DATE_EXPIRES
+        }
     }
 
     private fun albumNameFromPath(relativePath: String?): String? {

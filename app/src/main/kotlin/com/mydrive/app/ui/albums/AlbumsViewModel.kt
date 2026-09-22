@@ -22,7 +22,9 @@ data class AlbumsUiState(
     val needsPermission: Boolean = false,
     val permissionDenied: Boolean = false,
     val errorMessage: String? = null,
-    val hasAlbums: Boolean = false
+    val hasAlbums: Boolean = false,
+    val trashCount: Int = 0,
+    val trashSizeBytes: Long = 0L
 )
 
 class AlbumsViewModel(
@@ -38,8 +40,9 @@ class AlbumsViewModel(
     val uiState: StateFlow<AlbumsUiState> = combine(
         repository.albums,
         repository.loadState,
+        repository.trashSummary,
         query
-    ) { albums, load, currentQuery ->
+    ) { albums, load, trash, currentQuery ->
         val filtered = albums.filter { album ->
             currentQuery.isBlank() || album.name.contains(currentQuery, ignoreCase = true)
         }
@@ -50,7 +53,9 @@ class AlbumsViewModel(
             needsPermission = load.needsPermission,
             permissionDenied = load.permissionDenied,
             errorMessage = load.errorMessage,
-            hasAlbums = filtered.isNotEmpty() || currentQuery.isNotBlank()
+            hasAlbums = filtered.isNotEmpty() || currentQuery.isNotBlank(),
+            trashCount = trash.count,
+            trashSizeBytes = trash.totalSizeBytes
         )
     }.flowOn(Dispatchers.Default).stateIn(
         scope = viewModelScope,
@@ -60,7 +65,9 @@ class AlbumsViewModel(
             albums = emptyList(),
             isLoading = repository.loadState.value.isLoading,
             needsPermission = repository.loadState.value.needsPermission,
-            permissionDenied = repository.loadState.value.permissionDenied
+            permissionDenied = repository.loadState.value.permissionDenied,
+            trashCount = repository.trashSummary.value.count,
+            trashSizeBytes = repository.trashSummary.value.totalSizeBytes
         )
     )
 

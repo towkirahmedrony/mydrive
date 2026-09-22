@@ -71,7 +71,14 @@ data class MediaItem(
     val durationMillis: Long? = null,
     val relativePath: String? = null,
     val cloudinaryAssetId: String? = null,
-    val cloudinaryPublicId: String? = null
+    val cloudinaryPublicId: String? = null,
+    val isTrashed: Boolean = false,
+    val dateExpiresMillis: Long = 0L
+)
+
+data class TrashSummary(
+    val count: Int = 0,
+    val totalSizeBytes: Long = 0L
 )
 
 data class AlbumFolder(
