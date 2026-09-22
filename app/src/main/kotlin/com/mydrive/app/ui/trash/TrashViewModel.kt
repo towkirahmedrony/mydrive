@@ -50,6 +50,7 @@ class TrashViewModel(
 
     private val context: Context = app.applicationContext
     private val selectedIds = MutableStateFlow<Set<String>>(emptySet())
+    private val selectionMode = MutableStateFlow(false)
     private val _sheet = MutableStateFlow<TrashSheet>(TrashSheet.Hidden)
     val sheet: StateFlow<TrashSheet> = _sheet
     private val _confirmation = MutableStateFlow<TrashConfirmationRequest?>(null)
@@ -61,14 +62,15 @@ class TrashViewModel(
         repository.trashedMedia,
         repository.loadState,
         repository.trashProgress,
-        selectedIds
-    ) { items, load, progress, selected ->
+        selectedIds,
+        selectionMode
+    ) { items, load, progress, selected, selecting ->
         val visibleSelected = selected.filter { id -> items.any { it.id == id } }.toSet()
         TrashUiState(
             items = items,
             isLoading = load.isLoading && items.isEmpty(),
             selectedIds = visibleSelected,
-            selectionMode = visibleSelected.isNotEmpty(),
+            selectionMode = selecting,
             progress = progress
         )
     }.stateIn(
@@ -97,7 +99,12 @@ class TrashViewModel(
     }
 
     fun onItemLongClick(id: String) {
+        selectionMode.value = true
         toggleSelection(id)
+    }
+
+    fun enterSelectionMode() {
+        selectionMode.value = true
     }
 
     fun toggleSelection(id: String) {
@@ -112,6 +119,7 @@ class TrashViewModel(
 
     fun clearSelection() {
         selectedIds.value = emptySet()
+        selectionMode.value = false
     }
 
     fun visibleItemIds(): List<String> = uiState.value.items.map { it.id }

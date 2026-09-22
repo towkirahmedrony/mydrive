@@ -32,14 +32,13 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.DeleteForever
-import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material.icons.outlined.Restore
 import androidx.compose.material.icons.outlined.SelectAll
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ExtendedFloatingActionButton
+import androidx.compose.material3.FloatingActionButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -92,7 +91,6 @@ fun TrashScreen(
     val colors = MaterialTheme.colorScheme
     val snackbarHostState = remember { SnackbarHostState() }
     val lifecycleOwner = LocalLifecycleOwner.current
-    var menuExpanded by remember { mutableStateOf(false) }
 
     val confirmationLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartIntentSenderForResult()
@@ -141,43 +139,24 @@ fun TrashScreen(
                         .padding(start = Spacing.md)
                 ) {
                     Text(
-                        text = if (state.selectionMode) "${state.selectedCount} selected" else "Trash",
+                        text = "Trash",
                         style = MaterialTheme.typography.headlineMedium,
                         color = colors.onBackground
                     )
-                    if (!state.selectionMode) {
-                        Text(
-                            text = trashCountLabel(state.items.size),
-                            style = MaterialTheme.typography.labelMedium,
-                            color = colors.onSurfaceVariant
-                        )
-                    }
+                    Text(
+                        text = if (state.selectionMode) {
+                            "${state.selectedCount} selected"
+                        } else {
+                            trashCountLabel(state.items.size)
+                        },
+                        style = MaterialTheme.typography.labelMedium,
+                        color = colors.onSurfaceVariant
+                    )
                 }
                 if (state.selectionMode) {
                     HeaderIcon(Icons.Outlined.SelectAll, "Select all") { viewModel.selectAll() }
-                    Spacer(Modifier.width(Spacing.xs))
-                    HeaderIcon(Icons.Outlined.Restore, "Restore selected") { viewModel.restoreSelected() }
-                    Spacer(Modifier.width(Spacing.xs))
-                    HeaderIcon(Icons.Outlined.DeleteForever, "Delete selected") { viewModel.requestPermanentDeleteSelected() }
-                } else if (state.items.isNotEmpty()) {
-                    Box {
-                        HeaderIcon(Icons.Outlined.MoreVert, "More") { menuExpanded = true }
-                        DropdownMenu(
-                            expanded = menuExpanded,
-                            onDismissRequest = { menuExpanded = false }
-                        ) {
-                            DropdownMenuItem(
-                                text = { Text("Empty Trash") },
-                                onClick = {
-                                    menuExpanded = false
-                                    viewModel.requestEmptyTrash()
-                                },
-                                leadingIcon = {
-                                    Icon(Icons.Outlined.DeleteForever, contentDescription = null)
-                                }
-                            )
-                        }
-                    }
+                } else {
+                    HeaderIcon(Icons.Outlined.SelectAll, "Select") { viewModel.enterSelectionMode() }
                 }
             }
 
@@ -202,10 +181,35 @@ fun TrashScreen(
                     TrashGrid(
                         items = state.items,
                         selectedIds = state.selectedIds,
+                        selectionMode = state.selectionMode,
                         onClick = { id -> viewModel.onItemClick(id, onMediaClick) },
                         onLongClick = viewModel::onItemLongClick
                     )
                 }
+            }
+        }
+
+        if (state.selectionMode) {
+            val hasSelection = state.selectedCount > 0
+            Row(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .navigationBarsPadding()
+                    .padding(horizontal = Spacing.md, vertical = Spacing.md),
+                horizontalArrangement = Arrangement.spacedBy(Spacing.sm)
+            ) {
+                TrashActionButton(
+                    icon = Icons.Outlined.Restore,
+                    label = "Restore",
+                    enabled = hasSelection,
+                    onClick = viewModel::restoreSelected
+                )
+                TrashActionButton(
+                    icon = Icons.Outlined.DeleteForever,
+                    label = "Delete",
+                    enabled = hasSelection,
+                    onClick = viewModel::requestPermanentDeleteSelected
+                )
             }
         }
 
@@ -259,6 +263,7 @@ fun TrashScreen(
 private fun TrashGrid(
     items: List<MediaItem>,
     selectedIds: Set<String>,
+    selectionMode: Boolean,
     onClick: (String) -> Unit,
     onLongClick: (String) -> Unit
 ) {
@@ -273,7 +278,7 @@ private fun TrashGrid(
             columns = GridCells.Fixed(columns),
             state = gridState,
             modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(bottom = Spacing.lg),
+            contentPadding = PaddingValues(bottom = if (selectionMode) 112.dp else Spacing.lg),
             horizontalArrangement = Arrangement.spacedBy(2.dp),
             verticalArrangement = Arrangement.spacedBy(2.dp)
         ) {
@@ -381,6 +386,30 @@ fun TrashActionSheet(
             Spacer(Modifier.height(Spacing.sm))
         }
     }
+}
+
+@Composable
+private fun TrashActionButton(
+    icon: ImageVector,
+    label: String,
+    enabled: Boolean,
+    onClick: () -> Unit
+) {
+    val colors = MaterialTheme.colorScheme
+    ExtendedFloatingActionButton(
+        onClick = onClick,
+        enabled = enabled,
+        icon = { Icon(icon, contentDescription = null) },
+        text = { Text(label, fontWeight = FontWeight.SemiBold) },
+        shape = RoundedCornerShape(100.dp),
+        elevation = FloatingActionButtonDefaults.elevation(defaultElevation = 6.dp),
+        colors = FloatingActionButtonDefaults.extendedFloatingActionButtonColors(
+            containerColor = Copper,
+            contentColor = Ivory,
+            disabledContainerColor = colors.surfaceVariant,
+            disabledContentColor = colors.onSurfaceVariant.copy(alpha = 0.45f)
+        )
+    )
 }
 
 @Composable
