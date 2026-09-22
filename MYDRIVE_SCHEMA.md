@@ -79,6 +79,7 @@ All `public` schema tables have Row Level Security (RLS) enabled.
 | primary_cleanup_completed_at | timestamptz | nullable |
 | primary_deleted_at | timestamptz | nullable |
 | cleanup_telegram_override | boolean | default false |
+| user_hidden_at | timestamptz | nullable — NULL = visible; timestamp = hidden from user's library/gallery (backup files untouched); restore sets back to NULL |
 
 ### media_variants
 | Column | Type | Constraints |
@@ -351,7 +352,7 @@ All `public` schema tables have Row Level Security (RLS) enabled.
 
 - `profiles` → `departments` (many-to-one), owns `devices`, `media_assets`, `drive_folders`, `notifications`, `telegram_configs`
 - `devices` → source of `media_assets`, `backup_sessions`; has `push_token` for FCM delivery
-- `media_assets` → has many `media_variants`, `replication_jobs`, `sync_logs`; drives `profiles.storage_used_bytes` via trigger
+- `media_assets` → has many `media_variants`, `replication_jobs`, `sync_logs`; drives `profiles.storage_used_bytes` via trigger; `user_hidden_at` controls user-facing visibility independent of backup state
 - `drive_accounts` → has many `drive_folders` (self-referencing parent/child tree)
 - `replication_jobs` → links a `media_asset`/`media_variant` to a destination (`telegram_configs` or `drive_accounts` + `drive_folders`)
 - `sync_logs` and `admin_audit_logs` are append-only logs
