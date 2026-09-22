@@ -397,18 +397,13 @@ private fun TrashActionButton(
 ) {
     val colors = MaterialTheme.colorScheme
     ExtendedFloatingActionButton(
-        onClick = onClick,
-        enabled = enabled,
+        onClick = { if (enabled) onClick() },
         icon = { Icon(icon, contentDescription = null) },
         text = { Text(label, fontWeight = FontWeight.SemiBold) },
         shape = RoundedCornerShape(100.dp),
+        containerColor = if (enabled) Copper else colors.surfaceVariant,
+        contentColor = if (enabled) Ivory else colors.onSurfaceVariant.copy(alpha = 0.45f),
         elevation = FloatingActionButtonDefaults.elevation(defaultElevation = 6.dp),
-        colors = FloatingActionButtonDefaults.extendedFloatingActionButtonColors(
-            containerColor = Copper,
-            contentColor = Ivory,
-            disabledContainerColor = colors.surfaceVariant,
-            disabledContentColor = colors.onSurfaceVariant.copy(alpha = 0.45f)
-        )
     )
 }
 
