@@ -81,14 +81,14 @@ object FullImageLoader {
             for (step in MediaFetchOrder.steps(uriString, hasStableMediaId = !fallbackMediaId.isNullOrBlank())) {
                 if (!stillCurrent(session, ownerId)) return@withContext null
                 val decoded = when (step) {
-                    MediaFetchSource.DISK -> diskFile?.takeIf { it.isFile }?.let { decodeFile(it, maxDimPx) }
+                    MediaFetchSource.DISK -> diskFile?.let { readDisk(it, maxDimPx) }
                     MediaFetchSource.LOCAL -> {
                         runCatching { Uri.parse(uriString) }.getOrNull()?.let { decode(appContext, it, maxDimPx) }
                     }
                     MediaFetchSource.CLOUDINARY -> {
                         runCatching { Uri.parse(uriString) }.getOrNull()?.let { uri ->
                             downloadHttp(uri)?.let { bytes ->
-                                diskFile?.let { writeCache(it, bytes) }
+                                diskFile?.let { writeCache(appContext, it, bytes) }
                                 decodeBytes(bytes, maxDimPx)
                             }
                         }
@@ -97,7 +97,7 @@ object FullImageLoader {
                         fallbackMediaId?.let { mediaId ->
                             sessionProvider?.let { provider ->
                                 downloadDriveOriginal(mediaId, provider)?.let { bytes ->
-                                    diskFile?.let { writeCache(it, bytes) }
+                                    diskFile?.let { writeCache(appContext, it, bytes) }
                                     decodeBytes(bytes, maxDimPx)
                                 }
                             }
@@ -183,18 +183,21 @@ object FullImageLoader {
         })
     }
 
-    private fun decodeFile(file: File, maxDimPx: Int): Bitmap? =
-        runCatching { decodeBytes(file.readBytes(), maxDimPx) }.getOrNull()
-
-    private fun writeCache(file: File, bytes: ByteArray) {
-        if (bytes.isEmpty() || bytes.size.toLong() > MAX_CACHE_FILE_BYTES) return
-        file.parentFile?.mkdirs()
-        val temporary = File(file.parentFile, "${file.name}.tmp")
-        runCatching {
-            temporary.writeBytes(bytes)
-            if (!temporary.renameTo(file)) file.writeBytes(bytes)
-            temporary.delete()
+    private fun readDisk(file: File, maxDimPx: Int): Bitmap? {
+        if (!MediaDiskCache.isComplete(file)) {
+            MediaDiskCache.discardInvalid(file)
+            return null
         }
+        val bitmap = MediaDiskCache.pinned(file) {
+            runCatching { decodeBytes(file.readBytes(), maxDimPx) }.getOrNull()
+        } ?: return null
+        MediaDiskCache.touch(file)
+        return bitmap
+    }
+
+    private fun writeCache(context: Context, file: File, bytes: ByteArray) {
+        if (bytes.isEmpty() || bytes.size.toLong() > MAX_CACHE_FILE_BYTES) return
+        if (MediaDiskCache.write(file, bytes)) MediaDiskCache.scheduleTrim(context)
     }
 
     private fun decode(context: Context, uri: Uri, maxDimPx: Int): Bitmap? = try {
