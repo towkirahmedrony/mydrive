@@ -42,10 +42,15 @@ import {
  * Contract
  * --------
  *   POST /functions/v1/media-drive
+ *   GET  /functions/v1/media-drive?media_id=<uuid>&variant=original
  *   Headers: Authorization: Bearer <admin user JWT>, apikey: <anon key>
  *            Range: bytes=... (optional, forwarded to Drive for seeking)
  *   Body:    { "media_id": "<uuid>", "variant": "thumb" | "original",
  *              "owner_id": "<uuid>" (optional, must match the row when sent) }
+ *
+ * The GET shape exists for media players, which can open a URL with request
+ * headers but cannot POST. It carries the same parameters and the identical
+ * authorization path; only non-secret ids move into the query string.
  *
  *   Success: the media bytes are streamed back (200, or 206 for a Range
  *            request) with Content-Type / Content-Length / Content-Range /
@@ -350,6 +355,59 @@ function asVariant(value: unknown): Variant {
   return value === "thumb" ? "thumb" : "original";
 }
 
+/**
+ * Reads the request parameters from either shape of the contract.
+ *
+ * POST carries them in a JSON body; GET carries them in the query string,
+ * because a media player can only open a plain URL with request headers — it
+ * cannot POST. Nothing secret moves into the URL: the caller's JWT and the
+ * anon key stay in headers, and `media_id` is an internal id that is still
+ * authorized against the caller on every request.
+ */
+async function readParams(
+  req: Request,
+): Promise<Record<string, unknown> | null> {
+  if (req.method === "GET") {
+    const params = new URL(req.url).searchParams;
+    return {
+      media_id: params.get("media_id") ?? "",
+      variant: params.get("variant") ?? "original",
+      owner_id: params.get("owner_id") ?? "",
+    };
+  }
+  try {
+    return await req.json() as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
+const SINGLE_RANGE_RE = /^bytes=(\d*)-(\d*)$/;
+
+/**
+ * Normalizes a client `Range` header into a single byte range Drive can serve.
+ *
+ * A syntactically invalid header must be ignored rather than rejected
+ * (RFC 9110 14.2), so the caller simply receives the whole representation.
+ * Multi-range requests are also ignored: Drive answers them with the full
+ * body, and a multipart/byteranges reply would be a worse answer than a plain
+ * 200 for every client this endpoint serves.
+ */
+export function normalizeRange(header: string | null): string | null {
+  if (!header) return null;
+  const match = SINGLE_RANGE_RE.exec(header.trim());
+  if (!match) return null;
+  const [, rawStart, rawEnd] = match;
+  if (!rawStart && !rawEnd) return null;
+  if (!rawStart) return `bytes=-${Number(rawEnd)}`;
+  const start = Number(rawStart);
+  if (!Number.isSafeInteger(start)) return null;
+  if (!rawEnd) return `bytes=${start}-`;
+  const end = Number(rawEnd);
+  if (!Number.isSafeInteger(end) || end < start) return null;
+  return `bytes=${start}-${end}`;
+}
+
 interface ResolvedArchive {
   accountId: string;
   fileId: string;
@@ -510,6 +568,8 @@ function streamThrough(
     "X-MyDrive-Source": "drive-archive",
     "X-MyDrive-Variant": options.variant,
     "X-MyDrive-Archive-Integrity": options.integrity,
+    "Access-Control-Expose-Headers":
+      "content-length, content-range, accept-ranges, etag, last-modified",
   });
 
   for (
@@ -550,7 +610,7 @@ export async function handleMediaDriveRequest(
   const corsResponse = handleCors(req);
   if (corsResponse) return corsResponse;
 
-  if (req.method !== "POST") {
+  if (req.method !== "POST" && req.method !== "GET") {
     return fail("invalid_request", "Method not allowed", 405, false);
   }
 
@@ -561,10 +621,8 @@ export async function handleMediaDriveRequest(
 
     const callerIsAdmin = await deps.isAdmin(userId, admin);
 
-    let body: Record<string, unknown>;
-    try {
-      body = await req.json();
-    } catch {
+    const body = await readParams(req);
+    if (!body) {
       return fail("invalid_request", "Invalid JSON body", 400, false);
     }
 
@@ -797,7 +855,7 @@ export async function handleMediaDriveRequest(
     // ── original ──────────────────────────────────────────────────────────
     // No file metadata is read on this path, so no folder claim is made.
     const integrity = "unverified";
-    const range = req.headers.get("range");
+    const range = normalizeRange(req.headers.get("range"));
     let upstream: Response;
     try {
       upstream = await openDriveFileContent({

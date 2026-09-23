@@ -48,45 +48,6 @@ object FullImageLoader {
         return cache.get(key)
     }
 
-    suspend fun ensureOriginalFile(
-        context: Context,
-        uriString: String,
-        mediaId: String?,
-        sessionProvider: AuthenticatedSessionProvider?,
-        userId: String? = AccountSession.userId
-    ): Uri? = withContext(Dispatchers.IO) {
-        val session = AccountSession.snapshot()
-        val ownerId = userId ?: session.userId
-        if (mediaId.isNullOrBlank() || ownerId.isNullOrBlank()) {
-            return@withContext uriString.takeIf { it.isNotBlank() }?.let { Uri.parse(it) }
-        }
-        val file = MediaCacheKeys.originalFile(context.applicationContext.filesDir, ownerId, mediaId)
-        if (file.isFile) return@withContext Uri.fromFile(file)
-        val fallbackUri = uriString.takeIf { it.isNotBlank() }?.let { Uri.parse(it) }
-        for (step in MediaFetchOrder.steps(uriString, hasStableMediaId = true, includeDisk = false)) {
-            if (!stillCurrent(session, ownerId)) return@withContext null
-            when (step) {
-                MediaFetchSource.DISK -> Unit
-                MediaFetchSource.LOCAL -> if (fallbackUri != null) return@withContext fallbackUri
-                MediaFetchSource.CLOUDINARY -> {
-                    val bytes = fallbackUri?.let { downloadHttp(it) }
-                    if (bytes != null) {
-                        writeCache(file, bytes)
-                        if (file.isFile) return@withContext Uri.fromFile(file)
-                    }
-                }
-                MediaFetchSource.DRIVE -> {
-                    val bytes = sessionProvider?.let { downloadDriveOriginal(mediaId, it) }
-                    if (bytes != null) {
-                        writeCache(file, bytes)
-                        if (file.isFile) return@withContext Uri.fromFile(file)
-                    }
-                }
-            }
-        }
-        fallbackUri
-    }
-
     suspend fun load(
         context: Context,
         uriString: String,

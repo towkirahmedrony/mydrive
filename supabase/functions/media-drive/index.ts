@@ -34,6 +34,7 @@ import { assertAdmin, handleMediaDriveRequest } from "./handler.ts";
  * Contract
  * --------
  *   POST /functions/v1/media-drive
+ *   GET  /functions/v1/media-drive?media_id=<uuid>&variant=original
  *   Headers: Authorization: Bearer <admin user JWT>, apikey: <anon key>
  *            Range: bytes=... (optional, forwarded to Drive for seeking)
  *   Body:    { "media_id": "<uuid>", "variant": "thumb" | "original",

@@ -1,6 +1,5 @@
 package com.mydrive.app.ui.media
 
-import android.net.Uri
 import android.widget.VideoView
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -30,8 +29,10 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import com.mydrive.app.data.media.MediaFetchSource
 import com.mydrive.app.data.media.ThumbnailLoader
-import com.mydrive.app.data.media.FullImageLoader
+import com.mydrive.app.data.media.VideoSource
+import com.mydrive.app.data.media.VideoSourceResolver
 import com.mydrive.app.data.model.MediaItem
 import com.mydrive.app.MyDriveApp
 import com.mydrive.app.data.session.AccountSession
@@ -64,7 +65,8 @@ fun ViewerVideoPlayer(
 ) {
     val latestOnTap by rememberUpdatedState(onTap)
     var player by remember(item.id) { mutableStateOf<VideoView?>(null) }
-    var playbackUri by remember(item.id) { mutableStateOf(item.uri) }
+    var playbackSource by remember(item.id) { mutableStateOf<VideoSource?>(null) }
+    var exhaustedSources by remember(item.id) { mutableStateOf(emptySet<MediaFetchSource>()) }
     var state by remember(item.id) {
         mutableStateOf(
             VideoPlaybackState(
@@ -75,15 +77,24 @@ fun ViewerVideoPlayer(
     val lifecycleOwner = LocalLifecycleOwner.current
     val context = androidx.compose.ui.platform.LocalContext.current
 
-    LaunchedEffect(item.id, active, AccountSession.userId) {
+    // Resolution is a suspend call tied to this composition, so leaving the
+    // viewer cancels it instead of leaving work running for hidden media.
+    LaunchedEffect(item.id, active, AccountSession.userId, exhaustedSources) {
         if (!active) return@LaunchedEffect
-        playbackUri = FullImageLoader.ensureOriginalFile(
+        val resolved = VideoSourceResolver.resolve(
             context = context,
             uriString = item.uri,
             mediaId = item.remoteMediaId,
             sessionProvider = (context.applicationContext as? MyDriveApp)?.sessionProvider,
-            userId = AccountSession.userId
-        )?.toString() ?: item.uri
+            userId = AccountSession.userId,
+            exclude = exhaustedSources
+        )
+        playbackSource = resolved
+        state = if (resolved == null) {
+            state.copy(error = true, buffering = false, ready = false, playing = false)
+        } else {
+            state.copy(error = false, buffering = true)
+        }
     }
 
     LaunchedEffect(state) {
@@ -153,8 +164,9 @@ fun ViewerVideoPlayer(
             .clickable(onClick = onTap),
         contentAlignment = Alignment.Center
     ) {
-        if (!active || state.error || item.uri.isBlank()) {
-            if (state.error || item.uri.isBlank()) {
+        val source = playbackSource
+        if (!active || state.error || source == null) {
+            if (state.error || (item.uri.isBlank() && item.remoteMediaId.isNullOrBlank())) {
                 MediaUnavailableState()
             } else {
                 MediaImage(
@@ -205,12 +217,22 @@ fun ViewerVideoPlayer(
                             state = state.copy(playing = true)
                         }
                         setOnErrorListener { _, _, _ ->
-                            state = state.copy(
-                                error = true,
-                                buffering = false,
-                                playing = false,
-                                ready = false
-                            )
+                            val failed = playbackSource?.source
+                            if (failed != null && failed !in exhaustedSources) {
+                                exhaustedSources = exhaustedSources + failed
+                                state = state.copy(
+                                    buffering = true,
+                                    playing = false,
+                                    ready = false
+                                )
+                            } else {
+                                state = state.copy(
+                                    error = true,
+                                    buffering = false,
+                                    playing = false,
+                                    ready = false
+                                )
+                            }
                             true
                         }
                         setOnClickListener { latestOnTap() }
@@ -230,8 +252,9 @@ fun ViewerVideoPlayer(
                             }
                             false
                         }
+                        tag = source.uri.toString()
                         try {
-                            setVideoURI(Uri.parse(playbackUri))
+                            setVideoURI(source.uri, source.headers)
                         } catch (_: Exception) {
                             state = state.copy(error = true, buffering = false)
                         }
@@ -241,9 +264,10 @@ fun ViewerVideoPlayer(
                 modifier = Modifier.fillMaxSize(),
                 update = { view ->
                     if (player !== view) player = view
-                    if (playbackUri.isNotBlank() && view.tag != playbackUri) {
-                        view.tag = playbackUri
-                        runCatching { view.setVideoURI(Uri.parse(playbackUri)) }
+                    val key = source.uri.toString()
+                    if (view.tag != key) {
+                        view.tag = key
+                        runCatching { view.setVideoURI(source.uri, source.headers) }
                     }
                 },
                 onRelease = { view ->
