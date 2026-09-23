@@ -23,6 +23,7 @@ import androidx.compose.material3.Text
 import com.mydrive.app.data.media.ThumbnailLoader
 import com.mydrive.app.data.model.MediaType
 import com.mydrive.app.BuildConfig
+import com.mydrive.app.MyDriveApp
 import com.mydrive.app.ui.util.thumbnailBrush
 
 @Composable
@@ -30,6 +31,7 @@ fun MediaImage(
     uri: String,
     seed: Int,
     type: MediaType,
+    fallbackMediaId: String? = null,
     modifier: Modifier = Modifier,
     contentScale: ContentScale = ContentScale.Crop,
     sizePx: Int = 256,
@@ -47,7 +49,7 @@ fun MediaImage(
     }
     var failed by remember(uri, sizePx) { mutableStateOf(false) }
 
-    LaunchedEffect(uri, sizePx) {
+    LaunchedEffect(uri, fallbackMediaId, sizePx) {
         if (uri.isBlank()) {
             bitmap = null
             failed = true
@@ -59,7 +61,14 @@ fun MediaImage(
             bitmap = cached
             return@LaunchedEffect
         }
-        val loaded = ThumbnailLoader.load(context, uri, sizePx)
+        val app = context.applicationContext as? MyDriveApp
+        val loaded = ThumbnailLoader.load(
+            context = context,
+            uriString = uri,
+            sizePx = sizePx,
+            fallbackMediaId = fallbackMediaId,
+            sessionProvider = app?.sessionProvider
+        )
         if (loaded != null) {
             bitmap = loaded
         } else if (bitmap == null) {

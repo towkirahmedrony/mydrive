@@ -10,7 +10,8 @@ import {
 } from "../shared/drive-media-read.ts";
 
 /**
- * media-drive — ADMIN-ONLY read path for media that lives in the Google Drive
+ * media-drive — authenticated read path for owned media, plus admin access,
+ * for media that lives in the Google Drive
  * archive.
  *
  * Why this exists
@@ -61,8 +62,8 @@ import {
  *
  * Security
  * --------
- *   - the platform verifies the JWT before this code runs, and the caller must
- *     additionally be `profiles.role = 'admin'`;
+ *   - the platform verifies the JWT before this code runs; non-admin callers
+ *     are restricted to media rows they own;
  *   - the caller supplies an internal `media_id` only. A Google Drive file id
  *     is never accepted from the client: it is looked up from the database, so
  *     an admin cannot turn this endpoint into a Drive-wide file reader;
@@ -104,6 +105,8 @@ export interface MediaDriveDependencies {
   adminClient: () => AdminClient;
   /** true when the authenticated user has `profiles.role = 'admin'`. */
   isAdmin: (userId: string, admin: AdminClient) => Promise<boolean>;
+  /** true when the authenticated user owns the requested media row. */
+  isOwner: (userId: string, mediaId: string, admin: AdminClient) => Promise<boolean>;
 }
 
 
@@ -556,9 +559,7 @@ export async function handleMediaDriveRequest(
     const { userId } = await deps.authenticate(req);
     const admin = deps.adminClient();
 
-    if (!(await deps.isAdmin(userId, admin))) {
-      return fail("forbidden", "Admin privileges required", 403, false);
-    }
+    const callerIsAdmin = await deps.isAdmin(userId, admin);
 
     let body: Record<string, unknown>;
     try {
@@ -572,6 +573,9 @@ export async function handleMediaDriveRequest(
       : "";
     if (!UUID_RE.test(mediaId)) {
       return fail("invalid_request", "media_id must be a valid UUID", 400, false);
+    }
+    if (!callerIsAdmin && !(await deps.isOwner(userId, mediaId, admin))) {
+      return fail("forbidden", "You do not have access to this media", 403, false);
     }
     const variant = asVariant(body.variant);
 

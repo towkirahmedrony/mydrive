@@ -39,6 +39,7 @@ import androidx.compose.ui.util.fastAny
 import androidx.compose.ui.util.fastForEach
 import com.mydrive.app.data.media.FullImageLoader
 import com.mydrive.app.data.media.ThumbnailLoader
+import com.mydrive.app.MyDriveApp
 import com.mydrive.app.data.model.MediaItem
 import com.mydrive.app.ui.util.thumbnailBrush
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -111,7 +112,14 @@ fun ZoomablePhoto(
             return@LaunchedEffect
         }
         if (bitmap == null) {
-            val loaded = ThumbnailLoader.load(context, item.displayUri, placeholderPx)
+            val app = context.applicationContext as? MyDriveApp
+            val loaded = ThumbnailLoader.load(
+                context = context,
+                uriString = item.displayUri,
+                sizePx = placeholderPx,
+                fallbackMediaId = item.remoteMediaId,
+                sessionProvider = app?.sessionProvider
+            )
             if (loaded != null) {
                 bitmap = loaded
             }

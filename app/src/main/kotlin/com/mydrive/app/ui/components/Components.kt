@@ -228,6 +228,7 @@ fun MediaThumb(
     ) {
         MediaImage(
             uri = item.displayUri,
+            fallbackMediaId = item.remoteMediaId,
             seed = item.thumbnailSeed,
             type = item.type,
             modifier = Modifier.fillMaxSize(),

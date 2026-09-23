@@ -2,7 +2,8 @@ import { getSupabaseAdmin, getSupabaseAuth } from "../shared/auth.ts";
 import { assertAdmin, handleMediaDriveRequest } from "./handler.ts";
 
 /**
- * media-drive — ADMIN-ONLY read path for media that lives in the Google Drive
+ * media-drive — authenticated read path for owned media, plus admin access,
+ * for media that lives in the Google Drive
  * archive.
  *
  * Why this exists
@@ -53,8 +54,8 @@ import { assertAdmin, handleMediaDriveRequest } from "./handler.ts";
  *
  * Security
  * --------
- *   - the platform verifies the JWT before this code runs, and the caller must
- *     additionally be `profiles.role = 'admin'`;
+ *   - the platform verifies the JWT before this code runs; non-admin callers
+ *     are restricted to media rows they own;
  *   - the caller supplies an internal `media_id` only. A Google Drive file id
  *     is never accepted from the client: it is looked up from the database, so
  *     an admin cannot turn this endpoint into a Drive-wide file reader;
@@ -76,5 +77,15 @@ Deno.serve((req: Request) =>
     },
     adminClient: () => getSupabaseAdmin(),
     isAdmin: (userId, admin) => assertAdmin(admin, userId),
+    isOwner: async (userId, mediaId, admin) => {
+      const { data, error } = await admin
+        .from("media_assets")
+        .select("id")
+        .eq("id", mediaId)
+        .eq("owner_id", userId)
+        .maybeSingle();
+      if (error) throw error;
+      return data !== null;
+    },
   })
 );

@@ -10,10 +10,16 @@ import android.os.CancellationSignal
 import android.provider.MediaStore
 import android.util.LruCache
 import android.util.Size
+import com.mydrive.app.BuildConfig
+import com.mydrive.app.data.auth.AuthenticatedSessionProvider
+import com.mydrive.app.data.auth.PreparedAuth
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.InputStream
 import java.net.HttpURLConnection
+import java.net.URL
 
 object ThumbnailLoader {
 
@@ -29,7 +35,9 @@ object ThumbnailLoader {
     suspend fun load(
         context: Context,
         uriString: String,
-        sizePx: Int
+        sizePx: Int,
+        fallbackMediaId: String? = null,
+        sessionProvider: AuthenticatedSessionProvider? = null
     ): Bitmap? = withContext(Dispatchers.IO) {
         if (uriString.isBlank()) return@withContext null
         val key = cacheKey(uriString, sizePx)
@@ -43,6 +51,8 @@ object ThumbnailLoader {
             decodeHttp(uri, sizePx)
         } else {
             decode(context.applicationContext, uri, sizePx)
+        } ?: fallbackMediaId?.let { mediaId ->
+            sessionProvider?.let { provider -> decodeDriveThumbnail(mediaId, sizePx, provider) }
         } ?: return@withContext null
         cache.put(key, bitmap)
         bitmap
@@ -74,6 +84,64 @@ object ThumbnailLoader {
             null
         } finally {
             second.disconnect()
+        }
+    }
+
+    private suspend fun decodeDriveThumbnail(
+        mediaId: String,
+        sizePx: Int,
+        sessionProvider: AuthenticatedSessionProvider
+    ): Bitmap? {
+        val accessToken = when (val prepared = sessionProvider.prepare(forceRefresh = false)) {
+            is PreparedAuth.Available -> prepared.accessToken
+            else -> return null
+        }
+        val connection = try {
+            (URL("${BuildConfig.SUPABASE_URL.trimEnd('/')}/functions/v1/media-drive")
+                .openConnection() as HttpURLConnection).apply {
+                    requestMethod = "POST"
+                    doOutput = true
+                    connectTimeout = 10_000
+                    readTimeout = 15_000
+                    useCaches = false
+                    setRequestProperty("Content-Type", "application/json")
+                    setRequestProperty("apikey", BuildConfig.SUPABASE_ANON_KEY)
+                    setRequestProperty("Authorization", "Bearer $accessToken")
+                    outputStream.use { output ->
+                        output.write(
+                            buildJsonObject {
+                                put("media_id", mediaId)
+                                put("variant", "thumb")
+                            }.toString().toByteArray(Charsets.UTF_8)
+                        )
+                    }
+                }
+        } catch (_: Exception) {
+            return null
+        }
+        return try {
+            if (connection.responseCode !in 200..299) return null
+            val bytes = connection.inputStream.use { it.readBytes() }
+            if (bytes.isEmpty() || bytes.size > MAX_THUMBNAIL_BYTES) return null
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+            if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+            val maxDim = maxOf(bounds.outWidth, bounds.outHeight)
+            var sample = 1
+            while (maxDim / sample > sizePx * 2) sample *= 2
+            BitmapFactory.decodeByteArray(
+                bytes,
+                0,
+                bytes.size,
+                BitmapFactory.Options().apply {
+                    inSampleSize = sample
+                    inPreferredConfig = Bitmap.Config.RGB_565
+                }
+            )
+        } catch (_: Exception) {
+            null
+        } finally {
+            connection.disconnect()
         }
     }
 
@@ -179,4 +247,6 @@ object ThumbnailLoader {
         val max = (Runtime.getRuntime().maxMemory() / 1024).toInt()
         return (max / 8).coerceIn(4096, 24_576)
     }
+
+    private const val MAX_THUMBNAIL_BYTES = 2 * 1024 * 1024
 }
