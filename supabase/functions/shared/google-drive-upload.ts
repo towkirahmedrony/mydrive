@@ -44,6 +44,12 @@ export interface UploadOptions {
 export interface ChunkUploadOptions extends UploadOptions {
   /** Total bytes uploaded so far on a resumed session. */
   resumeAtBytes?: number;
+  /**
+   * Existing resumable session URI to continue instead of creating a new one.
+   * Persisted on the job row so a worker that dies mid-upload resumes rather
+   * than restarting from byte zero (and never creates a second Drive file).
+   */
+  uploadUrl?: string;
 }
 
 export interface ChunkProgress {

@@ -1,4 +1,3 @@
-import { serve } from "jsr:@std/http";
 import { corsHeaders, handleCors } from "../shared/cors.ts";
 import { getSupabaseAuth } from "../shared/auth.ts";
 
@@ -46,7 +45,7 @@ import { getSupabaseAuth } from "../shared/auth.ts";
  *     it proves the request was authorised by the server.
  *   - Each request uses a fresh timestamp so authorizations are short-lived.
  */
-serve(async (req: Request) => {
+Deno.serve(async (req: Request) => {
   const corsResponse = handleCors(req);
   if (corsResponse) return corsResponse;
 

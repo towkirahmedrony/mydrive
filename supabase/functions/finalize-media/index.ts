@@ -19,13 +19,20 @@ import { getSupabaseAdmin, getSupabaseAuth } from "../shared/auth.ts";
  *     (never from the client), status READY, storage_provider cloudinary
  *   - is idempotent on client_upload_id, so retrying the same request
  *     never creates a duplicate media record
+ *   - ALWAYS creates the PENDING Google Drive replication job for the media
+ *     (enqueue_drive_replication_job), which is what makes the media lifecycle
+ *     run: media_assets -> Drive archive -> verified -> Cloudinary cleanup.
+ *     Idempotent: one Drive job per media. Google Drive is a server-side
+ *     archive — the uploaded media is copied to storage the app user never
+ *     touches, so no Drive terminology appears in the Android UI.
  *   - when a Telegram destination exists and is enabled, creates a PENDING
  *     replication_jobs row — idempotent on
  *     (media_id, destination_type, telegram_config_id), so retried or
  *     concurrent finalize requests never create duplicate jobs
  *
- * This function NEVER uploads media to Telegram and NEVER exposes the
- * Telegram bot token. Replication is queued for a later server-side worker.
+ * This function NEVER uploads media to Telegram or Google Drive, NEVER calls
+ * Cloudinary, and NEVER exposes the Telegram bot token or any Drive
+ * credential. Replication is queued for the server-side workers.
  *
  * The Cloudinary API Secret and Supabase service-role key never appear in
  * the response and are never logged.
@@ -76,8 +83,17 @@ import { getSupabaseAdmin, getSupabaseAuth } from "../shared/auth.ts";
  *       "id": "uuid",                      // enabled/configured
  *       "destination_type": "telegram",
  *       "status": "PENDING"
+ *     },
+ *     "drive_job": {                       // server-side archive queue
+ *       "id": "uuid",
+ *       "destination_type": "google_drive",
+ *       "status": "PENDING"
  *     }
  *   }
+ *
+ * Response compatibility: `drive_job` is an ADDITIVE field. The Android
+ * request/response contract for the existing fields is unchanged, so a client
+ * that ignores it keeps working.
  */
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -88,7 +104,20 @@ const MEDIA_SELECT =
 const TELEGRAM_JOB_SELECT =
   "id, media_id, destination_type, status, telegram_config_id, attempt_count, last_error, created_at";
 
+const DRIVE_JOB_SELECT =
+  "id, media_id, destination_type, status, attempt_count, last_error, created_at";
+
 type AdminClient = ReturnType<typeof getSupabaseAdmin>;
+
+type DriveJobRow = {
+  id: string;
+  media_id: string;
+  destination_type: string;
+  status: string;
+  attempt_count: number;
+  last_error: string | null;
+  created_at: string;
+};
 
 type TelegramJobRow = {
   id: string;
@@ -212,13 +241,70 @@ async function ensureTelegramReplicationJob(
   return raced ?? null;
 }
 
-function successWithJob(media: unknown, job: TelegramJobRow | null): Response {
+/**
+ * Queues the media for server-side Google Drive archival.
+ *
+ * This is the producer for `destination_type = 'google_drive'` jobs: without it
+ * a finalized media would never be copied to the Drive storage pool and would
+ * never become eligible for Cloudinary cleanup. The job itself is created by
+ * the database function `enqueue_drive_replication_job`, which is idempotent
+ * (one Drive job per media, advisory-locked) and records the
+ * DRIVE_JOB_CREATED event. No Drive account is chosen here — the Drive Router
+ * picks a healthy account with enough quota when the worker runs, so this call
+ * works with any number of Drive accounts and even before one is connected.
+ *
+ * Never returns or logs a Drive credential; the job carries no secret.
+ * A failure to enqueue is logged and reported, but MUST NOT fail the finalize
+ * request: the Cloudinary upload and the media record are already durable.
+ */
+async function ensureDriveReplicationJob(
+  admin: AdminClient,
+  mediaId: string,
+): Promise<DriveJobRow | null> {
+  const { data: created, error } = await admin.rpc(
+    "enqueue_drive_replication_job",
+    { p_media_id: mediaId },
+  );
+
+  if (error) {
+    console.error(
+      `Failed to enqueue Drive replication job for media ${mediaId}: ${error.message}`,
+    );
+    return null;
+  }
+
+  const row = (created as DriveJobRow | null) ?? null;
+  if (row?.id) return row;
+
+  // The RPC returned a NULL composite (PostgREST shape) — fall back to a read.
+  const { data: existing } = await admin
+    .from("replication_jobs")
+    .select(DRIVE_JOB_SELECT)
+    .eq("media_id", mediaId)
+    .eq("destination_type", "google_drive")
+    .maybeSingle();
+
+  return (existing as DriveJobRow | null) ?? null;
+}
+
+function successWithJob(
+  media: unknown,
+  job: TelegramJobRow | null,
+  driveJob: DriveJobRow | null,
+): Response {
   return json(
     {
       success: true,
       media,
       telegram_job: job
         ? { id: job.id, destination_type: job.destination_type, status: job.status }
+        : null,
+      drive_job: driveJob
+        ? {
+          id: driveJob.id,
+          destination_type: driveJob.destination_type,
+          status: driveJob.status,
+        }
         : null,
     },
     200,
@@ -313,10 +399,11 @@ Deno.serve(async (req: Request) => {
       if (existing.data.owner_id !== user.id) {
         return json({ error: "client_upload_id is already registered to another user" }, 409);
       }
-      // Ensure the Telegram job exists even on a retry (self-healing when the
-      // previous attempt failed after the media row was written).
+      // Ensure the Telegram and Drive jobs exist even on a retry (self-healing
+      // when the previous attempt failed after the media row was written).
       const job = await ensureTelegramReplicationJob(admin, user.id, existing.data.id);
-      return successWithJob(existing.data, job);
+      const driveJob = await ensureDriveReplicationJob(admin, existing.data.id);
+      return successWithJob(existing.data, job, driveJob);
     }
 
     // ── 6. Create the media record (all identity fields from the JWT) ──
@@ -352,7 +439,8 @@ Deno.serve(async (req: Request) => {
     }
     if (inserted) {
       const job = await ensureTelegramReplicationJob(admin, user.id, inserted.id);
-      return successWithJob(inserted, job);
+      const driveJob = await ensureDriveReplicationJob(admin, inserted.id);
+      return successWithJob(inserted, job, driveJob);
     }
 
     // A concurrent request won the race. Return its row only if it is ours.
@@ -369,7 +457,8 @@ Deno.serve(async (req: Request) => {
       return json({ error: "client_upload_id is already registered to another user" }, 409);
     }
     const racedJob = await ensureTelegramReplicationJob(admin, user.id, raced.data.id);
-    return successWithJob(raced.data, racedJob);
+    const racedDriveJob = await ensureDriveReplicationJob(admin, raced.data.id);
+    return successWithJob(raced.data, racedJob, racedDriveJob);
   } catch (error) {
     const message = (error as Error).message;
     const isAuthError =

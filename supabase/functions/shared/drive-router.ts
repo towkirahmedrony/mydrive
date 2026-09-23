@@ -85,7 +85,7 @@ export async function selectDriveAccount(
   if (error) {
     throw new Error(`select_drive_account failed: ${error.message}`);
   }
-  return (data as DriveAccount | null) ?? null;
+  return asAccountOrNull(data);
 }
 
 /**
@@ -104,7 +104,16 @@ export async function reserveDriveAccount(
   if (error) {
     throw new Error(`reserve_drive_account failed: ${error.message}`);
   }
-  return (data as DriveAccount | null) ?? null;
+  return asAccountOrNull(data);
+}
+
+/**
+ * A NULL composite from PostgREST arrives as an object whose fields are all
+ * null (not as null), so id presence decides whether an account was selected.
+ */
+function asAccountOrNull(data: unknown): DriveAccount | null {
+  const row = data as DriveAccount | null;
+  return row && row.id ? row : null;
 }
 
 /** Reverses a reservation when the worker abandons an account. */
