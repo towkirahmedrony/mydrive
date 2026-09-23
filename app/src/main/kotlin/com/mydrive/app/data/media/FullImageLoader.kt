@@ -7,14 +7,10 @@ import android.graphics.ImageDecoder
 import android.net.Uri
 import android.os.Build
 import android.util.LruCache
-import com.mydrive.app.BuildConfig
 import com.mydrive.app.data.auth.AuthenticatedSessionProvider
-import com.mydrive.app.data.auth.PreparedAuth
 import com.mydrive.app.data.session.AccountSession
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.put
 import java.io.File
 import java.io.InputStream
 import java.net.HttpURLConnection
@@ -66,11 +62,29 @@ object FullImageLoader {
         }
         val file = MediaCacheKeys.originalFile(context.applicationContext.filesDir, ownerId, mediaId)
         if (file.isFile) return@withContext Uri.fromFile(file)
-        val provider = sessionProvider ?: return@withContext uriString.takeIf { it.isNotBlank() }?.let { Uri.parse(it) }
-        val bytes = downloadDriveOriginal(mediaId, provider) ?: return@withContext uriString.takeIf { it.isNotBlank() }?.let { Uri.parse(it) }
-        if (!stillCurrent(session, ownerId)) return@withContext null
-        writeCache(file, bytes)
-        Uri.fromFile(file)
+        val fallbackUri = uriString.takeIf { it.isNotBlank() }?.let { Uri.parse(it) }
+        for (step in MediaFetchOrder.steps(uriString, hasStableMediaId = true, includeDisk = false)) {
+            if (!stillCurrent(session, ownerId)) return@withContext null
+            when (step) {
+                MediaFetchSource.DISK -> Unit
+                MediaFetchSource.LOCAL -> if (fallbackUri != null) return@withContext fallbackUri
+                MediaFetchSource.CLOUDINARY -> {
+                    val bytes = fallbackUri?.let { downloadHttp(it) }
+                    if (bytes != null) {
+                        writeCache(file, bytes)
+                        if (file.isFile) return@withContext Uri.fromFile(file)
+                    }
+                }
+                MediaFetchSource.DRIVE -> {
+                    val bytes = sessionProvider?.let { downloadDriveOriginal(mediaId, it) }
+                    if (bytes != null) {
+                        writeCache(file, bytes)
+                        if (file.isFile) return@withContext Uri.fromFile(file)
+                    }
+                }
+            }
+        }
+        fallbackUri
     }
 
     suspend fun load(
@@ -102,29 +116,37 @@ object FullImageLoader {
         } else {
             null
         }
-        val bitmap = diskFile?.takeIf { it.isFile }?.let { decodeFile(it, maxDimPx) }
-            ?: fallbackMediaId?.let { mediaId ->
-                sessionProvider?.let { provider ->
-                    downloadDriveOriginal(mediaId, provider)?.let { bytes ->
-                        if (!stillCurrent(session, ownerId)) return@withContext null
-                        diskFile?.let { writeCache(it, bytes) }
-                        decodeBytes(bytes, maxDimPx)
+        val bitmap = run {
+            for (step in MediaFetchOrder.steps(uriString, hasStableMediaId = !fallbackMediaId.isNullOrBlank())) {
+                if (!stillCurrent(session, ownerId)) return@withContext null
+                val decoded = when (step) {
+                    MediaFetchSource.DISK -> diskFile?.takeIf { it.isFile }?.let { decodeFile(it, maxDimPx) }
+                    MediaFetchSource.LOCAL -> {
+                        runCatching { Uri.parse(uriString) }.getOrNull()?.let { decode(appContext, it, maxDimPx) }
+                    }
+                    MediaFetchSource.CLOUDINARY -> {
+                        runCatching { Uri.parse(uriString) }.getOrNull()?.let { uri ->
+                            downloadHttp(uri)?.let { bytes ->
+                                diskFile?.let { writeCache(it, bytes) }
+                                decodeBytes(bytes, maxDimPx)
+                            }
+                        }
+                    }
+                    MediaFetchSource.DRIVE -> {
+                        fallbackMediaId?.let { mediaId ->
+                            sessionProvider?.let { provider ->
+                                downloadDriveOriginal(mediaId, provider)?.let { bytes ->
+                                    diskFile?.let { writeCache(it, bytes) }
+                                    decodeBytes(bytes, maxDimPx)
+                                }
+                            }
+                        }
                     }
                 }
+                if (decoded != null) return@run decoded
             }
-            ?: run {
-                if (uriString.isBlank()) return@run null
-                val uri = runCatching { Uri.parse(uriString) }.getOrNull()
-                    ?: return@run null
-                if (uri.scheme == "http" || uri.scheme == "https") {
-                    decodeHttp(uri, maxDimPx)?.also { decoded ->
-                        if (diskFile != null) runCatching { downloadHttp(uri)?.let { writeCache(diskFile, it) } }
-                    }
-                } else {
-                    decode(appContext, uri, maxDimPx)
-                }
-            }
-            ?: return@withContext null
+            null
+        } ?: return@withContext null
 
         if (!stillCurrent(session, ownerId)) return@withContext null
         cache.put(key, bitmap)
@@ -160,48 +182,6 @@ object FullImageLoader {
         }
     }
 
-    private fun decodeHttp(uri: Uri, maxDimPx: Int): Bitmap? =
-        downloadHttp(uri)?.let { decodeBytes(it, maxDimPx) }
-
-    private suspend fun downloadDriveOriginal(
-        mediaId: String,
-        sessionProvider: AuthenticatedSessionProvider
-    ): ByteArray? {
-        val accessToken = when (val prepared = sessionProvider.prepare(false)) {
-            is PreparedAuth.Available -> prepared.accessToken
-            else -> return null
-        }
-        val connection = try {
-            (URL("${BuildConfig.SUPABASE_URL.trimEnd('/')}/functions/v1/media-drive")
-                .openConnection() as HttpURLConnection).apply {
-                    requestMethod = "POST"
-                    doOutput = true
-                    connectTimeout = 10_000
-                    readTimeout = 120_000
-                    useCaches = false
-                    setRequestProperty("Content-Type", "application/json")
-                    setRequestProperty("apikey", BuildConfig.SUPABASE_ANON_KEY)
-                    setRequestProperty("Authorization", "Bearer $accessToken")
-                    outputStream.use { output ->
-                        output.write(buildJsonObject {
-                            put("media_id", mediaId)
-                            put("variant", "original")
-                        }.toString().toByteArray(Charsets.UTF_8))
-                    }
-                }
-        } catch (_: Exception) {
-            return null
-        }
-        return try {
-            if (connection.responseCode !in 200..299) return null
-            connection.inputStream.use { it.readBounded(MAX_CACHE_FILE_BYTES) }
-        } catch (_: Exception) {
-            null
-        } finally {
-            connection.disconnect()
-        }
-    }
-
     private fun InputStream.readBounded(maxBytes: Long): ByteArray {
         val output = java.io.ByteArrayOutputStream()
         val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
@@ -215,6 +195,18 @@ object FullImageLoader {
         }
         return output.toByteArray()
     }
+
+    private suspend fun downloadDriveOriginal(
+        mediaId: String,
+        sessionProvider: AuthenticatedSessionProvider
+    ): ByteArray? = MediaDriveClient.fetchBytes(
+        mediaId = mediaId,
+        variant = MediaDriveClient.VARIANT_ORIGINAL,
+        sessionProvider = sessionProvider,
+        maxBytes = MAX_CACHE_FILE_BYTES,
+        connectTimeoutMs = 10_000,
+        readTimeoutMs = 120_000
+    )
 
     private fun decodeBytes(bytes: ByteArray, maxDimPx: Int): Bitmap? {
         if (bytes.isEmpty()) return null

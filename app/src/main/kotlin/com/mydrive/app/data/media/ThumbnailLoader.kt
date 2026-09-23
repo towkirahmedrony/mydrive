@@ -10,17 +10,12 @@ import android.os.CancellationSignal
 import android.provider.MediaStore
 import android.util.LruCache
 import android.util.Size
-import com.mydrive.app.BuildConfig
 import com.mydrive.app.data.auth.AuthenticatedSessionProvider
-import com.mydrive.app.data.auth.PreparedAuth
 import com.mydrive.app.data.session.AccountSession
-import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.put
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.InputStream
 import java.net.HttpURLConnection
-import java.net.URL
 
 object ThumbnailLoader {
 
@@ -73,35 +68,42 @@ object ThumbnailLoader {
         if (key == "blocked-remote") return@withContext null
         cache.get(key)?.let { return@withContext it }
         if (!stillCurrent(session, ownerId)) return@withContext null
-        fallbackMediaId?.let { id ->
-            if (!ownerId.isNullOrBlank()) {
-                readDisk(context.applicationContext, ownerId, id, sizePx)?.let {
-                    if (!stillCurrent(session, ownerId)) return@withContext null
-                    cache.put(key, it)
-                    return@withContext it
+        val appContext = context.applicationContext
+        var fromDisk = false
+        val bitmap = run {
+            for (step in MediaFetchOrder.steps(uriString, hasStableMediaId = !fallbackMediaId.isNullOrBlank())) {
+                if (!stillCurrent(session, ownerId)) return@withContext null
+                val decoded = when (step) {
+                    MediaFetchSource.DISK -> {
+                        if (!ownerId.isNullOrBlank() && !fallbackMediaId.isNullOrBlank()) {
+                            readDisk(appContext, ownerId, fallbackMediaId, sizePx)
+                        } else {
+                            null
+                        }
+                    }
+                    MediaFetchSource.LOCAL -> {
+                        runCatching { Uri.parse(uriString) }.getOrNull()?.let { decode(appContext, it, sizePx) }
+                    }
+                    MediaFetchSource.CLOUDINARY -> {
+                        runCatching { Uri.parse(uriString) }.getOrNull()?.let { decodeHttp(it, sizePx) }
+                    }
+                    MediaFetchSource.DRIVE -> {
+                        fallbackMediaId?.let { mediaId ->
+                            sessionProvider?.let { provider -> decodeDriveThumbnail(mediaId, sizePx, provider) }
+                        }
+                    }
+                }
+                if (decoded != null) {
+                    fromDisk = step == MediaFetchSource.DISK
+                    return@run decoded
                 }
             }
-        }
-        val bitmap = if (uriString.isNotBlank()) {
-            val uri = try {
-                Uri.parse(uriString)
-            } catch (_: Exception) {
-                null
-            }
-            when {
-                uri == null -> null
-                uri.scheme == "http" || uri.scheme == "https" -> decodeHttp(uri, sizePx)
-                else -> decode(context.applicationContext, uri, sizePx)
-            }
-        } else {
             null
-        } ?: fallbackMediaId?.let { mediaId ->
-            sessionProvider?.let { provider -> decodeDriveThumbnail(mediaId, sizePx, provider) }
         } ?: return@withContext null
         if (!stillCurrent(session, ownerId)) return@withContext null
         cache.put(key, bitmap)
-        if (!ownerId.isNullOrBlank() && !fallbackMediaId.isNullOrBlank()) {
-            writeDisk(context.applicationContext, ownerId, fallbackMediaId, sizePx, bitmap)
+        if (!fromDisk && !ownerId.isNullOrBlank() && !fallbackMediaId.isNullOrBlank()) {
+            writeDisk(appContext, ownerId, fallbackMediaId, sizePx, bitmap)
         }
         bitmap
     }
@@ -146,57 +148,29 @@ object ThumbnailLoader {
         sizePx: Int,
         sessionProvider: AuthenticatedSessionProvider
     ): Bitmap? {
-        val accessToken = when (val prepared = sessionProvider.prepare(forceRefresh = false)) {
-            is PreparedAuth.Available -> prepared.accessToken
-            else -> return null
-        }
-        val connection = try {
-            (URL("${BuildConfig.SUPABASE_URL.trimEnd('/')}/functions/v1/media-drive")
-                .openConnection() as HttpURLConnection).apply {
-                    requestMethod = "POST"
-                    doOutput = true
-                    connectTimeout = 10_000
-                    readTimeout = 15_000
-                    useCaches = false
-                    setRequestProperty("Content-Type", "application/json")
-                    setRequestProperty("apikey", BuildConfig.SUPABASE_ANON_KEY)
-                    setRequestProperty("Authorization", "Bearer $accessToken")
-                    outputStream.use { output ->
-                        output.write(
-                            buildJsonObject {
-                                put("media_id", mediaId)
-                                put("variant", "thumb")
-                            }.toString().toByteArray(Charsets.UTF_8)
-                        )
-                    }
-                }
-        } catch (_: Exception) {
-            return null
-        }
-        return try {
-            if (connection.responseCode !in 200..299) return null
-            val bytes = connection.inputStream.use { it.readBytes() }
-            if (bytes.isEmpty() || bytes.size > MAX_THUMBNAIL_BYTES) return null
-            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-            BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
-            if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
-            val maxDim = maxOf(bounds.outWidth, bounds.outHeight)
-            var sample = 1
-            while (maxDim / sample > sizePx * 2) sample *= 2
-            BitmapFactory.decodeByteArray(
-                bytes,
-                0,
-                bytes.size,
-                BitmapFactory.Options().apply {
-                    inSampleSize = sample
-                    inPreferredConfig = Bitmap.Config.RGB_565
-                }
-            )
-        } catch (_: Exception) {
-            null
-        } finally {
-            connection.disconnect()
-        }
+        val bytes = MediaDriveClient.fetchBytes(
+            mediaId = mediaId,
+            variant = MediaDriveClient.VARIANT_THUMB,
+            sessionProvider = sessionProvider,
+            maxBytes = MAX_THUMBNAIL_BYTES.toLong(),
+            connectTimeoutMs = 10_000,
+            readTimeoutMs = 15_000
+        ) ?: return null
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+        val maxDim = maxOf(bounds.outWidth, bounds.outHeight)
+        var sample = 1
+        while (maxDim / sample > sizePx * 2) sample *= 2
+        return BitmapFactory.decodeByteArray(
+            bytes,
+            0,
+            bytes.size,
+            BitmapFactory.Options().apply {
+                inSampleSize = sample
+                inPreferredConfig = Bitmap.Config.RGB_565
+            }
+        )
     }
 
     private fun openHttp(uri: Uri): HttpURLConnection? {

@@ -90,7 +90,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.core.view.WindowCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.mydrive.app.data.media.FullImageLoader
+import com.mydrive.app.data.media.ThumbnailLoader
 import com.mydrive.app.data.model.MediaItem
 import com.mydrive.app.data.session.AccountSession
 import com.mydrive.app.data.model.MediaType
@@ -230,22 +230,20 @@ fun MediaViewerScreen(
         }
     }
 
-    // Warm the ORIGINAL full-resolution decodes for neighboring pages
     LaunchedEffect(current.id, state.items, context) {
         val index = state.items.indexOfFirst { it.id == current.id }
         if (index < 0) return@LaunchedEffect
-        val target = viewerFullResTargetPx(context)
         listOfNotNull(
             state.items.getOrNull(index + 1),
             state.items.getOrNull(index - 1)
         )
-            .filter { it.type == MediaType.PHOTO && it.displayUri.isNotBlank() }
+            .filter { it.displayUri.isNotBlank() || !it.remoteMediaId.isNullOrBlank() }
             .forEach { neighbor ->
                 prefetchScope.launch {
-                    FullImageLoader.load(
+                    ThumbnailLoader.load(
                         context = context,
                         uriString = neighbor.displayUri,
-                        maxDimPx = target,
+                        sizePx = 256,
                         fallbackMediaId = neighbor.remoteMediaId,
                         sessionProvider = (context.applicationContext as? MyDriveApp)?.sessionProvider,
                         userId = AccountSession.userId

@@ -75,7 +75,8 @@ fun ViewerVideoPlayer(
     val lifecycleOwner = LocalLifecycleOwner.current
     val context = androidx.compose.ui.platform.LocalContext.current
 
-    LaunchedEffect(item.id, AccountSession.userId) {
+    LaunchedEffect(item.id, active, AccountSession.userId) {
+        if (!active) return@LaunchedEffect
         playbackUri = FullImageLoader.ensureOriginalFile(
             context = context,
             uriString = item.uri,
