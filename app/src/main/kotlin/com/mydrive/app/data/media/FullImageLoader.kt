@@ -88,21 +88,27 @@ object FullImageLoader {
         bitmap
     }
 
-    private fun downloadHttp(uri: Uri): ByteArray? = try {
-        val connection = (URL(uri.toString()).openConnection() as HttpURLConnection).apply {
-            connectTimeout = 10_000
-            readTimeout = 30_000
-            useCaches = false
+    private fun downloadHttp(uri: Uri): ByteArray? {
+        return try {
+            val connection = (URL(uri.toString()).openConnection() as HttpURLConnection).apply {
+                connectTimeout = 10_000
+                readTimeout = 30_000
+                useCaches = false
+            }
+            try {
+                if (connection.responseCode !in 200..299) {
+                    null
+                } else if (connection.contentLengthLong > MAX_CACHE_FILE_BYTES) {
+                    null
+                } else {
+                    connection.inputStream.use { it.readBounded(MAX_CACHE_FILE_BYTES) }
+                }
+            } finally {
+                connection.disconnect()
+            }
+        } catch (_: Exception) {
+            null
         }
-        try {
-            if (connection.responseCode !in 200..299) return null
-            if (connection.contentLengthLong > MAX_CACHE_FILE_BYTES) return null
-            connection.inputStream.use { it.readBounded(MAX_CACHE_FILE_BYTES) }
-        } finally {
-            connection.disconnect()
-        }
-    } catch (_: Exception) {
-        null
     }
 
     private fun decodeHttp(uri: Uri, maxDimPx: Int): Bitmap? =
