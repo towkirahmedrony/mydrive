@@ -3,6 +3,10 @@
 -- Production hardening for `public.media_assets`: an authenticated owner may no
 -- longer UPDATE server-controlled or security-sensitive columns.
 --
+-- Revision 2 (this file): set_media_library_visibility now RETURNS integer --
+-- the number of rows actually updated -- so clients can verify a trash/restore
+-- mutation actually happened instead of silently treating a no-op as success.
+--
 -- Why: the existing `media_assets_update_own` policy constrains WHICH ROWS a
 -- user may update (their own) but never WHICH COLUMNS. A normal authenticated
 -- user could therefore PATCH status='READY', storage_url, storage_path,

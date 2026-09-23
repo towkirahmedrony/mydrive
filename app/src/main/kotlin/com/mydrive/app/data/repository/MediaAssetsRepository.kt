@@ -17,10 +17,13 @@ import io.github.jan.supabase.postgrest.query.Columns
 import io.github.jan.supabase.postgrest.query.Count
 import io.github.jan.supabase.postgrest.query.Order
 import io.github.jan.supabase.postgrest.query.filter.FilterOperator
+import io.github.jan.supabase.exceptions.RestException
 import io.github.jan.supabase.postgrest.query.filter.PostgrestFilterBuilder
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import java.time.Instant
 
@@ -258,13 +261,32 @@ class MediaAssetsRepository(
             }
             if (remoteMediaId.isBlank()) return@withContext HideMediaResult.NotFound
             try {
-                supabase.postgrest.rpc(
+                // The SECURITY DEFINER RPC returns the number of rows actually
+                // updated (0 or 1) and raises "media_not_found" when the id is
+                // missing or belongs to another user. A 2xx with no changed row
+                // is therefore treated as a real failure, never as success.
+                val rpcResult = supabase.postgrest.rpc(
                     function = RPC_SET_LIBRARY_VISIBILITY,
                     parameters = buildJsonObject {
                         put("p_media_id", remoteMediaId)
                         put("p_hidden", hiddenAt != null)
                     }
                 )
+                val affectedRows = rpcResult.data
+                    .takeIf { it is kotlinx.serialization.json.JsonPrimitive }
+                    ?.let { (it as kotlinx.serialization.json.JsonPrimitive).jsonPrimitive.intOrNull }
+                if (affectedRows != 1) {
+                    DeveloperLogger.error(
+                        category = LogCategory.DATABASE,
+                        event = "MEDIA_LIBRARY_HIDE_FAILED",
+                        message = "Library visibility RPC affected $affectedRows row(s); expected exactly 1",
+                        metadata = mapOf(
+                            "remote_media_id" to remoteMediaId,
+                            "affected_rows" to affectedRows.toString()
+                        )
+                    )
+                    return@withContext HideMediaResult.Failed
+                }
                 DeveloperLogger.info(
                     category = LogCategory.DATABASE,
                     event = if (hiddenAt == null) "MEDIA_LIBRARY_UNHIDDEN" else "MEDIA_LIBRARY_HIDDEN",
@@ -275,10 +297,37 @@ class MediaAssetsRepository(
                     },
                     metadata = mapOf(
                         "remote_media_id" to remoteMediaId,
-                        "user_hidden_at" to hiddenAt
+                        "user_hidden_at" to hiddenAt,
+                        "affected_rows" to "1"
                     )
                 )
                 HideMediaResult.Success
+            } catch (error: RestException) {
+                // PostgREST surfaces the RPC's P0001 "media_not_found" as a
+                // REST error body. Missing rows and foreign rows are the same
+                // signal, so both map to NotFound instead of a silent success.
+                val isMediaNotFound = error.message?.contains("media_not_found", ignoreCase = true) == true
+                if (isMediaNotFound) {
+                    DeveloperLogger.warn(
+                        category = LogCategory.DATABASE,
+                        event = "MEDIA_LIBRARY_NOT_FOUND",
+                        message = "Library visibility RPC matched no owned row (missing or foreign media)",
+                        metadata = mapOf(
+                            "remote_media_id" to remoteMediaId,
+                            "user_hidden_at" to hiddenAt
+                        )
+                    )
+                    HideMediaResult.NotFound
+                } else {
+                    DeveloperLogger.error(
+                        category = LogCategory.DATABASE,
+                        event = "MEDIA_LIBRARY_HIDE_FAILED",
+                        message = "Library visibility RPC failed",
+                        throwable = error,
+                        metadata = mapOf("remote_media_id" to remoteMediaId)
+                    )
+                    HideMediaResult.Failed
+                }
             } catch (error: Exception) {
                 DeveloperLogger.error(
                     category = LogCategory.DATABASE,

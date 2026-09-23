@@ -79,7 +79,7 @@ All `public` schema tables have Row Level Security (RLS) enabled.
 | primary_cleanup_completed_at | timestamptz | nullable |
 | primary_deleted_at | timestamptz | nullable |
 | cleanup_telegram_override | boolean | default false |
-| user_hidden_at | timestamptz | nullable — NULL = visible; timestamp = hidden from user's library/gallery (backup files untouched); restore sets back to NULL — writable only via `set_media_library_visibility()` |
+| user_hidden_at | timestamptz | nullable — NULL = visible; timestamp = hidden from user's library/gallery (backup files untouched); restore sets back to NULL — writable only via the hardened, row-count-verified `set_media_library_visibility()`; direct UPDATE rejected by column-level privileges and the `trg_media_assets_guard_user_hidden_at` trigger |
 
 **Owner UPDATE privileges (20260923000300):** `authenticated` holds column-level `UPDATE` on `is_favorite` only. Every other column (`owner_id`, `device_id`, local/identity fields, `storage_*`, `thumbnail_url`, `sha256_hash`, `status`, `uploaded_at`, `deleted_at`, `user_hidden_at`, `drive_archived_at`, `primary_cleanup_*`, `primary_deleted_at`, `cleanup_telegram_override`, `created_at`, `updated_at`) is server-controlled and rejected with SQLSTATE 42501. `anon` has no UPDATE at all; `service_role` and the table owner keep full table-level UPDATE, so the Edge Function workers, `finalize-media`, and the SECURITY DEFINER lifecycle RPCs are unaffected. Trash/Restore goes through `set_media_library_visibility()`.
 
@@ -323,7 +323,8 @@ All `public` schema tables have Row Level Security (RLS) enabled.
 | `release_drive_quota` | p_drive_account_id uuid, p_bytes bigint | void | DEFINER |
 | `reserve_drive_account` | p_required_bytes bigint, p_exclude_account_ids uuid[], p_safety_margin_bytes bigint | drive_accounts | DEFINER |
 | `select_drive_account` | p_required_bytes bigint, p_exclude_account_ids uuid[], p_safety_margin_bytes bigint | drive_accounts | DEFINER |
-| `set_media_library_visibility` | p_media_id uuid, p_hidden boolean | void | DEFINER — EXECUTE granted to `authenticated`/`service_role`, revoked from `anon` |
+| `set_media_library_visibility` | p_media_id uuid, p_hidden boolean | integer | DEFINER — hardened, row-count-verified. Returns the number of rows actually updated (1 on success); raises `media_not_found` (P0001) when the id is missing or belongs to another user, so a zero-row update can never be reported as success. EXECUTE granted to `authenticated`/`service_role`, revoked from `anon`/`PUBLIC` |
+| `guard_media_assets_user_hidden_at` | — (trigger) | trigger | DEFINER — rejects direct UPDATE of `media_assets.user_hidden_at` by client roles (SQLSTATE 42501); visibility changes must go through `set_media_library_visibility()` |
 | `set_updated_at` | — (trigger) | trigger | INVOKER |
 | `sync_profile_storage_used` | — (trigger) | trigger | DEFINER — EXECUTE revoked from `anon`/`authenticated` (trigger-only, not exposed via REST) |
 | `trigger_drive_worker` | — | bigint | DEFINER |
