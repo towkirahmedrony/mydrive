@@ -16,7 +16,6 @@ import com.mydrive.app.data.model.MediaType
 import com.mydrive.app.data.repository.DeleteMediaResult
 import com.mydrive.app.data.repository.MediaRepository
 import com.mydrive.app.data.repository.RemoveFromLibraryResult
-import com.mydrive.app.data.repository.RemoveMediaAction
 import com.mydrive.app.debug.DeveloperLogger
 import com.mydrive.app.debug.LogCategory
 import kotlinx.coroutines.Dispatchers
@@ -35,8 +34,7 @@ data class MediaViewerUiState(
 data class DeleteConfirmationRequest(
     val itemId: String,
     val intentSender: android.content.IntentSender,
-    val alreadyPerformedOnApproval: Boolean,
-    val alsoHideFromLibrary: Boolean = false
+    val alreadyPerformedOnApproval: Boolean
 )
 
 sealed class MediaOperation {
@@ -139,27 +137,23 @@ class MediaViewerViewModel(
     fun requestDelete(itemId: String) { _pendingOperation.value = MediaOperation.DeleteConfirm(itemId) }
     fun dismissOperation() { _pendingOperation.value = MediaOperation.Idle }
 
-    fun confirmRemove(itemId: String, action: RemoveMediaAction, onRemoved: (nextIndex: Int?) -> Unit) {
+    fun confirmRemove(itemId: String, onRemoved: (nextIndex: Int?) -> Unit) {
         _pendingOperation.value = MediaOperation.Idle
         pendingDeleteCompletion = onRemoved
         val item = uiState.value.items.firstOrNull { it.id == itemId }
         DeveloperLogger.info(
             LogCategory.UI,
             "MEDIA_REMOVE_CHOSEN",
-            "User chose split remove action",
+            "User chose Move to Trash",
             localMediaId = itemId,
             metadata = mapOf(
-                "action" to action.name,
+                "action" to "MOVE_TO_TRASH",
                 "media_uri" to item?.uri,
                 "origin_local" to item?.originLocal?.toString(),
                 "android_api" to Build.VERSION.SDK_INT.toString()
             )
         )
-        when (action) {
-            RemoveMediaAction.DEVICE -> performDelete(itemId, alsoHideFromLibrary = false)
-            RemoveMediaAction.MY_DRIVE -> performHideFromLibrary(itemId)
-            RemoveMediaAction.DEVICE_AND_MY_DRIVE -> performDelete(itemId, alsoHideFromLibrary = true)
-        }
+        performDelete(itemId)
     }
 
     fun consumeUserMessage() {
@@ -171,9 +165,9 @@ class MediaViewerViewModel(
         _deleteConfirmation.value = null
         if (approved) {
             if (request.alreadyPerformedOnApproval) {
-                finalizeDelete(request.itemId, alsoHideFromLibrary = request.alsoHideFromLibrary)
+                finalizeDelete(request.itemId)
             } else {
-                performDelete(request.itemId, alsoHideFromLibrary = request.alsoHideFromLibrary)
+                performDelete(request.itemId)
             }
         } else {
             pendingDeleteCompletion = null
@@ -192,18 +186,13 @@ class MediaViewerViewModel(
         }
     }
 
-    private fun performDelete(itemId: String, alsoHideFromLibrary: Boolean) {
+    private fun performDelete(itemId: String) {
         viewModelScope.launch {
             val items = uiState.value.items
             val currentIndex = items.indexOfFirst { it.id == itemId }
             val item = items.firstOrNull { it.id == itemId }
             if (item != null && !item.originLocal) {
-                if (alsoHideFromLibrary) {
-                    performHideFromLibrary(itemId)
-                } else {
-                    pendingDeleteCompletion = null
-                    showUserMessage("This copy is no longer on this phone.")
-                }
+                moveCloudToTrash(itemId, currentIndex)
                 return@launch
             }
             when (val result = repository.deleteMediaWithResult(context, itemId)) {
@@ -212,17 +201,11 @@ class MediaViewerViewModel(
                         itemId = itemId,
                         intentSender = result.intentSender,
                         alreadyPerformedOnApproval = result.alreadyPerformedOnApproval,
-                        alsoHideFromLibrary = alsoHideFromLibrary
                     )
                 }
-                DeleteMediaResult.Success -> finalizeDelete(itemId, currentIndex, alsoHideFromLibrary)
+                DeleteMediaResult.Success -> finalizeDelete(itemId, currentIndex)
                 DeleteMediaResult.NotFound -> {
-                    if (alsoHideFromLibrary) {
-                        performHideFromLibrary(itemId)
-                    } else {
-                        pendingDeleteCompletion = null
-                        showUserMessage("This media is no longer available on this phone.")
-                    }
+                    moveCloudToTrash(itemId, currentIndex)
                 }
                 DeleteMediaResult.PermissionDenied -> {
                     pendingDeleteCompletion = null
@@ -236,60 +219,49 @@ class MediaViewerViewModel(
         }
     }
 
-    private fun performHideFromLibrary(itemId: String) {
+    private fun moveCloudToTrash(itemId: String, currentIndex: Int) {
         viewModelScope.launch {
-            val items = uiState.value.items
-            val currentIndex = items.indexOfFirst { it.id == itemId }
-            when (repository.hideFromMyDrive(itemId)) {
+            when (repository.moveCloudToTrash(itemId)) {
                 RemoveFromLibraryResult.Success -> completeRemoval(
                     itemId = itemId,
                     currentIndex = currentIndex,
-                    message = "Removed from My Drive"
+                    message = "Moved to Trash"
                 )
                 RemoveFromLibraryResult.Unauthorized -> {
                     pendingDeleteCompletion = null
-                    showUserMessage("Sign in to hide this item from My Drive.")
+                    showUserMessage("Sign in to move this item to Trash.")
                 }
                 RemoveFromLibraryResult.NotFound -> {
                     pendingDeleteCompletion = null
-                    showUserMessage("This item could not be found in My Drive.")
+                    showUserMessage("This item could not be moved to Trash.")
                 }
                 RemoveFromLibraryResult.Failed -> {
                     pendingDeleteCompletion = null
-                    showUserMessage("Couldn't hide this item from My Drive.")
+                    showUserMessage("Couldn't move this item to Trash.")
                 }
             }
         }
     }
 
-    private fun finalizeDelete(itemId: String, knownIndex: Int? = null, alsoHideFromLibrary: Boolean = false) {
+    private fun finalizeDelete(itemId: String, knownIndex: Int? = null) {
         viewModelScope.launch {
             val currentIndex = knownIndex ?: uiState.value.items.indexOfFirst { it.id == itemId }
             if (repository.finalizeLocalDelete(itemId)) {
-                if (alsoHideFromLibrary) {
-                    when (repository.hideFromMyDrive(itemId)) {
+                when (repository.moveCloudToTrash(itemId)) {
                         RemoveFromLibraryResult.Success -> completeRemoval(
                             itemId = itemId,
                             currentIndex = currentIndex,
-                            message = "Removed from device and My Drive"
+                            message = "Moved to Trash"
                         )
                         RemoveFromLibraryResult.Unauthorized -> {
                             pendingDeleteCompletion = null
-                            showUserMessage("Moved to Trash, but sign in is required to hide it from My Drive.")
+                            showUserMessage("Moved to device Trash, but sign in is required to move it to My Drive Trash.")
                         }
                         RemoveFromLibraryResult.NotFound, RemoveFromLibraryResult.Failed -> {
                             pendingDeleteCompletion = null
-                            showUserMessage("Moved to Trash, but it could not be hidden from My Drive.")
+                            showUserMessage("Moved to device Trash, but it could not be moved to My Drive Trash.")
                         }
                     }
-                } else {
-                    completeRemoval(
-                        itemId = itemId,
-                        currentIndex = currentIndex,
-                        leaveViewer = false,
-                        message = "Moved to Trash"
-                    )
-                }
             } else {
                 pendingDeleteCompletion = null
                 DeveloperLogger.error(

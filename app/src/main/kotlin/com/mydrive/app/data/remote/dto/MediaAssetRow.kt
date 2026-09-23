@@ -25,4 +25,7 @@ data class MediaAssetRow(
 ) {
     val isHiddenFromLibrary: Boolean
         get() = !userHiddenAt.isNullOrBlank()
+
+    val isCloudAvailable: Boolean
+        get() = status != "DELETED" && (!storageUrl.isNullOrBlank() || !thumbnailUrl.isNullOrBlank())
 }

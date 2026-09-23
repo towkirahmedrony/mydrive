@@ -84,12 +84,6 @@ data class TrashOperationProgress(
     val total: Int = 0
 )
 
-enum class RemoveMediaAction {
-    DEVICE,
-    MY_DRIVE,
-    DEVICE_AND_MY_DRIVE
-}
-
 sealed class RemoveFromLibraryResult {
     data object Success : RemoveFromLibraryResult()
     data object NotFound : RemoveFromLibraryResult()
@@ -249,18 +243,13 @@ class MediaRepository(
             val now = System.currentTimeMillis()
             if (!force && _media.value.isNotEmpty() && now - lastRefreshAt < MIN_REFRESH_INTERVAL_MS) { applyAccessState(); return }
             applyAccessState()
-            if (!permissions.canReadMedia()) {
-                _media.value = emptyList(); _deviceMedia.value = emptyList(); _albums.value = emptyList(); _storage.value = StorageSummary(0, 0, 0, 0)
-                publishTrash(emptyList())
-                _loadState.update { it.copy(isLoading = false, errorMessage = null) }
-                return
-            }
+            val canReadLocal = permissions.canReadMedia()
             val showSpinner = _media.value.isEmpty()
             _loadState.update { it.copy(isLoading = showSpinner, errorMessage = null) }
             try {
                 val favoriteIds = favorites.ids.value
-                val scanned = mediaStore.loadMedia()
-                val trashed = mediaStore.loadTrashedMedia()
+                val scanned = if (canReadLocal) mediaStore.loadMedia() else emptyList()
+                val trashed = if (canReadLocal) mediaStore.loadTrashedMedia() else emptyList()
                 val scannedIds = scanned.mapTo(HashSet(scanned.size)) { it.id }
                 val trashedIds = trashed.mapTo(HashSet(trashed.size)) { it.id }
                 locallyHiddenIds.removeAll { it !in scannedIds && it !in trashedIds }
@@ -269,7 +258,7 @@ class MediaRepository(
                     .filter { it.id !in locallyHiddenIds }
                     .map { item -> item.copy(isFavorite = item.id in favoriteIds).withRecord(records[item.id]) }
                 syncRepository.reconcileMedia(deviceItems)
-                if (permissions.access() == MediaAccess.GRANTED) {
+                if (canReadLocal && permissions.access() == MediaAccess.GRANTED) {
                     val presentIds = withContext(Dispatchers.Default) { deviceItems.mapTo(HashSet(deviceItems.size)) { it.id } }
                     favorites.retainAll(presentIds + visibilityStore.hiddenLocalIds() + visibilityStore.cloudEntries().keys)
                     // Keep local backup metadata for items only moved to device Trash.
@@ -379,8 +368,9 @@ class MediaRepository(
         }
         visibilityStore.replaceHidden(hidden)
 
-        val library = ArrayList<MediaItem>(deviceItems.size)
+        val library = ArrayList<MediaItem>(deviceItems.size + remoteRows.size)
         val present = HashSet<String>()
+        val presentRemoteIds = HashSet<String>()
         for (item in deviceItems) {
             if (item.id in hidden) continue
             val record = records[item.id]
@@ -392,6 +382,7 @@ class MediaRepository(
                 hiddenFromLibrary = false
             )
             present += item.id
+            row?.id?.let { presentRemoteIds += it }
         }
 
         val deviceIds = deviceItems.mapTo(HashSet()) { it.id }
@@ -413,8 +404,52 @@ class MediaRepository(
         for ((localId, entry) in visibilityStore.cloudEntries()) {
             if (localId in hidden || localId in present || localId in deviceIds) continue
             library += entry.toMediaItem(favoriteIds, records[localId])
+            presentRemoteIds += entry.remoteMediaId
+        }
+
+        // MediaStore is only the local-copy index. A backed-up row remains part
+        // of My Drive even after another Gallery/File Manager removes its copy.
+        val cachedByRemoteId = visibilityStore.cloudEntries().values.associateBy { it.remoteMediaId }
+        for (row in remoteRows) {
+            if (!row.isCloudAvailable || row.isHiddenFromLibrary || row.id in presentRemoteIds) continue
+            val cached = cachedByRemoteId[row.id]
+            val cloudId = cached?.localId ?: "cloud-${row.id}"
+            library += cached?.toMediaItem(favoriteIds, records[cloudId])
+                ?: row.toCloudOnlyMediaItem(cloudId, favoriteIds)
+            presentRemoteIds += row.id
         }
         return library.sortedByDescending { it.capturedAtMillis }
+    }
+
+    private fun com.mydrive.app.data.remote.dto.MediaAssetRow.toCloudOnlyMediaItem(
+        stableId: String,
+        favoriteIds: Set<String>
+    ): MediaItem {
+        val mediaType = if (mimeType?.startsWith("video/") == true) MediaType.VIDEO else MediaType.PHOTO
+        val preview = thumbnailUrl ?: storageUrl.orEmpty()
+        val captured = runCatching { java.time.Instant.parse(createdAt ?: "").toEpochMilli() }.getOrDefault(0L)
+        return MediaItem(
+            id = stableId,
+            filename = fileName.orEmpty().ifBlank { "My Drive media" },
+            type = mediaType,
+            fileSizeBytes = fileSize ?: 0L,
+            capturedAtMillis = captured,
+            device = "My Drive",
+            resolution = if ((width ?: 0) > 0 && (height ?: 0) > 0) "$width x $height" else "Unknown",
+            durationSeconds = durationMs?.div(1000L)?.toInt(),
+            isFavorite = stableId in favoriteIds,
+            backupState = BackupState.COMPLETED,
+            backupCompleted = true,
+            thumbnailSeed = stableId.hashCode(),
+            uri = preview,
+            mimeType = mimeType.orEmpty(),
+            width = width ?: 0,
+            height = height ?: 0,
+            durationMillis = durationMs,
+            remoteMediaId = id,
+            thumbnailUrl = preview,
+            originLocal = false
+        )
     }
 
     private fun rememberCloudCopy(id: String) {
@@ -868,10 +903,10 @@ class MediaRepository(
     suspend fun finalizeTrashRestore(ids: Collection<String>) = withContext(Dispatchers.IO) {
         if (ids.isEmpty()) return@withContext
         val idSet = ids.toSet()
+        ids.forEach { restoreCloudTrash(it) }
         locallyHiddenIds.removeAll(idSet)
         _trashedMedia.update { items -> items.filter { it.id !in idSet } }
         publishTrash(_trashedMedia.value)
-        // Restore is local MediaStore only. Supabase media_assets remains untouched.
         refresh(force = true)
     }
 
@@ -881,8 +916,40 @@ class MediaRepository(
         locallyHiddenIds.removeAll(idSet)
         _trashedMedia.update { items -> items.filter { it.id !in idSet } }
         publishTrash(_trashedMedia.value)
-        // Permanent local delete only. Supabase media_assets and archive data remain untouched.
         refresh(force = true)
+    }
+
+    /** Move the cloud-backed record into the existing My Drive hidden/trash lifecycle. */
+    suspend fun moveCloudToTrash(id: String): RemoveFromLibraryResult = withContext(Dispatchers.IO) {
+        val item = lookupAnyItem(id)
+        val record = syncRepository.records.value[id]
+        val result = mediaAssetsRepository.hideMatchingAsset(
+            remoteMediaId = item?.remoteMediaId ?: record?.remoteMediaId,
+            localMediaId = item?.mediaStoreId?.takeIf { it > 0L },
+            clientUploadId = record?.clientUploadId
+        )
+        if (result == HideMediaResult.Success) {
+            refresh(force = true)
+            val trashedItem = item?.copy(isTrashed = true, hiddenFromLibrary = true)
+            if (trashedItem != null && _trashedMedia.value.none { it.id == id }) {
+                publishTrash(_trashedMedia.value + trashedItem)
+            }
+        }
+        when (result) {
+            HideMediaResult.Success, HideMediaResult.NotFound -> RemoveFromLibraryResult.Success
+            HideMediaResult.Unauthorized -> RemoveFromLibraryResult.Unauthorized
+            HideMediaResult.Failed -> RemoveFromLibraryResult.Failed
+        }
+    }
+
+    private suspend fun restoreCloudTrash(id: String) {
+        val item = lookupAnyItem(id)
+        val record = syncRepository.records.value[id]
+        mediaAssetsRepository.unhideMatchingAsset(
+            remoteMediaId = item?.remoteMediaId ?: record?.remoteMediaId,
+            localMediaId = item?.mediaStoreId?.takeIf { it > 0L },
+            clientUploadId = record?.clientUploadId
+        )
     }
 
     private fun publishTrash(items: List<MediaItem>) {

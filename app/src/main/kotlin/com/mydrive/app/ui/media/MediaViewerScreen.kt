@@ -92,7 +92,6 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.mydrive.app.data.media.FullImageLoader
 import com.mydrive.app.data.model.MediaItem
 import com.mydrive.app.data.model.MediaType
-import com.mydrive.app.data.repository.RemoveMediaAction
 import com.mydrive.app.ui.components.MediaImage
 import com.mydrive.app.ui.theme.Copper
 import com.mydrive.app.ui.theme.Ink
@@ -414,8 +413,8 @@ fun MediaViewerScreen(
         RemovePhotoSheet(
             item = deleteItem,
             onDismiss = { viewModel.dismissOperation() },
-            onChoose = { action ->
-                viewModel.confirmRemove(deleteItem.id, action) { nextIndex ->
+            onChoose = {
+                viewModel.confirmRemove(deleteItem.id) { nextIndex ->
                     if (nextIndex == null) {
                         onBack()
                     } else {
@@ -520,7 +519,7 @@ fun MediaViewerScreen(
 private fun RemovePhotoSheet(
     item: MediaItem,
     onDismiss: () -> Unit,
-    onChoose: (RemoveMediaAction) -> Unit
+    onChoose: () -> Unit
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val isVideo = item.type == MediaType.VIDEO
@@ -588,30 +587,20 @@ private fun RemovePhotoSheet(
             }
             Spacer(Modifier.height(Spacing.md))
             Text(
-                text = "Choose what to remove. Backed-up files stay in Drive archive.",
+                text = "Move this $kind to Trash? You can restore it until it is permanently deleted.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
             Spacer(Modifier.height(Spacing.sm))
-            RemoveChoiceRow(
-                icon = Icons.Outlined.Smartphone,
-                title = "Remove from device",
-                description = "Remove the local copy from this phone. The backed-up copy will remain in My Drive.",
-                onClick = { onChoose(RemoveMediaAction.DEVICE) }
-            )
-            RemoveChoiceRow(
-                icon = Icons.Outlined.CloudOff,
-                title = "Remove from My Drive",
-                description = "Hide this $kind from My Drive. The copy on this phone and the cloud backup remain unchanged.",
-                onClick = { onChoose(RemoveMediaAction.MY_DRIVE) }
-            )
-            RemoveChoiceRow(
-                icon = Icons.Outlined.PhonelinkErase,
-                title = "Remove from device & My Drive",
-                description = "Remove the local copy from this phone and hide this $kind from My Drive. The cloud backup is not deleted.",
-                destructive = true,
-                onClick = { onChoose(RemoveMediaAction.DEVICE_AND_MY_DRIVE) }
-            )
+            OutlinedButton(
+                onClick = onChoose,
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(100.dp)
+            ) {
+                Icon(Icons.Outlined.Delete, contentDescription = null)
+                Spacer(Modifier.width(Spacing.xs))
+                Text("Move to Trash")
+            }
             Spacer(Modifier.height(Spacing.sm))
             OutlinedButton(
                 onClick = onDismiss,
@@ -625,55 +614,6 @@ private fun RemovePhotoSheet(
     }
 }
 
-@Composable
-private fun RemoveChoiceRow(
-    icon: ImageVector,
-    title: String,
-    description: String,
-    destructive: Boolean = false,
-    onClick: () -> Unit
-) {
-    val titleColor = if (destructive) StatusAttention else MaterialTheme.colorScheme.onSurface
-    val iconColor = if (destructive) StatusAttention else MaterialTheme.colorScheme.onSurface
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(16.dp))
-            .clickable(onClick = onClick)
-            .padding(vertical = Spacing.sm, horizontal = Spacing.xs),
-        verticalAlignment = Alignment.Top
-    ) {
-        Box(
-            modifier = Modifier
-                .size(40.dp)
-                .clip(CircleShape)
-                .background(if (destructive) StatusAttention.copy(alpha = 0.12f) else MaterialTheme.colorScheme.surfaceVariant),
-            contentAlignment = Alignment.Center
-        ) {
-            Icon(
-                imageVector = icon,
-                contentDescription = title,
-                tint = iconColor,
-                modifier = Modifier.size(22.dp)
-            )
-        }
-        Spacer(Modifier.width(Spacing.md))
-        Column(modifier = Modifier.weight(1f)) {
-            Text(
-                text = title,
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.SemiBold,
-                color = titleColor
-            )
-            Spacer(Modifier.height(2.dp))
-            Text(
-                text = description,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-        }
-    }
-}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -752,7 +692,7 @@ private fun ViewerActionBar(
         )
         ViewerBarAction(
             icon = Icons.Outlined.Delete,
-            label = "Delete",
+            label = "Move to Trash",
             onClick = onDelete
         )
         ViewerBarAction(
