@@ -53,6 +53,8 @@ object ThumbnailLoader {
         val first = openHttp(uri) ?: return null
         try {
             first.inputStream.use { BitmapFactory.decodeStream(it, null, bounds) }
+        } catch (_: Exception) {
+            return null
         } finally {
             first.disconnect()
         }
