@@ -13,6 +13,7 @@ import android.util.Size
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.InputStream
+import java.net.HttpURLConnection
 
 object ThumbnailLoader {
 
@@ -48,20 +49,48 @@ object ThumbnailLoader {
     }
 
     private fun decodeHttp(uri: Uri, sizePx: Int): Bitmap? {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        val first = openHttp(uri) ?: return null
+        try {
+            first.inputStream.use { BitmapFactory.decodeStream(it, null, bounds) }
+        } finally {
+            first.disconnect()
+        }
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+
+        val maxDim = maxOf(bounds.outWidth, bounds.outHeight)
+        var sample = 1
+        while (maxDim / sample > sizePx * 2) sample *= 2
+        val second = openHttp(uri) ?: return null
         return try {
-            val connection = java.net.URL(uri.toString()).openConnection().apply {
+            val opts = BitmapFactory.Options().apply {
+                inSampleSize = sample
+                inPreferredConfig = Bitmap.Config.RGB_565
+            }
+            second.inputStream.use { BitmapFactory.decodeStream(it, null, opts) }
+        } catch (_: Exception) {
+            null
+        } finally {
+            second.disconnect()
+        }
+    }
+
+    private fun openHttp(uri: Uri): HttpURLConnection? {
+        return try {
+            (java.net.URL(uri.toString()).openConnection() as HttpURLConnection).apply {
                 connectTimeout = 8_000
                 readTimeout = 8_000
-            }
-            connection.getInputStream().use { input ->
-                val bytes = input.readBytes()
-                val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-                BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
-                val maxDim = maxOf(bounds.outWidth, bounds.outHeight).coerceAtLeast(1)
-                var sample = 1
-                while (maxDim / sample > sizePx * 2) sample *= 2
-                val opts = BitmapFactory.Options().apply { inSampleSize = sample }
-                BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
+                instanceFollowRedirects = true
+                useCaches = true
+                requestMethod = "GET"
+                setRequestProperty("Accept", "image/*")
+                connect()
+                if (responseCode !in 200..299) {
+                    disconnect()
+                    null
+                } else {
+                    this
+                }
             }
         } catch (_: Exception) {
             null

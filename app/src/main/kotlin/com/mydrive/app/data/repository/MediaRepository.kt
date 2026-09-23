@@ -418,7 +418,9 @@ class MediaRepository(
                 ?: row.toCloudOnlyMediaItem(cloudId, favoriteIds)
             presentRemoteIds += row.id
         }
-        return library.sortedByDescending { it.capturedAtMillis }
+        return library
+            .distinctBy { it.remoteMediaId?.takeIf(String::isNotBlank) ?: "local:${it.id}" }
+            .sortedByDescending { it.capturedAtMillis }
     }
 
     private fun com.mydrive.app.data.remote.dto.MediaAssetRow.toCloudOnlyMediaItem(

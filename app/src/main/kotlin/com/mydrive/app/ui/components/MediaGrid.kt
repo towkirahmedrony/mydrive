@@ -62,7 +62,7 @@ fun MediaGrid(
                     add(GridEntry(key = item.id, span = 1, item = item))
                 }
             }
-        }
+        }.distinctBy { it.key }
     }
 
     if (groups.isEmpty() && header == null && !showSkeleton) {
