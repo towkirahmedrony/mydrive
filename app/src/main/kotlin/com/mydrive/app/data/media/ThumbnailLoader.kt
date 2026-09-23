@@ -18,8 +18,10 @@ import kotlinx.serialization.json.put
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.InputStream
+import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
+import java.security.MessageDigest
 
 object ThumbnailLoader {
 
@@ -42,6 +44,12 @@ object ThumbnailLoader {
         if (uriString.isBlank()) return@withContext null
         val key = cacheKey(uriString, sizePx)
         cache.get(key)?.let { return@withContext it }
+        fallbackMediaId?.let { id ->
+            readDisk(context.applicationContext, id, sizePx)?.let {
+                cache.put(key, it)
+                return@withContext it
+            }
+        }
         val uri = try {
             Uri.parse(uriString)
         } catch (_: Exception) {
@@ -55,6 +63,7 @@ object ThumbnailLoader {
             sessionProvider?.let { provider -> decodeDriveThumbnail(mediaId, sizePx, provider) }
         } ?: return@withContext null
         cache.put(key, bitmap)
+        fallbackMediaId?.let { writeDisk(context.applicationContext, it, sizePx, bitmap) }
         bitmap
     }
 
@@ -246,6 +255,24 @@ object ThumbnailLoader {
     private fun cacheKb(): Int {
         val max = (Runtime.getRuntime().maxMemory() / 1024).toInt()
         return (max / 8).coerceIn(4096, 24_576)
+    }
+
+    private fun diskFile(context: Context, mediaId: String, sizePx: Int): File {
+        val digest = MessageDigest.getInstance("SHA-256")
+            .digest("$mediaId@$sizePx".toByteArray())
+            .joinToString("") { "%02x".format(it) }
+        return File(context.filesDir, "media_thumbnails/$digest.webp")
+    }
+
+    private fun readDisk(context: Context, mediaId: String, sizePx: Int): Bitmap? =
+        runCatching { BitmapFactory.decodeFile(diskFile(context, mediaId, sizePx).path) }.getOrNull()
+
+    private fun writeDisk(context: Context, mediaId: String, sizePx: Int, bitmap: Bitmap) {
+        runCatching {
+            val file = diskFile(context, mediaId, sizePx)
+            file.parentFile?.mkdirs()
+            file.outputStream().use { bitmap.compress(Bitmap.CompressFormat.WEBP, 88, it) }
+        }
     }
 
     private const val MAX_THUMBNAIL_BYTES = 2 * 1024 * 1024

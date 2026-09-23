@@ -128,7 +128,14 @@ fun ZoomablePhoto(
 
     LaunchedEffect(item.id, fullTargetPx) {
         if (item.displayUri.isBlank() || fullTargetPx <= 0) return@LaunchedEffect
-        val full = FullImageLoader.load(context, item.displayUri, fullTargetPx)
+        val app = context.applicationContext as? MyDriveApp
+        val full = FullImageLoader.load(
+            context = context,
+            uriString = item.displayUri,
+            maxDimPx = fullTargetPx,
+            fallbackMediaId = item.remoteMediaId,
+            sessionProvider = app?.sessionProvider
+        )
         if (full != null) {
             bitmap = full
         } else if (bitmap == null) {

@@ -31,7 +31,9 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.mydrive.app.data.media.ThumbnailLoader
+import com.mydrive.app.data.media.FullImageLoader
 import com.mydrive.app.data.model.MediaItem
+import com.mydrive.app.MyDriveApp
 import com.mydrive.app.ui.components.MediaImage
 import com.mydrive.app.ui.theme.Copper
 import com.mydrive.app.ui.theme.Ink
@@ -61,6 +63,7 @@ fun ViewerVideoPlayer(
 ) {
     val latestOnTap by rememberUpdatedState(onTap)
     var player by remember(item.id) { mutableStateOf<VideoView?>(null) }
+    var playbackUri by remember(item.id) { mutableStateOf(item.uri) }
     var state by remember(item.id) {
         mutableStateOf(
             VideoPlaybackState(
@@ -69,6 +72,16 @@ fun ViewerVideoPlayer(
         )
     }
     val lifecycleOwner = LocalLifecycleOwner.current
+    val context = androidx.compose.ui.platform.LocalContext.current
+
+    LaunchedEffect(item.id) {
+        playbackUri = FullImageLoader.ensureOriginalFile(
+            context = context,
+            uriString = item.uri,
+            mediaId = item.remoteMediaId,
+            sessionProvider = (context.applicationContext as? MyDriveApp)?.sessionProvider
+        )?.toString() ?: item.uri
+    }
 
     LaunchedEffect(state) {
         onState(state)
@@ -209,7 +222,7 @@ fun ViewerVideoPlayer(
                             false
                         }
                         try {
-                            setVideoURI(Uri.parse(item.uri))
+                            setVideoURI(Uri.parse(playbackUri))
                         } catch (_: Exception) {
                             state = state.copy(error = true, buffering = false)
                         }
@@ -219,6 +232,10 @@ fun ViewerVideoPlayer(
                 modifier = Modifier.fillMaxSize(),
                 update = { view ->
                     if (player !== view) player = view
+                    if (playbackUri.isNotBlank() && view.tag != playbackUri) {
+                        view.tag = playbackUri
+                        runCatching { view.setVideoURI(Uri.parse(playbackUri)) }
+                    }
                 },
                 onRelease = { view ->
                     view.stopPlayback()

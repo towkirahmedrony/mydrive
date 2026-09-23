@@ -264,14 +264,22 @@ class MediaRepository(
                     // Keep local backup metadata for items only moved to device Trash.
                     syncRepository.reconcile(presentIds + locallyHiddenIds + trashedIds)
                 }
-                val libraryItems = composeLibrary(deviceItems, trashed, favoriteIds, records)
+                // Offline-first: show the persisted cloud snapshot immediately. The
+                // remote rows below are a reconciliation pass, not a prerequisite
+                // for rendering media the user has already seen.
+                val cachedLibrary = composeLibrary(deviceItems, trashed, favoriteIds, records, emptyList())
                 _deviceMedia.value = deviceItems
-                _media.value = libraryItems
-                _albums.value = buildAlbums(libraryItems)
+                _media.value = cachedLibrary
+                _albums.value = buildAlbums(cachedLibrary)
                 lastRefreshAt = now
-                updateStorage(libraryItems)
+                updateStorage(cachedLibrary)
                 publishTrash(trashed)
                 _loadState.update { it.copy(isLoading = false, errorMessage = null) }
+                val remoteRows = mediaAssetsRepository.loadOwnerAssets()
+                val libraryItems = composeLibrary(deviceItems, trashed, favoriteIds, records, remoteRows)
+                _media.value = libraryItems
+                _albums.value = buildAlbums(libraryItems)
+                updateStorage(libraryItems)
             } catch (_: MediaQueryException) {
                 val keepExisting = _media.value.isNotEmpty()
                 _loadState.update { it.copy(isLoading = false, errorMessage = if (keepExisting) null else "Couldn't load your photos and videos.") }
@@ -331,13 +339,13 @@ class MediaRepository(
         )
     }
 
-    private suspend fun composeLibrary(
+    private fun composeLibrary(
         deviceItems: List<MediaItem>,
         trashed: List<MediaItem>,
         favoriteIds: Set<String>,
-        records: Map<String, SyncRecord>
+        records: Map<String, SyncRecord>,
+        remoteRows: List<com.mydrive.app.data.remote.dto.MediaAssetRow>
     ): List<MediaItem> {
-        val remoteRows = mediaAssetsRepository.loadOwnerAssets()
         val hidden = HashSet(visibilityStore.hiddenLocalIds())
         val byLocalMediaId = remoteRows.mapNotNull { row ->
             row.localMediaId?.takeIf { it > 0L }?.let { it to row }

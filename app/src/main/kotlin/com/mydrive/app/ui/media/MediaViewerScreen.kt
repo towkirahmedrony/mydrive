@@ -1,5 +1,6 @@
 package com.mydrive.app.ui.media
 
+import com.mydrive.app.MyDriveApp
 import android.app.Activity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -240,7 +241,13 @@ fun MediaViewerScreen(
             .filter { it.type == MediaType.PHOTO && it.displayUri.isNotBlank() }
             .forEach { neighbor ->
                 prefetchScope.launch {
-                    FullImageLoader.load(context, neighbor.displayUri, target)
+                    FullImageLoader.load(
+                        context = context,
+                        uriString = neighbor.displayUri,
+                        maxDimPx = target,
+                        fallbackMediaId = neighbor.remoteMediaId,
+                        sessionProvider = (context.applicationContext as? MyDriveApp)?.sessionProvider
+                    )
                 }
             }
     }
