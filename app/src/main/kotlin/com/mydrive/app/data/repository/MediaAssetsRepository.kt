@@ -12,6 +12,7 @@ import com.mydrive.app.debug.DeveloperLogger
 import com.mydrive.app.debug.LogCategory
 import io.github.jan.supabase.SupabaseClient
 import io.github.jan.supabase.postgrest.from
+import io.github.jan.supabase.postgrest.postgrest
 import io.github.jan.supabase.postgrest.query.Columns
 import io.github.jan.supabase.postgrest.query.Count
 import io.github.jan.supabase.postgrest.query.Order
@@ -19,7 +20,6 @@ import io.github.jan.supabase.postgrest.query.filter.FilterOperator
 import io.github.jan.supabase.postgrest.query.filter.PostgrestFilterBuilder
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import java.time.Instant
@@ -247,34 +247,31 @@ class MediaAssetsRepository(
     private suspend fun updateHiddenAt(remoteMediaId: String, hiddenAt: String?): HideMediaResult =
         withContext(Dispatchers.IO) {
             val supabase = client ?: return@withContext HideMediaResult.Failed
-            val prepared = sessionProvider.prepare()
-            val userId = when (prepared) {
-                is PreparedAuth.Available -> prepared.userId
+            // media_assets no longer grants UPDATE on user_hidden_at, so the
+            // only supported way to move an item in or out of Trash is this
+            // controlled RPC. Ownership is re-checked server-side against the
+            // caller's JWT (owner, or admin).
+            when (sessionProvider.prepare()) {
+                is PreparedAuth.Available -> Unit
                 PreparedAuth.SignedOut -> return@withContext HideMediaResult.Unauthorized
                 PreparedAuth.NetworkError -> return@withContext HideMediaResult.Failed
             }
             if (remoteMediaId.isBlank()) return@withContext HideMediaResult.NotFound
             try {
-                val payload = buildJsonObject {
-                    if (hiddenAt == null) {
-                        put("user_hidden_at", JsonNull)
-                    } else {
-                        put("user_hidden_at", hiddenAt)
+                supabase.postgrest.rpc(
+                    function = RPC_SET_LIBRARY_VISIBILITY,
+                    parameters = buildJsonObject {
+                        put("p_media_id", remoteMediaId)
+                        put("p_hidden", hiddenAt != null)
                     }
-                }
-                supabase.from(TABLE).update(payload) {
-                    filter {
-                        eq("id", remoteMediaId)
-                        eq("owner_id", userId)
-                    }
-                }
+                )
                 DeveloperLogger.info(
                     category = LogCategory.DATABASE,
                     event = if (hiddenAt == null) "MEDIA_LIBRARY_UNHIDDEN" else "MEDIA_LIBRARY_HIDDEN",
                     message = if (hiddenAt == null) {
-                        "Cleared user_hidden_at without touching archive or status"
+                        "Cleared user_hidden_at via set_media_library_visibility; archive and status untouched"
                     } else {
-                        "Set user_hidden_at without touching archive, status, or deleted_at"
+                        "Set user_hidden_at via set_media_library_visibility; archive, status and deleted_at untouched"
                     },
                     metadata = mapOf(
                         "remote_media_id" to remoteMediaId,
@@ -286,7 +283,7 @@ class MediaAssetsRepository(
                 DeveloperLogger.error(
                     category = LogCategory.DATABASE,
                     event = "MEDIA_LIBRARY_HIDE_FAILED",
-                    message = "Failed to update user_hidden_at",
+                    message = "Failed to set library visibility for media",
                     throwable = error,
                     metadata = mapOf("remote_media_id" to remoteMediaId)
                 )
@@ -322,5 +319,6 @@ class MediaAssetsRepository(
     companion object {
         private const val TABLE = "media_assets"
         private const val TABLE_REPLICATION_JOBS = "replication_jobs"
+        private const val RPC_SET_LIBRARY_VISIBILITY = "set_media_library_visibility"
     }
 }
