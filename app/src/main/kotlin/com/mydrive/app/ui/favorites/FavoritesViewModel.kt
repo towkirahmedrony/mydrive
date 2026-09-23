@@ -3,6 +3,7 @@ package com.mydrive.app.ui.favorites
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import com.mydrive.app.data.media.MediaLibraryPaging
 import com.mydrive.app.data.repository.MediaRepository
 import com.mydrive.app.ui.gallery.MediaGroup
 import com.mydrive.app.ui.util.dateGroupLabel
@@ -21,11 +22,8 @@ class FavoritesViewModel(
 
     val uiState: StateFlow<FavoritesUiState> = repository.media
         .map { media ->
-            val favorites = media
-                .filter { it.isFavorite }
-                .sortedByDescending { it.capturedAtMillis }
-            val groups = favorites
-                .groupBy { dateGroupLabel(it.capturedAtMillis) }
+            val favorites = media.filter { it.isFavorite }
+            val groups = MediaLibraryPaging.groupChronologically(favorites) { dateGroupLabel(it) }
                 .map { (label, items) -> MediaGroup(label, items) }
             FavoritesUiState(groups)
         }

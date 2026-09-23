@@ -19,12 +19,16 @@ import com.mydrive.app.data.local.LibraryVisibilityStore
 import com.mydrive.app.data.local.SyncRecord
 import com.mydrive.app.data.local.TelegramSettingsStore
 import com.mydrive.app.data.media.FullImageLoader
+import com.mydrive.app.data.media.MediaAlbumStats
+import com.mydrive.app.data.media.MediaLibraryPaging
+import com.mydrive.app.data.media.MediaPageCursor
 import com.mydrive.app.data.media.ThumbnailLoader
 import com.mydrive.app.data.session.AccountSession
 import com.mydrive.app.data.media.MediaAccess
 import com.mydrive.app.data.media.MediaPermissions
 import com.mydrive.app.data.media.MediaQueryException
 import com.mydrive.app.data.media.MediaStoreDataSource
+import com.mydrive.app.data.remote.dto.MediaAssetRow
 import com.mydrive.app.data.mock.MockMediaData
 import com.mydrive.app.data.model.ActivityEvent
 import com.mydrive.app.data.model.AlbumFolder
@@ -159,6 +163,10 @@ class MediaRepository(
     @Volatile
     private var boundUserId: String? = null
     private var overlayRefreshJob: Job? = null
+    private var catalogEpoch = 0
+    private var nextPageCursor: MediaPageCursor? = null
+    private var loadedRemoteRows: List<MediaAssetRow> = emptyList()
+    private var cloudAlbumStats: MediaAlbumStats = MediaAlbumStats()
 
     init {
         scope.launch {
@@ -211,11 +219,23 @@ class MediaRepository(
         lastRefreshAt = 0L
         overlayRefreshJob?.cancel()
         overlayRefreshJob = null
+        catalogEpoch += 1
+        nextPageCursor = null
+        loadedRemoteRows = emptyList()
+        cloudAlbumStats = MediaAlbumStats()
         _media.value = emptyList()
         _deviceMedia.value = emptyList()
         _albums.value = emptyList()
         publishTrash(emptyList())
-        _loadState.update { it.copy(isLoading = showLoading, errorMessage = null) }
+        _loadState.update {
+            it.copy(
+                isLoading = showLoading,
+                isRefreshing = false,
+                isLoadingMore = false,
+                hasNextPage = false,
+                errorMessage = null
+            )
+        }
     }
 
     fun onMediaStoreChanged() {
@@ -293,6 +313,10 @@ class MediaRepository(
     fun markTelegramConnectionFailed(message: String) { telegramSettingsStore.markConnectionFailed(message) }
     fun clearTelegramConfiguration() { telegramSettingsStore.clear() }
 
+    suspend fun loadFirstPage() = refresh(force = true)
+
+    suspend fun appendNextPage() = loadNextPage()
+
     suspend fun refresh(force: Boolean = false, localOverlayOnly: Boolean = false) {
         refreshMutex.withLock {
             val session = AccountSession.snapshot()
@@ -309,8 +333,20 @@ class MediaRepository(
             }
             applyAccessState()
             val canReadLocal = permissions.canReadMedia()
+            if (!localOverlayOnly) {
+                catalogEpoch += 1
+                nextPageCursor = null
+            }
             val showSpinner = !localOverlayOnly && _media.value.isEmpty()
-            _loadState.update { it.copy(isLoading = showSpinner, errorMessage = null) }
+            _loadState.update {
+                it.copy(
+                    isLoading = showSpinner,
+                    isRefreshing = !localOverlayOnly && !showSpinner,
+                    isLoadingMore = false,
+                    hasNextPage = if (localOverlayOnly) it.hasNextPage else false,
+                    errorMessage = null
+                )
+            }
             try {
                 val favoriteIds = favorites.ids.value
                 val scanned = if (canReadLocal) mediaStore.loadMedia() else emptyList()
@@ -338,7 +374,12 @@ class MediaRepository(
                     val presentIds = withContext(Dispatchers.Default) { deviceItems.mapTo(HashSet(deviceItems.size)) { it.id } }
                     synchronized(sessionLock) {
                         if (!sessionStillCurrent(session, ownerId)) return
-                        favorites.retainAll(presentIds + visibilityStore.hiddenLocalIds() + visibilityStore.cloudEntries().keys)
+                        favorites.retainAll(
+                            presentIds +
+                                visibilityStore.hiddenLocalIds() +
+                                visibilityStore.cloudEntries().keys +
+                                favorites.ids.value.filter { it.startsWith("cloud-") }
+                        )
                         // Missing MediaStore ids are local-unavailable, not cloud-deleted.
                         syncRepository.reconcile(presentIds + locallyHiddenIds + trashedIds)
                     }
@@ -351,50 +392,149 @@ class MediaRepository(
                             if (previous.id !in nextIds) rememberCloudCopy(previous.id)
                         }
                     }
-                    val cachedLibrary = composeLibrary(deviceItems, trashed, favoriteIds, records, emptyList())
-                    val libraryItems = if (localOverlayOnly) {
-                        mergePreservedCloudItems(cachedLibrary, deviceItems)
-                    } else {
-                        cachedLibrary
-                    }
                     if (canReadLocal) {
                         _deviceMedia.value = deviceItems
                         publishTrash(trashed)
                     }
-                    _media.value = libraryItems
-                    _albums.value = buildAlbums(libraryItems)
-                    if (!localOverlayOnly) lastRefreshAt = now
-                    updateStorage(libraryItems)
-                    if (libraryItems.isNotEmpty()) {
-                        _loadState.update { it.copy(isLoading = false, errorMessage = null) }
+                    if (localOverlayOnly) {
+                        val cachedLibrary = composeLibrary(
+                            deviceItems,
+                            trashed,
+                            favoriteIds,
+                            records,
+                            loadedRemoteRows
+                        )
+                        val libraryItems = mergePreservedCloudItems(cachedLibrary, deviceItems)
+                        _media.value = libraryItems
+                        _albums.value = buildAlbums(libraryItems, cloudAlbumStats)
+                        updateStorage(libraryItems)
+                        _loadState.update { it.copy(isLoading = false, isRefreshing = false, isLoadingMore = false) }
                     }
                 }
-                if (localOverlayOnly) {
-                    _loadState.update { it.copy(isLoading = false) }
-                    return
-                }
-                val remoteRows = mediaAssetsRepository.loadOwnerAssets()
-                synchronized(sessionLock) {
-                    if (!sessionStillCurrent(session, ownerId)) return
-                    val libraryItems = composeLibrary(deviceItems, trashed, favoriteIds, records, remoteRows)
-                    _media.value = libraryItems
-                    _albums.value = buildAlbums(libraryItems)
-                    lastRefreshAt = now
-                    updateStorage(libraryItems)
-                    _loadState.update { it.copy(isLoading = false, errorMessage = null) }
-                }
+                if (localOverlayOnly) return
+                loadFirstPageLocked(session, ownerId, deviceItems, trashed, favoriteIds, records, now)
             } catch (_: MediaQueryException) {
                 synchronized(sessionLock) {
                     if (!sessionStillCurrent(session, ownerId)) return
                     applyAccessState()
                     val keepExisting = _media.value.isNotEmpty()
-                    _loadState.update { it.copy(isLoading = false, errorMessage = if (keepExisting) null else "Couldn't load your photos and videos.") }
+                    _loadState.update {
+                        it.copy(
+                            isLoading = false,
+                            isRefreshing = false,
+                            isLoadingMore = false,
+                            errorMessage = if (keepExisting) null else "Couldn't load your photos and videos."
+                        )
+                    }
                 }
             } catch (_: SecurityException) {
                 synchronized(sessionLock) {
                     if (!sessionStillCurrent(session, ownerId)) return
                     applyAccessState()
-                    _loadState.update { it.copy(isLoading = false, errorMessage = null) }
+                    _loadState.update { it.copy(isLoading = false, isRefreshing = false, isLoadingMore = false, errorMessage = null) }
+                }
+            }
+        }
+    }
+
+    suspend fun loadNextPage() {
+        refreshMutex.withLock {
+            val session = AccountSession.snapshot()
+            val ownerId = boundUserId ?: session.userId
+            if (ownerId.isNullOrBlank()) return
+            val load = _loadState.value
+            if (load.isLoading || load.isRefreshing || load.isLoadingMore || !load.hasNextPage) return
+            val cursor = nextPageCursor ?: return
+            _loadState.update { it.copy(isLoadingMore = true) }
+            val epoch = catalogEpoch
+            try {
+                val page = mediaAssetsRepository.loadOwnerAssetsPage(cursor)
+                if (!sessionStillCurrent(session, ownerId) || epoch != catalogEpoch) return
+                val favoriteIds = favorites.ids.value
+                val records = syncRepository.records.value
+                val deviceItems = _deviceMedia.value
+                val trashed = _trashedMedia.value
+                synchronized(sessionLock) {
+                    if (!sessionStillCurrent(session, ownerId) || epoch != catalogEpoch) return
+                    loadedRemoteRows = MediaLibraryPaging.mergeRows(loadedRemoteRows, page.rows)
+                    nextPageCursor = page.nextCursor
+                    val libraryItems = composeLibrary(deviceItems, trashed, favoriteIds, records, loadedRemoteRows)
+                    _media.value = libraryItems
+                    _albums.value = buildAlbums(libraryItems, cloudAlbumStats)
+                    updateStorage(libraryItems)
+                    _loadState.update {
+                        it.copy(
+                            isLoadingMore = false,
+                            hasNextPage = page.hasNextPage,
+                            errorMessage = null
+                        )
+                    }
+                }
+            } catch (cancelled: CancellationException) {
+                _loadState.update { it.copy(isLoadingMore = false) }
+                throw cancelled
+            } catch (_: Exception) {
+                if (!sessionStillCurrent(session, ownerId) || epoch != catalogEpoch) return
+                _loadState.update { it.copy(isLoadingMore = false) }
+            }
+        }
+    }
+
+    private suspend fun loadFirstPageLocked(
+        session: AccountSession.Snapshot,
+        ownerId: String,
+        deviceItems: List<MediaItem>,
+        trashed: List<MediaItem>,
+        favoriteIds: Set<String>,
+        records: Map<String, SyncRecord>,
+        now: Long
+    ) {
+        val replacing = _media.value.isNotEmpty()
+        _loadState.update {
+            it.copy(
+                isLoading = !replacing,
+                isRefreshing = replacing,
+                isLoadingMore = false,
+                errorMessage = null
+            )
+        }
+        val epoch = catalogEpoch
+        try {
+            val page = mediaAssetsRepository.loadOwnerAssetsPage()
+            val albumStats = runCatching { mediaAssetsRepository.loadCloudAlbumStats() }.getOrDefault(MediaAlbumStats())
+            synchronized(sessionLock) {
+                if (!sessionStillCurrent(session, ownerId) || epoch != catalogEpoch) return
+                loadedRemoteRows = page.rows
+                nextPageCursor = page.nextCursor
+                cloudAlbumStats = albumStats
+                val libraryItems = composeLibrary(deviceItems, trashed, favoriteIds, records, page.rows)
+                _media.value = libraryItems
+                _albums.value = buildAlbums(libraryItems, albumStats)
+                lastRefreshAt = now
+                updateStorage(libraryItems)
+                _loadState.update {
+                    it.copy(
+                        isLoading = false,
+                        isRefreshing = false,
+                        isLoadingMore = false,
+                        hasNextPage = page.hasNextPage,
+                        errorMessage = null
+                    )
+                }
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            synchronized(sessionLock) {
+                if (!sessionStillCurrent(session, ownerId) || epoch != catalogEpoch) return
+                val keepExisting = _media.value.isNotEmpty()
+                _loadState.update {
+                    it.copy(
+                        isLoading = false,
+                        isRefreshing = false,
+                        isLoadingMore = false,
+                        errorMessage = if (keepExisting) null else "Couldn't load your photos and videos."
+                    )
                 }
             }
         }
@@ -416,18 +556,42 @@ class MediaRepository(
         _loadState.update { it.copy(accessGranted = access == MediaAccess.GRANTED, accessPartial = access == MediaAccess.PARTIAL, needsPermission = access == MediaAccess.NEEDS_REQUEST, permissionDenied = access == MediaAccess.DENIED) }
     }
 
-    private fun buildAlbums(items: List<MediaItem>): List<AlbumFolder> = items.groupBy { it.albumId }.map { (albumId, albumItems) ->
-        val cover = albumItems.maxByOrNull { it.capturedAtMillis }
-        AlbumFolder(
-            id = albumId,
-            name = cover?.albumName?.ifBlank { "Other" } ?: "Other",
-            coverSeed = cover?.thumbnailSeed ?: 0,
-            coverType = cover?.type ?: MediaType.PHOTO,
-            mediaCount = albumItems.size,
-            coverUri = cover?.displayUri.orEmpty(),
-            coverRemoteMediaId = cover?.remoteMediaId
-        )
-    }.sortedByDescending { it.mediaCount }
+    private fun buildAlbums(
+        items: List<MediaItem>,
+        cloudStats: MediaAlbumStats = cloudAlbumStats
+    ): List<AlbumFolder> {
+        val grouped = items.groupBy { it.albumId }.map { (albumId, albumItems) ->
+            val cover = albumItems.maxByOrNull { it.capturedAtMillis }
+            val count = if (albumId == "mydrive") {
+                maxOf(albumItems.size, cloudStats.cloudOnlyCount)
+            } else {
+                albumItems.size
+            }
+            AlbumFolder(
+                id = albumId,
+                name = cover?.albumName?.ifBlank { "Other" } ?: "Other",
+                coverSeed = cover?.thumbnailSeed ?: 0,
+                coverType = cover?.type ?: MediaType.PHOTO,
+                mediaCount = count,
+                coverUri = cover?.displayUri.orEmpty(),
+                coverRemoteMediaId = cover?.remoteMediaId
+            )
+        }.toMutableList()
+        if (cloudStats.cloudOnlyCount > 0 && grouped.none { it.id == "mydrive" }) {
+            val cover = cloudStats.cover
+            val preview = cover?.thumbnailUrl ?: cover?.storageUrl.orEmpty()
+            grouped += AlbumFolder(
+                id = "mydrive",
+                name = "My Drive",
+                coverSeed = cover?.id.hashCode(),
+                coverType = if (cover?.mimeType?.startsWith("video/") == true) MediaType.VIDEO else MediaType.PHOTO,
+                mediaCount = cloudStats.cloudOnlyCount,
+                coverUri = preview,
+                coverRemoteMediaId = cover?.id
+            )
+        }
+        return grouped.sortedByDescending { it.mediaCount }
+    }
 
     private fun updateStorage(items: List<MediaItem>) {
         val photos = items.count { it.type == MediaType.PHOTO }
@@ -1475,7 +1639,7 @@ class MediaRepository(
         try { context.contentResolver.query(uri, projection, null, null, null)?.use { cursor -> if (cursor.moveToFirst()) { val idx = cursor.getColumnIndex(MediaStore.MediaColumns.DATA); if (idx >= 0) cursor.getString(idx) else null } else null } } catch (_: Exception) { null }
     }
 
-    private fun rebuildAlbums() { _albums.value = buildAlbums(_media.value) }
+    private fun rebuildAlbums() { _albums.value = buildAlbums(_media.value, cloudAlbumStats) }
 
     companion object { private const val MIN_REFRESH_INTERVAL_MS = 1_500L }
 }

@@ -122,7 +122,10 @@ fun AlbumDetailScreen(
             } else {
                 "Media in this album will appear here."
             },
-            contentPadding = PaddingValues(bottom = Spacing.lg)
+            contentPadding = PaddingValues(bottom = Spacing.lg),
+            isLoadingMore = state.isLoadingMore,
+            hasNextPage = state.hasNextPage,
+            onLoadMore = viewModel::loadMore
         )
     }
 }

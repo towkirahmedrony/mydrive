@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
@@ -17,15 +18,22 @@ import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.PhotoLibrary
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.snapshotFlow
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.mydrive.app.ui.theme.Copper
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.filter
 import com.mydrive.app.data.model.AlbumFolder
 import com.mydrive.app.data.model.BackupState
 import com.mydrive.app.data.model.MediaItem
@@ -50,7 +58,10 @@ fun MediaGrid(
     emptyMessage: String = "Your photos and videos will appear here.",
     contentPadding: PaddingValues = PaddingValues(bottom = Spacing.lg),
     header: (@Composable () -> Unit)? = null,
-    showSkeleton: Boolean = false
+    showSkeleton: Boolean = false,
+    isLoadingMore: Boolean = false,
+    hasNextPage: Boolean = false,
+    onLoadMore: (() -> Unit)? = null
 ) {
     val colors = MaterialTheme.colorScheme
     val gridState = rememberSaveable(saver = LazyGridState.Saver) { LazyGridState() }
@@ -63,6 +74,21 @@ fun MediaGrid(
                 }
             }
         }.distinctBy { it.key }
+    }
+
+    LaunchedEffect(gridState, hasNextPage, isLoadingMore, onLoadMore, entries.size) {
+        if (onLoadMore == null || !hasNextPage) return@LaunchedEffect
+        snapshotFlow {
+            val info = gridState.layoutInfo
+            val lastVisible = info.visibleItemsInfo.lastOrNull()?.index ?: 0
+            val total = info.totalItemsCount
+            total > 0 && lastVisible >= total - 9
+        }
+            .distinctUntilChanged()
+            .filter { it }
+            .collect {
+                if (hasNextPage && !isLoadingMore) onLoadMore()
+            }
     }
 
     if (groups.isEmpty() && header == null && !showSkeleton) {
@@ -127,6 +153,24 @@ fun MediaGrid(
                             bottom = Spacing.xs
                         )
                     )
+                }
+            }
+            if (isLoadingMore || hasNextPage) {
+                item(key = "paging-footer", span = { GridItemSpan(3) }, contentType = "footer") {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = Spacing.md),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        if (isLoadingMore) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(24.dp),
+                                color = Copper,
+                                strokeWidth = 2.dp
+                            )
+                        }
+                    }
                 }
             }
         }

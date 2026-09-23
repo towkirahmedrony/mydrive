@@ -123,7 +123,7 @@ fun GalleryScreen(
             }
         }
 
-        if (state.isLoading && state.hasMedia) {
+        if ((state.isLoading || state.isRefreshing) && state.hasMedia) {
             LinearProgressIndicator(
                 modifier = Modifier.fillMaxWidth(),
                 color = Copper,
@@ -184,7 +184,10 @@ fun GalleryScreen(
                     onMediaClick = onMediaClick,
                     emptyTitle = emptyTitle,
                     emptyMessage = emptyMessage,
-                    contentPadding = PaddingValues(bottom = Spacing.lg)
+                    contentPadding = PaddingValues(bottom = Spacing.lg),
+                    isLoadingMore = state.isLoadingMore,
+                    hasNextPage = state.hasNextPage,
+                    onLoadMore = viewModel::loadMore
                 )
             }
         }

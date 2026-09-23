@@ -3,6 +3,7 @@ package com.mydrive.app.ui.gallery
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import com.mydrive.app.data.media.MediaLibraryPaging
 import com.mydrive.app.data.model.MediaItem
 import com.mydrive.app.data.model.MediaType
 import com.mydrive.app.data.repository.MediaRepository
@@ -31,6 +32,9 @@ data class GalleryUiState(
     val query: String,
     val groups: List<MediaGroup>,
     val isLoading: Boolean = false,
+    val isRefreshing: Boolean = false,
+    val isLoadingMore: Boolean = false,
+    val hasNextPage: Boolean = false,
     val needsPermission: Boolean = false,
     val permissionDenied: Boolean = false,
     val accessPartial: Boolean = false,
@@ -67,10 +71,7 @@ class GalleryViewModel(
             .filter { item ->
                 currentQuery.isBlank() || item.filename.contains(currentQuery, ignoreCase = true)
             }
-            .sortedByDescending { it.capturedAtMillis }
-
-        val groups = filtered
-            .groupBy { dateGroupLabel(it.capturedAtMillis) }
+        val groups = MediaLibraryPaging.groupChronologically(filtered) { dateGroupLabel(it) }
             .map { (label, items) -> MediaGroup(label, items) }
 
         GalleryUiState(
@@ -78,6 +79,9 @@ class GalleryViewModel(
             query = currentQuery,
             groups = groups,
             isLoading = load.isLoading,
+            isRefreshing = load.isRefreshing,
+            isLoadingMore = load.isLoadingMore,
+            hasNextPage = load.hasNextPage,
             needsPermission = load.needsPermission,
             permissionDenied = load.permissionDenied,
             accessPartial = load.accessPartial,
@@ -92,6 +96,9 @@ class GalleryViewModel(
             query = "",
             groups = emptyList(),
             isLoading = repository.loadState.value.isLoading,
+            isRefreshing = repository.loadState.value.isRefreshing,
+            isLoadingMore = repository.loadState.value.isLoadingMore,
+            hasNextPage = repository.loadState.value.hasNextPage,
             needsPermission = repository.loadState.value.needsPermission,
             permissionDenied = repository.loadState.value.permissionDenied,
             accessPartial = repository.loadState.value.accessPartial
@@ -116,6 +123,14 @@ class GalleryViewModel(
     fun refresh(force: Boolean = true) {
         viewModelScope.launch {
             repository.refresh(force = force)
+        }
+    }
+
+    fun loadMore() {
+        val state = uiState.value
+        if (!state.hasNextPage || state.isLoadingMore || state.isLoading || state.isRefreshing) return
+        viewModelScope.launch {
+            repository.appendNextPage()
         }
     }
 

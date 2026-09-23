@@ -178,5 +178,8 @@ data class MediaLoadState(
     val needsPermission: Boolean = true,
     val permissionDenied: Boolean = false,
     val isLoading: Boolean = false,
+    val isRefreshing: Boolean = false,
+    val isLoadingMore: Boolean = false,
+    val hasNextPage: Boolean = false,
     val errorMessage: String? = null
 )

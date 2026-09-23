@@ -2,12 +2,21 @@ package com.mydrive.app.data.repository
 
 import com.mydrive.app.data.auth.AuthenticatedSessionProvider
 import com.mydrive.app.data.auth.PreparedAuth
+import com.mydrive.app.data.media.MediaAlbumStats
+import com.mydrive.app.data.media.MediaAssetsPage
+import com.mydrive.app.data.media.MediaLibraryPaging
+import com.mydrive.app.data.media.MediaPageCursor
 import com.mydrive.app.data.remote.dto.DriveArchiveJobRow
 import com.mydrive.app.data.remote.dto.MediaAssetRow
 import com.mydrive.app.debug.DeveloperLogger
 import com.mydrive.app.debug.LogCategory
 import io.github.jan.supabase.SupabaseClient
 import io.github.jan.supabase.postgrest.from
+import io.github.jan.supabase.postgrest.query.Columns
+import io.github.jan.supabase.postgrest.query.Count
+import io.github.jan.supabase.postgrest.query.Order
+import io.github.jan.supabase.postgrest.query.filter.FilterOperator
+import io.github.jan.supabase.postgrest.query.filter.PostgrestFilterBuilder
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonNull
@@ -27,53 +36,160 @@ class MediaAssetsRepository(
     private val sessionProvider: AuthenticatedSessionProvider
 ) {
 
-    suspend fun loadOwnerAssets(): List<MediaAssetRow> = withContext(Dispatchers.IO) {
-        val supabase = client ?: return@withContext emptyList()
-        val userId = sessionProvider.currentUserIdOrNull() ?: when (val prepared = sessionProvider.prepare()) {
-            is PreparedAuth.Available -> prepared.userId
-            else -> return@withContext emptyList()
-        }
+    suspend fun loadOwnerAssetsPage(
+        cursor: MediaPageCursor? = null,
+        pageSize: Int = MediaLibraryPaging.PAGE_SIZE
+    ): MediaAssetsPage = withContext(Dispatchers.IO) {
+        val supabase = client ?: return@withContext MediaAssetsPage(emptyList(), null, false)
+        val userId = currentUserId() ?: return@withContext MediaAssetsPage(emptyList(), null, false)
         try {
             val rows = supabase.from(TABLE)
-                .select {
-                    filter { eq("owner_id", userId) }
+                .select(columns = Columns.raw(MediaLibraryPaging.LISTING_COLUMNS)) {
+                    filter {
+                        applyLibraryVisibility(userId)
+                        applyKeyset(cursor)
+                    }
+                    order(column = "created_at", order = Order.DESCENDING)
+                    order(column = "id", order = Order.DESCENDING)
+                    limit(pageSize.toLong())
                 }
                 .decodeList<MediaAssetRow>()
-            val archivedIds = loadCompletedDriveArchiveIds(supabase, rows)
-            if (archivedIds.isEmpty()) rows else rows.map { row ->
-                if (row.id in archivedIds) row.copy(hasCompletedDriveArchive = true) else row
-            }
+            val annotated = annotateDriveArchives(supabase, rows)
+            MediaAssetsPage(
+                rows = annotated,
+                nextCursor = MediaLibraryPaging.nextCursor(annotated, pageSize),
+                hasNextPage = MediaLibraryPaging.hasNextPage(annotated.size, pageSize)
+            )
         } catch (error: Exception) {
             DeveloperLogger.error(
                 category = LogCategory.DATABASE,
                 event = "MEDIA_ASSETS_LOAD_FAILED",
-                message = "Failed to load media_assets visibility rows",
+                message = "Failed to load paginated media_assets rows",
                 throwable = error
             )
-            emptyList()
+            throw error
         }
     }
 
-    private suspend fun loadCompletedDriveArchiveIds(
+    suspend fun loadCloudAlbumStats(): MediaAlbumStats = withContext(Dispatchers.IO) {
+        val supabase = client ?: return@withContext MediaAlbumStats()
+        val userId = currentUserId() ?: return@withContext MediaAlbumStats()
+        try {
+            val cloudOnly = supabase.from(TABLE)
+                .select(columns = Columns.list("id")) {
+                    filter {
+                        applyLibraryVisibility(userId)
+                        applyAvailability()
+                        exact("local_media_id", null)
+                    }
+                    count(Count.EXACT)
+                    limit(1)
+                }
+                .countOrNull()?.toInt() ?: 0
+            val cover = supabase.from(TABLE)
+                .select(columns = Columns.raw(MediaLibraryPaging.LISTING_COLUMNS)) {
+                    filter {
+                        applyLibraryVisibility(userId)
+                        applyAvailability()
+                        exact("local_media_id", null)
+                    }
+                    order(column = "created_at", order = Order.DESCENDING)
+                    order(column = "id", order = Order.DESCENDING)
+                    limit(1)
+                }
+                .decodeList<MediaAssetRow>()
+                .firstOrNull()
+            MediaAlbumStats(cloudOnlyCount = cloudOnly, cover = cover)
+        } catch (error: Exception) {
+            DeveloperLogger.error(
+                category = LogCategory.DATABASE,
+                event = "MEDIA_ASSETS_ALBUM_STATS_FAILED",
+                message = "Failed to load media_assets album aggregation",
+                throwable = error
+            )
+            MediaAlbumStats()
+        }
+    }
+
+    suspend fun findMatchingAsset(
+        remoteMediaId: String?,
+        localMediaId: Long?,
+        clientUploadId: String?
+    ): MediaAssetRow? = withContext(Dispatchers.IO) {
+        val supabase = client ?: return@withContext null
+        val userId = currentUserId() ?: return@withContext null
+        try {
+            if (!remoteMediaId.isNullOrBlank()) {
+                return@withContext supabase.from(TABLE)
+                    .select(columns = Columns.raw(MediaLibraryPaging.LISTING_COLUMNS)) {
+                        filter {
+                            eq("owner_id", userId)
+                            eq("id", remoteMediaId)
+                        }
+                        limit(1)
+                    }
+                    .decodeList<MediaAssetRow>()
+                    .firstOrNull()
+            }
+            if (!clientUploadId.isNullOrBlank()) {
+                supabase.from(TABLE)
+                    .select(columns = Columns.raw(MediaLibraryPaging.LISTING_COLUMNS)) {
+                        filter {
+                            eq("owner_id", userId)
+                            eq("client_upload_id", clientUploadId)
+                        }
+                        limit(1)
+                    }
+                    .decodeList<MediaAssetRow>()
+                    .firstOrNull()?.let { return@withContext it }
+            }
+            if (localMediaId != null && localMediaId > 0L) {
+                return@withContext supabase.from(TABLE)
+                    .select(columns = Columns.raw(MediaLibraryPaging.LISTING_COLUMNS)) {
+                        filter {
+                            eq("owner_id", userId)
+                            eq("local_media_id", localMediaId)
+                        }
+                        limit(1)
+                    }
+                    .decodeList<MediaAssetRow>()
+                    .firstOrNull()
+            }
+            null
+        } catch (error: Exception) {
+            DeveloperLogger.error(
+                category = LogCategory.DATABASE,
+                event = "MEDIA_ASSETS_LOOKUP_FAILED",
+                message = "Failed to resolve media_assets identity",
+                throwable = error
+            )
+            null
+        }
+    }
+
+    private suspend fun annotateDriveArchives(
         supabase: SupabaseClient,
         rows: List<MediaAssetRow>
-    ): Set<String> {
+    ): List<MediaAssetRow> {
         val candidates = rows.mapNotNull { row ->
-            row.id.takeIf { row.status == "READY" && row.storageUrl.isNullOrBlank() && row.thumbnailUrl.isNullOrBlank() }
+            row.id.takeIf { MediaLibraryPaging.needsDriveArchiveLookup(row) }
         }
-        if (candidates.isEmpty()) return emptySet()
+        if (candidates.isEmpty()) return rows
         return try {
             val completed = supabase.from(TABLE_REPLICATION_JOBS)
-                .select {
+                .select(columns = Columns.list("media_id")) {
                     filter {
                         eq("destination_type", "google_drive")
                         eq("status", "COMPLETED")
+                        isIn("media_id", candidates)
                     }
                 }
                 .decodeList<DriveArchiveJobRow>()
                 .mapNotNull { it.mediaId.takeIf(String::isNotBlank) }
                 .toSet()
-            completed.intersect(candidates.toSet())
+            if (completed.isEmpty()) rows else rows.map { row ->
+                if (row.id in completed) row.copy(hasCompletedDriveArchive = true) else row
+            }
         } catch (error: Exception) {
             DeveloperLogger.error(
                 category = LogCategory.DATABASE,
@@ -81,7 +197,7 @@ class MediaAssetsRepository(
                 message = "Failed to load completed Drive archive jobs",
                 throwable = error
             )
-            emptySet()
+            rows
         }
     }
 
@@ -117,14 +233,15 @@ class MediaAssetsRepository(
         clientUploadId: String?
     ): String? {
         if (!remoteMediaId.isNullOrBlank()) return remoteMediaId
-        val assets = loadOwnerAssets()
-        if (!clientUploadId.isNullOrBlank()) {
-            assets.firstOrNull { it.clientUploadId == clientUploadId }?.id?.let { return it }
+        return findMatchingAsset(remoteMediaId, localMediaId, clientUploadId)?.id
+    }
+
+    private suspend fun currentUserId(): String? {
+        sessionProvider.currentUserIdOrNull()?.let { return it }
+        return when (val prepared = sessionProvider.prepare()) {
+            is PreparedAuth.Available -> prepared.userId
+            else -> null
         }
-        if (localMediaId != null && localMediaId > 0L) {
-            assets.firstOrNull { it.localMediaId == localMediaId }?.id?.let { return it }
-        }
-        return null
     }
 
     private suspend fun updateHiddenAt(remoteMediaId: String, hiddenAt: String?): HideMediaResult =
@@ -176,6 +293,31 @@ class MediaAssetsRepository(
                 HideMediaResult.Failed
             }
         }
+
+    private fun PostgrestFilterBuilder.applyLibraryVisibility(userId: String) {
+        eq("owner_id", userId)
+        eq("status", "READY")
+        exact("user_hidden_at", null)
+    }
+
+    private fun PostgrestFilterBuilder.applyAvailability() {
+        or {
+            filterNot("storage_url", FilterOperator.IS, null)
+            filterNot("thumbnail_url", FilterOperator.IS, null)
+            filterNot("drive_archived_at", FilterOperator.IS, null)
+        }
+    }
+
+    private fun PostgrestFilterBuilder.applyKeyset(cursor: MediaPageCursor?) {
+        if (cursor == null) return
+        or {
+            lt("created_at", cursor.createdAt)
+            and {
+                eq("created_at", cursor.createdAt)
+                lt("id", cursor.id)
+            }
+        }
+    }
 
     companion object {
         private const val TABLE = "media_assets"
