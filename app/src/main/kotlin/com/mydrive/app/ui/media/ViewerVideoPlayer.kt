@@ -29,6 +29,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import com.mydrive.app.data.media.MediaDiskCache
 import com.mydrive.app.data.media.MediaFetchSource
 import com.mydrive.app.data.media.ThumbnailLoader
 import com.mydrive.app.data.media.VideoSource
@@ -95,6 +96,14 @@ fun ViewerVideoPlayer(
         } else {
             state.copy(error = false, buffering = true)
         }
+    }
+
+    // A cache entry feeding the player must outlive an eviction pass that
+    // happens mid-playback; the pin is released when this item goes away.
+    val pinnedFile = playbackSource?.file
+    DisposableEffect(pinnedFile) {
+        pinnedFile?.let { MediaDiskCache.pin(it) }
+        onDispose { pinnedFile?.let { MediaDiskCache.unpin(it) } }
     }
 
     LaunchedEffect(state) {

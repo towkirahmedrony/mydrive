@@ -6,12 +6,15 @@ import com.mydrive.app.data.auth.AuthenticatedSessionProvider
 import com.mydrive.app.data.session.AccountSession
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.io.File
 
 /** A playable video location plus the headers the player must send with it. */
 data class VideoSource(
     val uri: Uri,
     val headers: Map<String, String> = emptyMap(),
-    val source: MediaFetchSource
+    val source: MediaFetchSource,
+    /** The cache entry backing this source, when it is played from disk. */
+    val file: File? = null
 )
 
 /**
@@ -34,7 +37,8 @@ object VideoSourceResolver {
         val ownerId = userId ?: AccountSession.userId
         val cachedOriginal = if (!ownerId.isNullOrBlank() && !mediaId.isNullOrBlank()) {
             MediaCacheKeys.originalFile(context.applicationContext.filesDir, ownerId, mediaId)
-                .takeIf { it.isFile && it.length() > 0 }
+                .also { MediaDiskCache.discardInvalid(it) }
+                .takeIf { MediaDiskCache.isComplete(it) }
         } else {
             null
         }
@@ -44,7 +48,8 @@ object VideoSourceResolver {
             if (step in exclude) continue
             val resolved = when (step) {
                 MediaFetchSource.DISK -> cachedOriginal?.let {
-                    VideoSource(Uri.fromFile(it), source = MediaFetchSource.DISK)
+                    MediaDiskCache.touch(it)
+                    VideoSource(Uri.fromFile(it), source = MediaFetchSource.DISK, file = it)
                 }
                 MediaFetchSource.LOCAL -> localSource(context, uriString)
                 MediaFetchSource.CLOUDINARY -> runCatching { Uri.parse(uriString) }.getOrNull()

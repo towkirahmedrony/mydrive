@@ -7,6 +7,7 @@ import com.mydrive.app.data.local.GalleryTabStore
 import com.mydrive.app.data.local.SyncStateStore
 import com.mydrive.app.data.local.TelegramSettingsStore
 import com.mydrive.app.data.local.UploadQueueDatabase
+import com.mydrive.app.data.media.MediaDiskCache
 import com.mydrive.app.data.media.MediaPermissions
 import com.mydrive.app.data.media.MediaStoreDataSource
 import com.mydrive.app.data.auth.AuthenticatedSessionProvider
@@ -31,6 +32,7 @@ import com.mydrive.app.debug.LogCategory
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 
 class MyDriveApp : Application() {
     private val applicationScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -129,5 +131,8 @@ class MyDriveApp : Application() {
         )
         authRepository
         UploadWorkScheduler.schedule(this)
+        // One sweep per process start reclaims whatever the previous run left
+        // behind — interrupted writes included — before the caches grow again.
+        applicationScope.launch { MediaDiskCache.trim(filesDir) }
     }
 }

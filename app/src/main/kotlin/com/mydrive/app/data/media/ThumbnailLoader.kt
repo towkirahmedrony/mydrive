@@ -14,6 +14,7 @@ import com.mydrive.app.data.auth.AuthenticatedSessionProvider
 import com.mydrive.app.data.session.AccountSession
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.io.ByteArrayOutputStream
 import java.io.InputStream
 import java.net.HttpURLConnection
 
@@ -274,19 +275,31 @@ object ThumbnailLoader {
         return (max / 8).coerceIn(4096, 24_576)
     }
 
-    private fun readDisk(context: Context, userId: String, mediaId: String, sizePx: Int): Bitmap? =
-        runCatching {
-            BitmapFactory.decodeFile(
-                MediaCacheKeys.thumbnailFile(context.filesDir, userId, mediaId, sizePx).path
-            )
-        }.getOrNull()
+    private fun readDisk(context: Context, userId: String, mediaId: String, sizePx: Int): Bitmap? {
+        val file = MediaCacheKeys.thumbnailFile(context.filesDir, userId, mediaId, sizePx)
+        if (!MediaDiskCache.isComplete(file)) {
+            MediaDiskCache.discardInvalid(file)
+            return null
+        }
+        val bitmap = MediaDiskCache.pinned(file) {
+            runCatching { BitmapFactory.decodeFile(file.path) }.getOrNull()
+        }
+        if (bitmap == null) {
+            runCatching { file.delete() }
+            return null
+        }
+        MediaDiskCache.touch(file)
+        return bitmap
+    }
 
     private fun writeDisk(context: Context, userId: String, mediaId: String, sizePx: Int, bitmap: Bitmap) {
-        runCatching {
-            val file = MediaCacheKeys.thumbnailFile(context.filesDir, userId, mediaId, sizePx)
-            file.parentFile?.mkdirs()
-            file.outputStream().use { bitmap.compress(Bitmap.CompressFormat.WEBP, 88, it) }
-        }
+        val file = MediaCacheKeys.thumbnailFile(context.filesDir, userId, mediaId, sizePx)
+        val encoded = runCatching {
+            ByteArrayOutputStream().also {
+                bitmap.compress(Bitmap.CompressFormat.WEBP, 88, it)
+            }.toByteArray()
+        }.getOrNull() ?: return
+        if (MediaDiskCache.write(file, encoded)) MediaDiskCache.scheduleTrim(context)
     }
 
     private const val MAX_THUMBNAIL_BYTES = 2 * 1024 * 1024
