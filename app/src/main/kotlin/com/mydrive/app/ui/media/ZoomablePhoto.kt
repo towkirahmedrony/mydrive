@@ -41,6 +41,7 @@ import com.mydrive.app.data.media.FullImageLoader
 import com.mydrive.app.data.media.ThumbnailLoader
 import com.mydrive.app.MyDriveApp
 import com.mydrive.app.data.model.MediaItem
+import com.mydrive.app.data.session.AccountSession
 import com.mydrive.app.ui.util.thumbnailBrush
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
@@ -82,6 +83,7 @@ fun ZoomablePhoto(
     var containerSize by remember(item.id) { mutableStateOf(IntSize.Zero) }
     var loadFailed by remember(item.id) { mutableStateOf(false) }
 
+    val ownerId = AccountSession.userId
     val fullTargetPx = if (isCurrent) viewerFullResTargetPx(context) else 0
     val placeholderPx = 720
 
@@ -97,15 +99,15 @@ fun ZoomablePhoto(
             .collect { zoomed -> latestOnZoomedChange(zoomed) }
     }
 
-    var bitmap by remember(item.id) {
+    var bitmap by remember(item.id, ownerId) {
         mutableStateOf(
-            FullImageLoader.peek(item.displayUri)
-                ?: ThumbnailLoader.peek(item.displayUri, placeholderPx)
-                ?: ThumbnailLoader.peek(item.displayUri, 256)
+            FullImageLoader.peek(item.displayUri, mediaId = item.remoteMediaId, userId = ownerId)
+                ?: ThumbnailLoader.peek(item.displayUri, placeholderPx, mediaId = item.remoteMediaId, userId = ownerId)
+                ?: ThumbnailLoader.peek(item.displayUri, 256, mediaId = item.remoteMediaId, userId = ownerId)
         )
     }
 
-    LaunchedEffect(item.id, placeholderPx) {
+    LaunchedEffect(item.id, placeholderPx, ownerId) {
         if (item.displayUri.isBlank() && item.remoteMediaId.isNullOrBlank()) {
             loadFailed = true
             latestOnUnavailable()
@@ -118,7 +120,8 @@ fun ZoomablePhoto(
                 uriString = item.displayUri,
                 sizePx = placeholderPx,
                 fallbackMediaId = item.remoteMediaId,
-                sessionProvider = app?.sessionProvider
+                sessionProvider = app?.sessionProvider,
+                userId = ownerId
             )
             if (loaded != null) {
                 bitmap = loaded
@@ -126,7 +129,7 @@ fun ZoomablePhoto(
         }
     }
 
-    LaunchedEffect(item.id, fullTargetPx) {
+    LaunchedEffect(item.id, fullTargetPx, ownerId) {
         if ((item.displayUri.isBlank() && item.remoteMediaId.isNullOrBlank()) || fullTargetPx <= 0) return@LaunchedEffect
         val app = context.applicationContext as? MyDriveApp
         val full = FullImageLoader.load(
@@ -134,7 +137,8 @@ fun ZoomablePhoto(
             uriString = item.displayUri,
             maxDimPx = fullTargetPx,
             fallbackMediaId = item.remoteMediaId,
-            sessionProvider = app?.sessionProvider
+            sessionProvider = app?.sessionProvider,
+            userId = ownerId
         )
         if (full != null) {
             bitmap = full

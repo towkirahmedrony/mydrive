@@ -34,6 +34,7 @@ import com.mydrive.app.data.media.ThumbnailLoader
 import com.mydrive.app.data.media.FullImageLoader
 import com.mydrive.app.data.model.MediaItem
 import com.mydrive.app.MyDriveApp
+import com.mydrive.app.data.session.AccountSession
 import com.mydrive.app.ui.components.MediaImage
 import com.mydrive.app.ui.theme.Copper
 import com.mydrive.app.ui.theme.Ink
@@ -74,12 +75,13 @@ fun ViewerVideoPlayer(
     val lifecycleOwner = LocalLifecycleOwner.current
     val context = androidx.compose.ui.platform.LocalContext.current
 
-    LaunchedEffect(item.id) {
+    LaunchedEffect(item.id, AccountSession.userId) {
         playbackUri = FullImageLoader.ensureOriginalFile(
             context = context,
             uriString = item.uri,
             mediaId = item.remoteMediaId,
-            sessionProvider = (context.applicationContext as? MyDriveApp)?.sessionProvider
+            sessionProvider = (context.applicationContext as? MyDriveApp)?.sessionProvider,
+            userId = AccountSession.userId
         )?.toString() ?: item.uri
     }
 
@@ -158,11 +160,17 @@ fun ViewerVideoPlayer(
                     uri = item.displayUri,
                     seed = item.thumbnailSeed,
                     type = item.type,
+                    fallbackMediaId = item.remoteMediaId,
                     modifier = Modifier.fillMaxSize(),
                     contentScale = ContentScale.Fit,
                     sizePx = 720,
                     contentDescription = item.filename,
-                    placeholderBitmap = ThumbnailLoader.peek(item.uri, 256)
+                    placeholderBitmap = ThumbnailLoader.peek(
+                        item.uri,
+                        256,
+                        mediaId = item.remoteMediaId,
+                        userId = AccountSession.userId
+                    )
                 )
                 Box(
                     modifier = Modifier

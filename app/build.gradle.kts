@@ -159,4 +159,5 @@ dependencies {
     implementation(libs.androidx.work.runtime.ktx)
     implementation("androidx.exifinterface:exifinterface:1.3.7")
     debugImplementation(libs.androidx.compose.ui.tooling)
+    testImplementation(libs.junit)
 }

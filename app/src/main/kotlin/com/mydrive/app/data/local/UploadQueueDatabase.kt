@@ -9,6 +9,8 @@ import androidx.room.OnConflictStrategy
 import androidx.room.Query
 import androidx.room.Room
 import androidx.room.RoomDatabase
+import androidx.room.migration.Migration
+import androidx.sqlite.db.SupportSQLiteDatabase
 import kotlinx.coroutines.flow.Flow
 
 @Entity(tableName = "upload_queue")
@@ -28,6 +30,7 @@ data class UploadQueueEntity(
     val cloudinaryPublicId: String? = null,
     val cloudinarySecureUrl: String? = null,
     val finalizedMediaId: String? = null,
+    val ownerUserId: String? = null,
     val updatedAt: Long = 0L
 )
 
@@ -38,6 +41,9 @@ interface UploadQueueDao {
 
     @Query("SELECT * FROM upload_queue WHERE uploadState IN ('DETECTED', 'QUEUED', 'RETRYING', 'UPLOADED', 'FINALIZING') ORDER BY createdAt ASC")
     suspend fun pending(): List<UploadQueueEntity>
+
+    @Query("SELECT * FROM upload_queue WHERE ownerUserId = :ownerUserId AND uploadState IN ('DETECTED', 'QUEUED', 'RETRYING', 'UPLOADED', 'FINALIZING') ORDER BY createdAt ASC")
+    suspend fun pendingForOwner(ownerUserId: String): List<UploadQueueEntity>
 
     @Query("SELECT * FROM upload_queue WHERE mediaId = :mediaId LIMIT 1")
     suspend fun find(mediaId: String): UploadQueueEntity?
@@ -52,19 +58,25 @@ interface UploadQueueDao {
     suspend fun updateState(mediaId: String, state: String, retryCount: Int, lastError: String?, updatedAt: Long)
 }
 
-@Database(entities = [UploadQueueEntity::class], version = 1, exportSchema = false)
+@Database(entities = [UploadQueueEntity::class], version = 2, exportSchema = false)
 abstract class UploadQueueDatabase : RoomDatabase() {
     abstract fun uploadQueueDao(): UploadQueueDao
 
     companion object {
         @Volatile private var instance: UploadQueueDatabase? = null
 
+        private val MIGRATION_1_2 = object : Migration(1, 2) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL("ALTER TABLE upload_queue ADD COLUMN ownerUserId TEXT")
+            }
+        }
+
         fun get(context: Context): UploadQueueDatabase = instance ?: synchronized(this) {
             instance ?: Room.databaseBuilder(
                 context.applicationContext,
                 UploadQueueDatabase::class.java,
                 "upload_queue.db"
-            ).build().also { instance = it }
+            ).addMigrations(MIGRATION_1_2).build().also { instance = it }
         }
     }
 }

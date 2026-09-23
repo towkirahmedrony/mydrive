@@ -30,9 +30,19 @@ class LibraryVisibilityStore(context: Context) {
         .getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE)
     private val json = Json { ignoreUnknownKeys = true }
 
+    @Volatile
+    private var ownerUserId: String? = null
+
+    @Synchronized
+    fun bindUser(userId: String?) {
+        ownerUserId = userId?.takeIf { it.isNotBlank() }
+        dropUnscopedLegacy()
+    }
+
     @Synchronized
     fun hiddenLocalIds(): Set<String> {
-        return preferences.getStringSet(KEY_HIDDEN, emptySet()).orEmpty().toSet()
+        val userId = ownerUserId ?: return emptySet()
+        return preferences.getStringSet(UserStoreKeys.hidden(userId), emptySet()).orEmpty().toSet()
     }
 
     @Synchronized
@@ -40,29 +50,33 @@ class LibraryVisibilityStore(context: Context) {
 
     @Synchronized
     fun hideLocal(localId: String) {
+        val userId = ownerUserId ?: return
         val next = HashSet(hiddenLocalIds())
         if (next.add(localId)) {
-            preferences.edit().putStringSet(KEY_HIDDEN, next).apply()
+            preferences.edit().putStringSet(UserStoreKeys.hidden(userId), next).apply()
         }
         removeCloud(localId)
     }
 
     @Synchronized
     fun unhideLocal(localId: String) {
+        val userId = ownerUserId ?: return
         val next = HashSet(hiddenLocalIds())
         if (next.remove(localId)) {
-            preferences.edit().putStringSet(KEY_HIDDEN, next).apply()
+            preferences.edit().putStringSet(UserStoreKeys.hidden(userId), next).apply()
         }
     }
 
     @Synchronized
     fun replaceHidden(ids: Set<String>) {
-        preferences.edit().putStringSet(KEY_HIDDEN, HashSet(ids)).apply()
+        val userId = ownerUserId ?: return
+        preferences.edit().putStringSet(UserStoreKeys.hidden(userId), HashSet(ids)).apply()
     }
 
     @Synchronized
     fun cloudEntries(): Map<String, CloudLibraryEntry> {
-        val raw = preferences.getString(KEY_CLOUD, null) ?: return emptyMap()
+        val userId = ownerUserId ?: return emptyMap()
+        val raw = preferences.getString(UserStoreKeys.cloud(userId), null) ?: return emptyMap()
         return try {
             json.decodeFromString<Map<String, CloudLibraryEntry>>(raw)
         } catch (_: Exception) {
@@ -92,15 +106,26 @@ class LibraryVisibilityStore(context: Context) {
         writeCloud(entries)
     }
 
+    @Synchronized
+    fun clearSession() {
+        ownerUserId = null
+    }
+
     private fun writeCloud(entries: Map<String, CloudLibraryEntry>) {
+        val userId = ownerUserId ?: return
         preferences.edit()
-            .putString(KEY_CLOUD, json.encodeToString(entries))
+            .putString(UserStoreKeys.cloud(userId), json.encodeToString(entries))
             .apply()
+    }
+
+    private fun dropUnscopedLegacy() {
+        if (!preferences.contains(LEGACY_HIDDEN) && !preferences.contains(LEGACY_CLOUD)) return
+        preferences.edit().remove(LEGACY_HIDDEN).remove(LEGACY_CLOUD).apply()
     }
 
     companion object {
         private const val PREFERENCES = "library_visibility"
-        private const val KEY_HIDDEN = "hidden_local_ids"
-        private const val KEY_CLOUD = "cloud_library_entries"
+        private const val LEGACY_HIDDEN = "hidden_local_ids"
+        private const val LEGACY_CLOUD = "cloud_library_entries"
     }
 }

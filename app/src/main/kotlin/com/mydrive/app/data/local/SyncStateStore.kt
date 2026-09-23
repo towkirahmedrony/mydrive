@@ -28,9 +28,19 @@ class SyncStateStore(context: Context) {
         .getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE)
     private val json = Json { ignoreUnknownKeys = true }
 
+    @Volatile
+    private var ownerUserId: String? = null
+
+    @Synchronized
+    fun bindUser(userId: String?) {
+        ownerUserId = userId?.takeIf { it.isNotBlank() }
+        migrateOwnedLegacyIfNeeded()
+    }
+
     @Synchronized
     fun read(): Map<String, SyncRecord> {
-        val raw = preferences.getString(KEY_RECORDS, null) ?: return emptyMap()
+        val userId = ownerUserId ?: return emptyMap()
+        val raw = preferences.getString(UserStoreKeys.syncRecords(userId), null) ?: return emptyMap()
         return try {
             json.decodeFromString<Map<String, SyncRecord>>(raw)
         } catch (_: Exception) {
@@ -40,17 +50,55 @@ class SyncStateStore(context: Context) {
 
     @Synchronized
     fun write(records: Map<String, SyncRecord>) {
+        val userId = ownerUserId ?: return
         preferences.edit()
-            .putString(KEY_RECORDS, json.encodeToString(records))
+            .putString(UserStoreKeys.syncRecords(userId), json.encodeToString(records))
             .apply()
     }
 
     @Synchronized
-    fun readPaused(): Boolean = preferences.getBoolean(KEY_PAUSED, false)
+    fun readPaused(): Boolean {
+        val userId = ownerUserId ?: return false
+        return preferences.getBoolean(UserStoreKeys.syncPaused(userId), false)
+    }
 
     @Synchronized
     fun writePaused(paused: Boolean) {
-        preferences.edit().putBoolean(KEY_PAUSED, paused).apply()
+        val userId = ownerUserId ?: return
+        preferences.edit().putBoolean(UserStoreKeys.syncPaused(userId), paused).apply()
+    }
+
+    @Synchronized
+    fun clearSession() {
+        ownerUserId = null
+    }
+
+    private fun migrateOwnedLegacyIfNeeded() {
+        val userId = ownerUserId ?: return
+        if (preferences.contains(UserStoreKeys.syncRecords(userId))) return
+        val legacyRaw = preferences.getString(KEY_RECORDS, null) ?: return
+        val legacy = try {
+            json.decodeFromString<Map<String, SyncRecord>>(legacyRaw)
+        } catch (_: Exception) {
+            return
+        }
+        val owned = legacy.filter { (_, record) ->
+            record.ownerUserId.isNullOrBlank() || record.ownerUserId == userId
+        }
+        if (owned.isEmpty()) {
+            preferences.edit().remove(KEY_RECORDS).remove(KEY_PAUSED).apply()
+            return
+        }
+        val mixedOwners = owned.values.mapNotNull { it.ownerUserId?.takeIf(String::isNotBlank) }.toSet()
+        if (mixedOwners.size > 1) {
+            preferences.edit().remove(KEY_RECORDS).remove(KEY_PAUSED).apply()
+            return
+        }
+        preferences.edit()
+            .putString(UserStoreKeys.syncRecords(userId), json.encodeToString(owned))
+            .remove(KEY_RECORDS)
+            .remove(KEY_PAUSED)
+            .apply()
     }
 
     companion object {

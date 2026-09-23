@@ -114,6 +114,7 @@ fun MediaDetailsScreen(
                     uri = item.displayUri,
                     seed = item.thumbnailSeed,
                     type = item.type,
+                    fallbackMediaId = item.remoteMediaId,
                     modifier = Modifier.fillMaxSize(),
                     contentScale = ContentScale.Crop,
                     sizePx = 720

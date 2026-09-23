@@ -274,6 +274,7 @@ class AuthRepository(
                         if (previousUserId != null) {
                             registeredDeviceId = null
                             lastSeenAtMillis = 0L
+                            onSignedOut(previousUserId)
                             _state.value = AuthState.Unauthenticated
                             DeveloperLogger.info(
                                 category = LogCategory.AUTH,
@@ -284,7 +285,6 @@ class AuthRepository(
                                     "error_source" to "supabase_client"
                                 )
                             )
-                            onSignedOut(previousUserId)
                         }
                     }
                     else -> Unit
@@ -294,25 +294,28 @@ class AuthRepository(
     }
 
     private suspend fun completeAuthenticatedSession(pendingFullName: String?) {
-        var resumeUserId: String? = null
         sessionMutex.withLock {
             val supabase = client ?: throw IllegalStateException(notConfiguredMessage())
             runCatching { supabase.auth.awaitInitialization() }
             val userId = supabase.auth.currentUserOrNull()?.id
                 ?: throw IllegalStateException("Your session expired. Please sign in again.")
-            val already = when (val current = _state.value) {
-                is AuthState.Authenticated -> current.profile.id == userId
-                is AuthState.Suspended -> current.profile.id == userId
-                else -> false
+            val previousUserId = when (val current = _state.value) {
+                is AuthState.Authenticated -> current.profile.id
+                is AuthState.Suspended -> current.profile.id
+                else -> null
             }
+            if (previousUserId != null && previousUserId != userId) {
+                onSignedOut(previousUserId)
+            }
+            val already = previousUserId == userId
             if (already) return
             val profile = loadProfile(userId, pendingFullName)
+            onAuthenticated(userId)
             if (profile.isSuspended) {
                 _state.value = AuthState.Suspended(profile)
                 return
             }
             _state.value = AuthState.Authenticated(profile)
-            resumeUserId = userId
             DeveloperLogger.info(
                 category = LogCategory.AUTH,
                 event = "SIGNED_IN",
@@ -324,7 +327,6 @@ class AuthRepository(
                 )
             )
         }
-        resumeUserId?.let(onAuthenticated)
         scope.launch {
             runCatching { touchDevice(force = true) }
         }

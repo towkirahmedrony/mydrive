@@ -5,6 +5,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -36,13 +37,15 @@ class MainActivity : ComponentActivity() {
                         email = state.profile.email,
                         onLogout = sessionViewModel::logout
                     )
-                    is AuthState.Authenticated -> AppNavHost(
-                        repository = app.mediaRepository,
-                        syncRepository = app.syncRepository,
-                        backupRepository = app.backupRepository,
-                        authRepository = app.authRepository,
-                        galleryTabStore = app.galleryTabStore
-                    )
+                    is AuthState.Authenticated -> key(state.profile.id) {
+                        AppNavHost(
+                            repository = app.mediaRepository,
+                            syncRepository = app.syncRepository,
+                            backupRepository = app.backupRepository,
+                            authRepository = app.authRepository,
+                            galleryTabStore = app.galleryTabStore
+                        )
+                    }
                 }
             }
         }

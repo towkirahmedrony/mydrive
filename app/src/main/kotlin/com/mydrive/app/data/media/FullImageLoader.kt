@@ -10,6 +10,7 @@ import android.util.LruCache
 import com.mydrive.app.BuildConfig
 import com.mydrive.app.data.auth.AuthenticatedSessionProvider
 import com.mydrive.app.data.auth.PreparedAuth
+import com.mydrive.app.data.session.AccountSession
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.buildJsonObject
@@ -18,7 +19,6 @@ import java.io.File
 import java.io.InputStream
 import java.net.HttpURLConnection
 import java.net.URL
-import java.security.MessageDigest
 
 object FullImageLoader {
     private const val MAX_CACHE_FILE_BYTES = 80L * 1024L * 1024L
@@ -30,20 +30,45 @@ object FullImageLoader {
         cache.evictAll()
     }
 
-    fun peek(uriString: String, maxDimPx: Int = 2048): Bitmap? =
-        if (uriString.isBlank()) null else cache.get(cacheKey(uriString, maxDimPx))
+    fun evictMemory() {
+        cache.evictAll()
+    }
+
+    fun peek(
+        uriString: String,
+        maxDimPx: Int = 2048,
+        mediaId: String? = null,
+        userId: String? = AccountSession.userId
+    ): Bitmap? {
+        if (uriString.isBlank() && mediaId.isNullOrBlank()) return null
+        val key = MediaCacheKeys.memoryKey(
+            userId = userId,
+            mediaId = mediaId,
+            uri = uriString,
+            variant = MediaCacheKeys.VARIANT_ORIGINAL,
+            sizePx = maxDimPx
+        )
+        if (key == "blocked-remote") return null
+        return cache.get(key)
+    }
 
     suspend fun ensureOriginalFile(
         context: Context,
         uriString: String,
         mediaId: String?,
-        sessionProvider: AuthenticatedSessionProvider?
+        sessionProvider: AuthenticatedSessionProvider?,
+        userId: String? = AccountSession.userId
     ): Uri? = withContext(Dispatchers.IO) {
-        if (mediaId.isNullOrBlank()) return@withContext Uri.parse(uriString)
-        val file = cacheFile(context.applicationContext, mediaId)
+        val session = AccountSession.snapshot()
+        val ownerId = userId ?: session.userId
+        if (mediaId.isNullOrBlank() || ownerId.isNullOrBlank()) {
+            return@withContext uriString.takeIf { it.isNotBlank() }?.let { Uri.parse(it) }
+        }
+        val file = MediaCacheKeys.originalFile(context.applicationContext.filesDir, ownerId, mediaId)
         if (file.isFile) return@withContext Uri.fromFile(file)
-        val provider = sessionProvider ?: return@withContext Uri.parse(uriString)
-        val bytes = downloadDriveOriginal(mediaId, provider) ?: return@withContext Uri.parse(uriString)
+        val provider = sessionProvider ?: return@withContext uriString.takeIf { it.isNotBlank() }?.let { Uri.parse(it) }
+        val bytes = downloadDriveOriginal(mediaId, provider) ?: return@withContext uriString.takeIf { it.isNotBlank() }?.let { Uri.parse(it) }
+        if (!stillCurrent(session, ownerId)) return@withContext null
         writeCache(file, bytes)
         Uri.fromFile(file)
     }
@@ -53,18 +78,35 @@ object FullImageLoader {
         uriString: String,
         maxDimPx: Int = 2048,
         fallbackMediaId: String? = null,
-        sessionProvider: AuthenticatedSessionProvider? = null
+        sessionProvider: AuthenticatedSessionProvider? = null,
+        userId: String? = AccountSession.userId
     ): Bitmap? = withContext(Dispatchers.IO) {
         if (uriString.isBlank() && fallbackMediaId.isNullOrBlank()) return@withContext null
-        val key = cacheKey(uriString.takeIf { it.isNotBlank() } ?: fallbackMediaId.orEmpty(), maxDimPx)
+        val session = AccountSession.snapshot()
+        val ownerId = userId ?: session.userId
+        val remote = MediaCacheKeys.isRemoteUri(uriString)
+        if (remote && ownerId.isNullOrBlank()) return@withContext null
+        val key = MediaCacheKeys.memoryKey(
+            userId = ownerId,
+            mediaId = fallbackMediaId,
+            uri = uriString,
+            variant = MediaCacheKeys.VARIANT_ORIGINAL,
+            sizePx = maxDimPx
+        )
+        if (key == "blocked-remote") return@withContext null
         cache.get(key)?.let { return@withContext it }
 
         val appContext = context.applicationContext
-        val diskFile = fallbackMediaId?.let { cacheFile(appContext, it) }
+        val diskFile = if (!ownerId.isNullOrBlank() && !fallbackMediaId.isNullOrBlank()) {
+            MediaCacheKeys.originalFile(appContext.filesDir, ownerId, fallbackMediaId)
+        } else {
+            null
+        }
         val bitmap = diskFile?.takeIf { it.isFile }?.let { decodeFile(it, maxDimPx) }
             ?: fallbackMediaId?.let { mediaId ->
                 sessionProvider?.let { provider ->
                     downloadDriveOriginal(mediaId, provider)?.let { bytes ->
+                        if (!stillCurrent(session, ownerId)) return@withContext null
                         diskFile?.let { writeCache(it, bytes) }
                         decodeBytes(bytes, maxDimPx)
                     }
@@ -76,7 +118,6 @@ object FullImageLoader {
                     ?: return@run null
                 if (uri.scheme == "http" || uri.scheme == "https") {
                     decodeHttp(uri, maxDimPx)?.also { decoded ->
-                        // The primary URL is also cached under the stable remote id.
                         if (diskFile != null) runCatching { downloadHttp(uri)?.let { writeCache(diskFile, it) } }
                     }
                 } else {
@@ -85,8 +126,15 @@ object FullImageLoader {
             }
             ?: return@withContext null
 
+        if (!stillCurrent(session, ownerId)) return@withContext null
         cache.put(key, bitmap)
         bitmap
+    }
+
+    private fun stillCurrent(session: AccountSession.Snapshot, ownerId: String?): Boolean {
+        if (ownerId.isNullOrBlank()) return true
+        return AccountSession.isCurrent(session.userId, session.generation) &&
+            AccountSession.userId == ownerId
     }
 
     private fun downloadHttp(uri: Uri): ByteArray? {
@@ -196,13 +244,6 @@ object FullImageLoader {
         }
     }
 
-    private fun cacheFile(context: Context, mediaId: String): File =
-        File(context.filesDir, "media_originals/${sha256(mediaId)}.bin")
-
-    private fun sha256(value: String): String = MessageDigest.getInstance("SHA-256")
-        .digest(value.toByteArray())
-        .joinToString("") { "%02x".format(it) }
-
     private fun decode(context: Context, uri: Uri, maxDimPx: Int): Bitmap? = try {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) decodeWithImageDecoder(context, uri, maxDimPx)
         else decodeSampled(context, uri, maxDimPx)
@@ -239,8 +280,6 @@ object FullImageLoader {
     private fun open(context: Context, uri: Uri): InputStream? = runCatching {
         context.contentResolver.openInputStream(uri)
     }.getOrNull()
-
-    private fun cacheKey(uriString: String, maxDimPx: Int): String = "$uriString@$maxDimPx"
 
     private fun cacheKb(): Int {
         val max = (Runtime.getRuntime().maxMemory() / 1024).toInt()

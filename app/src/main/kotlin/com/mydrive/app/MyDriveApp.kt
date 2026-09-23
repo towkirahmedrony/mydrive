@@ -23,6 +23,7 @@ import com.mydrive.app.data.repository.BackupRepository
 import com.mydrive.app.data.repository.MediaAssetsRepository
 import com.mydrive.app.data.repository.MediaRepository
 import com.mydrive.app.data.repository.SyncRepository
+import com.mydrive.app.data.session.AccountSessionCoordinator
 import com.mydrive.app.debug.DeveloperLogDatabase
 import com.mydrive.app.debug.DeveloperLogger
 import com.mydrive.app.debug.DeveloperModeStore
@@ -98,6 +99,14 @@ class MyDriveApp : Application() {
         )
     }
 
+    private val accountSessionCoordinator: AccountSessionCoordinator by lazy {
+        AccountSessionCoordinator(
+            context = this,
+            mediaRepository = mediaRepository,
+            syncRepository = syncRepository
+        )
+    }
+
     val authRepository: AuthRepository by lazy {
         AuthRepository(
             client = supabaseClient,
@@ -105,11 +114,8 @@ class MyDriveApp : Application() {
             deviceIdStore = DeviceIdStore(this),
             network = networkMonitor,
             scope = applicationScope,
-            onSignedOut = { userId -> syncRepository.retainOwner(userId) },
-            onAuthenticated = { userId ->
-                syncRepository.bindOwner(userId)
-                UploadWorkScheduler.schedule(this, replace = true)
-            }
+            onSignedOut = accountSessionCoordinator::onSignedOut,
+            onAuthenticated = accountSessionCoordinator::onAuthenticated
         )
     }
 

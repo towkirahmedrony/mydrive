@@ -18,6 +18,9 @@ import com.mydrive.app.data.local.FavoritesStore
 import com.mydrive.app.data.local.LibraryVisibilityStore
 import com.mydrive.app.data.local.SyncRecord
 import com.mydrive.app.data.local.TelegramSettingsStore
+import com.mydrive.app.data.media.FullImageLoader
+import com.mydrive.app.data.media.ThumbnailLoader
+import com.mydrive.app.data.session.AccountSession
 import com.mydrive.app.data.media.MediaAccess
 import com.mydrive.app.data.media.MediaPermissions
 import com.mydrive.app.data.media.MediaQueryException
@@ -148,23 +151,29 @@ class MediaRepository(
     val syncSummary: StateFlow<SyncSummary> = _syncSummary.asStateFlow()
 
     private val refreshMutex = Mutex()
+    private val sessionLock = Any()
     private var lastRefreshAt = 0L
     private val locallyHiddenIds = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+    @Volatile
+    private var boundUserId: String? = null
 
     init {
         scope.launch {
             syncRepository.records.collect { records ->
-                val currentLibrary = _media.value
-                val currentDevice = _deviceMedia.value
-                if (currentLibrary.isEmpty() && currentDevice.isEmpty()) return@collect
-                val updatedLibrary = currentLibrary.map { it.withRecord(records[it.id]) }
-                val updatedDevice = currentDevice.map { it.withRecord(records[it.id]) }
-                if (updatedLibrary != currentLibrary) {
-                    _media.value = updatedLibrary
-                    updateStorage(updatedLibrary)
-                }
-                if (updatedDevice != currentDevice) {
-                    _deviceMedia.value = updatedDevice
+                synchronized(sessionLock) {
+                    if (boundUserId.isNullOrBlank()) return@collect
+                    val currentLibrary = _media.value
+                    val currentDevice = _deviceMedia.value
+                    if (currentLibrary.isEmpty() && currentDevice.isEmpty()) return@synchronized
+                    val updatedLibrary = currentLibrary.map { it.withRecord(records[it.id]) }
+                    val updatedDevice = currentDevice.map { it.withRecord(records[it.id]) }
+                    if (updatedLibrary != currentLibrary) {
+                        _media.value = updatedLibrary
+                        updateStorage(updatedLibrary)
+                    }
+                    if (updatedDevice != currentDevice) {
+                        _deviceMedia.value = updatedDevice
+                    }
                 }
             }
         }
@@ -172,6 +181,37 @@ class MediaRepository(
 
     fun requiredPermissions(): Array<String> = permissions.requiredPermissions()
     fun markPermissionAsked() { permissions.markAsked() }
+
+    fun bindAccount(userId: String) {
+        synchronized(sessionLock) {
+            boundUserId = userId
+            visibilityStore.bindUser(userId)
+            favorites.bindUser(userId)
+            resetCatalog(showLoading = true)
+        }
+    }
+
+    fun clearAccountSession() {
+        synchronized(sessionLock) {
+            boundUserId = null
+            viewerSessionIds = null
+            locallyHiddenIds.clear()
+            visibilityStore.clearSession()
+            favorites.clearSession()
+            ThumbnailLoader.evictMemory()
+            FullImageLoader.evictMemory()
+            resetCatalog(showLoading = false)
+        }
+    }
+
+    private fun resetCatalog(showLoading: Boolean) {
+        lastRefreshAt = 0L
+        _media.value = emptyList()
+        _deviceMedia.value = emptyList()
+        _albums.value = emptyList()
+        publishTrash(emptyList())
+        _loadState.update { it.copy(isLoading = showLoading, errorMessage = null) }
+    }
 
     @Volatile
     private var viewerSessionIds: List<String>? = null
@@ -203,6 +243,7 @@ class MediaRepository(
     }
 
     fun toggleFavorite(id: String) {
+        if (boundUserId.isNullOrBlank()) return
         favorites.toggle(id)
         val favorite = favorites.contains(id)
         _media.update { items -> items.map { item -> if (item.id == id) item.copy(isFavorite = favorite) else item } }
@@ -240,6 +281,13 @@ class MediaRepository(
 
     suspend fun refresh(force: Boolean = false) {
         refreshMutex.withLock {
+            val session = AccountSession.snapshot()
+            val ownerId = boundUserId ?: session.userId
+            if (ownerId.isNullOrBlank()) {
+                synchronized(sessionLock) { resetCatalog(showLoading = false) }
+                applyAccessState()
+                return
+            }
             val now = System.currentTimeMillis()
             if (!force && _media.value.isNotEmpty() && now - lastRefreshAt < MIN_REFRESH_INTERVAL_MS) { applyAccessState(); return }
             applyAccessState()
@@ -250,6 +298,7 @@ class MediaRepository(
                 val favoriteIds = favorites.ids.value
                 val scanned = if (canReadLocal) mediaStore.loadMedia() else emptyList()
                 val trashed = if (canReadLocal) mediaStore.loadTrashedMedia() else emptyList()
+                if (!sessionStillCurrent(session, ownerId)) return
                 val scannedIds = scanned.mapTo(HashSet(scanned.size)) { it.id }
                 val trashedIds = trashed.mapTo(HashSet(trashed.size)) { it.id }
                 locallyHiddenIds.removeAll { it !in scannedIds && it !in trashedIds }
@@ -257,41 +306,64 @@ class MediaRepository(
                 val deviceItems = scanned
                     .filter { it.id !in locallyHiddenIds }
                     .map { item -> item.copy(isFavorite = item.id in favoriteIds).withRecord(records[item.id]) }
-                syncRepository.reconcileMedia(deviceItems)
+                if (!sessionStillCurrent(session, ownerId)) return
+                syncRepository.reconcileMedia(deviceItems, expectedOwner = ownerId)
+                if (!sessionStillCurrent(session, ownerId)) return
                 if (canReadLocal && permissions.access() == MediaAccess.GRANTED) {
                     val presentIds = withContext(Dispatchers.Default) { deviceItems.mapTo(HashSet(deviceItems.size)) { it.id } }
-                    favorites.retainAll(presentIds + visibilityStore.hiddenLocalIds() + visibilityStore.cloudEntries().keys)
-                    // Keep completed backup metadata even when the local MediaStore id is gone.
-                    syncRepository.reconcile(presentIds + locallyHiddenIds + trashedIds)
+                    synchronized(sessionLock) {
+                        if (!sessionStillCurrent(session, ownerId)) return
+                        favorites.retainAll(presentIds + visibilityStore.hiddenLocalIds() + visibilityStore.cloudEntries().keys)
+                        // Keep completed backup metadata even when the local MediaStore id is gone.
+                        syncRepository.reconcile(presentIds + locallyHiddenIds + trashedIds)
+                    }
                 }
                 // Offline-first: show the persisted cloud snapshot immediately. The
                 // remote rows below are a reconciliation pass, not a prerequisite
                 // for rendering media the user has already seen.
-                val cachedLibrary = composeLibrary(deviceItems, trashed, favoriteIds, records, emptyList())
-                _deviceMedia.value = deviceItems
-                _media.value = cachedLibrary
-                _albums.value = buildAlbums(cachedLibrary)
-                lastRefreshAt = now
-                updateStorage(cachedLibrary)
-                publishTrash(trashed)
-                if (cachedLibrary.isNotEmpty()) {
-                    _loadState.update { it.copy(isLoading = false, errorMessage = null) }
+                synchronized(sessionLock) {
+                    if (!sessionStillCurrent(session, ownerId)) return
+                    val cachedLibrary = composeLibrary(deviceItems, trashed, favoriteIds, records, emptyList())
+                    _deviceMedia.value = deviceItems
+                    _media.value = cachedLibrary
+                    _albums.value = buildAlbums(cachedLibrary)
+                    lastRefreshAt = now
+                    updateStorage(cachedLibrary)
+                    publishTrash(trashed)
+                    if (cachedLibrary.isNotEmpty()) {
+                        _loadState.update { it.copy(isLoading = false, errorMessage = null) }
+                    }
                 }
                 val remoteRows = mediaAssetsRepository.loadOwnerAssets()
-                val libraryItems = composeLibrary(deviceItems, trashed, favoriteIds, records, remoteRows)
-                _media.value = libraryItems
-                _albums.value = buildAlbums(libraryItems)
-                updateStorage(libraryItems)
-                _loadState.update { it.copy(isLoading = false, errorMessage = null) }
+                synchronized(sessionLock) {
+                    if (!sessionStillCurrent(session, ownerId)) return
+                    val libraryItems = composeLibrary(deviceItems, trashed, favoriteIds, records, remoteRows)
+                    _media.value = libraryItems
+                    _albums.value = buildAlbums(libraryItems)
+                    updateStorage(libraryItems)
+                    _loadState.update { it.copy(isLoading = false, errorMessage = null) }
+                }
             } catch (_: MediaQueryException) {
-                val keepExisting = _media.value.isNotEmpty()
-                _loadState.update { it.copy(isLoading = false, errorMessage = if (keepExisting) null else "Couldn't load your photos and videos.") }
+                synchronized(sessionLock) {
+                    if (!sessionStillCurrent(session, ownerId)) return
+                    val keepExisting = _media.value.isNotEmpty()
+                    _loadState.update { it.copy(isLoading = false, errorMessage = if (keepExisting) null else "Couldn't load your photos and videos.") }
+                }
             } catch (_: SecurityException) {
-                applyAccessState(); _media.value = emptyList(); _deviceMedia.value = emptyList(); _albums.value = emptyList()
-                publishTrash(emptyList())
-                _loadState.update { it.copy(isLoading = false, errorMessage = null) }
+                synchronized(sessionLock) {
+                    if (!sessionStillCurrent(session, ownerId)) return
+                    applyAccessState(); _media.value = emptyList(); _deviceMedia.value = emptyList(); _albums.value = emptyList()
+                    publishTrash(emptyList())
+                    _loadState.update { it.copy(isLoading = false, errorMessage = null) }
+                }
             }
         }
+    }
+
+    private fun sessionStillCurrent(session: AccountSession.Snapshot, ownerId: String): Boolean {
+        return boundUserId == ownerId &&
+            AccountSession.isCurrent(session.userId, session.generation) &&
+            AccountSession.userId == ownerId
     }
 
     private fun initialLoadState(): MediaLoadState {
@@ -1329,7 +1401,7 @@ class MediaRepository(
                 }
                 _deviceMedia.update { items -> items.map(::applyRotation) }
                 _media.update { items -> items.map(::applyRotation) }
-                com.mydrive.app.data.media.FullImageLoader.clearCache()
+                FullImageLoader.clearCache()
             }
             written
         } catch (_: Exception) {

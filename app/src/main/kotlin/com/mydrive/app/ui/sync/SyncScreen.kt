@@ -540,6 +540,7 @@ private fun JobThumbnail(job: SyncJob) {
             uri = job.media.displayUri,
             seed = job.media.thumbnailSeed,
             type = job.media.type,
+            fallbackMediaId = job.media.remoteMediaId,
             modifier = Modifier.fillMaxSize(),
             sizePx = 128
         )

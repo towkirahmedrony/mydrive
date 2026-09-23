@@ -11,15 +11,26 @@ class FavoritesStore(context: Context) {
     private val prefs = context.applicationContext
         .getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
-    private val _ids = MutableStateFlow(readIds())
+    @Volatile
+    private var ownerUserId: String? = null
+
+    private val _ids = MutableStateFlow<Set<String>>(emptySet())
     val ids: StateFlow<Set<String>> = _ids.asStateFlow()
+
+    @Synchronized
+    fun bindUser(userId: String?) {
+        ownerUserId = userId?.takeIf { it.isNotBlank() }
+        dropUnscopedLegacy()
+        _ids.value = readIds()
+    }
 
     fun contains(id: String): Boolean = _ids.value.contains(id)
 
     fun toggle(id: String) {
+        val userId = ownerUserId ?: return
         _ids.update { current ->
             val next = if (id in current) current - id else current + id
-            prefs.edit().putStringSet(KEY_IDS, HashSet(next)).apply()
+            prefs.edit().putStringSet(UserStoreKeys.favorites(userId), HashSet(next)).apply()
             next
         }
     }
@@ -31,24 +42,37 @@ class FavoritesStore(context: Context) {
      * temporarily unavailable media is never discarded.
      */
     fun retainAll(presentIds: Set<String>) {
+        val userId = ownerUserId ?: return
         _ids.update { current ->
             val stale = current - presentIds
             if (stale.isEmpty()) {
                 current
             } else {
                 val next = current - stale
-                prefs.edit().putStringSet(KEY_IDS, HashSet(next)).apply()
+                prefs.edit().putStringSet(UserStoreKeys.favorites(userId), HashSet(next)).apply()
                 next
             }
         }
     }
 
+    @Synchronized
+    fun clearSession() {
+        ownerUserId = null
+        _ids.value = emptySet()
+    }
+
     private fun readIds(): Set<String> {
-        return prefs.getStringSet(KEY_IDS, emptySet()).orEmpty().toSet()
+        val userId = ownerUserId ?: return emptySet()
+        return prefs.getStringSet(UserStoreKeys.favorites(userId), emptySet()).orEmpty().toSet()
+    }
+
+    private fun dropUnscopedLegacy() {
+        if (!prefs.contains(LEGACY_IDS)) return
+        prefs.edit().remove(LEGACY_IDS).apply()
     }
 
     companion object {
         private const val PREFS = "albums_favorites"
-        private const val KEY_IDS = "media_ids"
+        private const val LEGACY_IDS = "media_ids"
     }
 }

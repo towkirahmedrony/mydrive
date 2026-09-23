@@ -24,34 +24,19 @@ class SyncRepository(
     private val queueDatabase: UploadQueueDatabase
 ) {
     private val dao = queueDatabase.uploadQueueDao()
-    private val _records = MutableStateFlow(store.read())
+    private val _records = MutableStateFlow<Map<String, SyncRecord>>(emptyMap())
     val records: StateFlow<Map<String, SyncRecord>> = _records.asStateFlow()
-    private val _paused = MutableStateFlow(store.readPaused())
+    private val _paused = MutableStateFlow(false)
     val paused: StateFlow<Boolean> = _paused.asStateFlow()
 
-    init {
-        // Import the old SharedPreferences queue without deleting it. The upsert is
-        // idempotent and later MediaStore reconciliation fills in URI metadata.
-        runBlocking(Dispatchers.IO) {
-            dao.upsertAll(_records.value.map { (id, record) ->
-                UploadQueueEntity(
-                    mediaId = id,
-                    uploadState = queueState(record.state.toBackupState()),
-                    retryCount = if (record.state.toBackupState().isRetryable) 1 else 0,
-                    lastError = record.errorMessage,
-                    clientUploadId = record.clientUploadId ?: UUID.randomUUID().toString(),
-                    cloudinaryAssetId = record.cloudinaryAssetId,
-                    cloudinaryPublicId = record.cloudinaryPublicId,
-                    cloudinarySecureUrl = record.cloudinarySecureUrl,
-                    updatedAt = record.updatedAtMillis
-                )
-            })
-        }
-    }
+    @Volatile
+    private var ownerUserId: String? = null
 
     @Synchronized
     fun enqueue(ids: Collection<String>, ownerUserId: String? = null) {
         if (ids.isEmpty()) return
+        val boundOwner = this.ownerUserId ?: return
+        if (!ownerUserId.isNullOrBlank() && ownerUserId != boundOwner) return
         val now = System.currentTimeMillis()
         val next = HashMap(_records.value)
         for (id in ids) {
@@ -59,7 +44,7 @@ class SyncRepository(
             if (current != null && (current == BackupState.COMPLETED || current == BackupState.WAITING || current.isActive)) continue
             val previous = next[id]
             val previousOwner = previous?.ownerUserId
-            if (!previousOwner.isNullOrBlank() && !ownerUserId.isNullOrBlank() && previousOwner != ownerUserId) continue
+            if (!previousOwner.isNullOrBlank() && previousOwner != boundOwner) continue
             val clientUploadId = previous?.clientUploadId ?: UUID.randomUUID().toString()
             next[id] = SyncRecord(
                 state = BackupState.WAITING.name,
@@ -74,12 +59,12 @@ class SyncRepository(
                 cloudinaryResourceType = previous?.cloudinaryResourceType,
                 clientUploadId = clientUploadId,
                 remoteMediaId = previous?.remoteMediaId,
-                ownerUserId = previousOwner ?: ownerUserId
+                ownerUserId = previousOwner ?: boundOwner
             )
             val previousQueue = queueState(previous?.state?.toBackupState() ?: BackupState.NOT_STARTED)
             runBlocking(Dispatchers.IO) {
                 dao.find(id)?.let { entity ->
-                    dao.upsert(entity.copy(uploadState = "QUEUED", lastError = null, clientUploadId = clientUploadId, updatedAt = now))
+                    upsertOwned(entity.copy(uploadState = "QUEUED", lastError = null, clientUploadId = clientUploadId, ownerUserId = boundOwner, updatedAt = now))
                 }
             }
             DeveloperLogger.info(
@@ -98,7 +83,7 @@ class SyncRepository(
 
     @Synchronized
     fun updateState(id: String, state: BackupState, errorMessage: String? = null) {
-        val record = _records.value[id] ?: return
+        val record = ownedRecord(id) ?: return
         val normalizedError = errorMessage?.takeIf { it.isNotBlank() }
         if (record.state == state.name && record.errorMessage == normalizedError) return
         val next = HashMap(_records.value)
@@ -107,8 +92,8 @@ class SyncRepository(
         val newState = queueState(state)
         next[id] = record.copy(state = state.name, errorMessage = normalizedError, updatedAtMillis = updatedAt)
         runBlocking(Dispatchers.IO) {
-            val entity = dao.find(id)
-            if (entity != null) dao.upsert(entity.copy(uploadState = newState, retryCount = if (state.isRetryable) entity.retryCount + 1 else entity.retryCount, lastError = normalizedError, updatedAt = updatedAt))
+            val entity = dao.find(id) ?: return@runBlocking
+            upsertOwned(entity.copy(uploadState = newState, retryCount = if (state.isRetryable) entity.retryCount + 1 else entity.retryCount, lastError = normalizedError, updatedAt = updatedAt))
         }
         commit(next)
         DeveloperLogger.log(
@@ -132,19 +117,25 @@ class SyncRepository(
 
     @Synchronized
     fun updateCloudinaryResult(id: String, assetId: String, publicId: String, secureUrl: String?, version: Long?, format: String?, resourceType: String?) {
-        val record = _records.value[id] ?: return
+        val record = ownedRecord(id) ?: return
         val next = HashMap(_records.value)
         next[id] = record.copy(cloudinaryAssetId = assetId, cloudinaryPublicId = publicId, cloudinarySecureUrl = secureUrl, cloudinaryVersion = version, cloudinaryFormat = format, cloudinaryResourceType = resourceType, clientUploadId = record.clientUploadId ?: UUID.randomUUID().toString(), updatedAtMillis = System.currentTimeMillis())
-        runBlocking(Dispatchers.IO) { dao.find(id)?.let { dao.upsert(it.copy(uploadState = "UPLOADED", cloudinaryAssetId = assetId, cloudinaryPublicId = publicId, cloudinarySecureUrl = secureUrl, clientUploadId = next[id]?.clientUploadId.orEmpty(), updatedAt = System.currentTimeMillis())) } }
+        runBlocking(Dispatchers.IO) {
+            val entity = dao.find(id) ?: return@runBlocking
+            upsertOwned(entity.copy(uploadState = "UPLOADED", cloudinaryAssetId = assetId, cloudinaryPublicId = publicId, cloudinarySecureUrl = secureUrl, clientUploadId = next[id]?.clientUploadId.orEmpty(), updatedAt = System.currentTimeMillis()))
+        }
         commit(next)
     }
 
     @Synchronized
     fun updateFinalizedResult(id: String, remoteMediaId: String) {
-        val record = _records.value[id] ?: return
+        val record = ownedRecord(id) ?: return
         val next = HashMap(_records.value)
         next[id] = record.copy(remoteMediaId = remoteMediaId, updatedAtMillis = System.currentTimeMillis())
-        runBlocking(Dispatchers.IO) { dao.find(id)?.let { dao.upsert(it.copy(uploadState = "COMPLETED", finalizedMediaId = remoteMediaId, updatedAt = System.currentTimeMillis())) } }
+        runBlocking(Dispatchers.IO) {
+            val entity = dao.find(id) ?: return@runBlocking
+            upsertOwned(entity.copy(uploadState = "COMPLETED", finalizedMediaId = remoteMediaId, updatedAt = System.currentTimeMillis()))
+        }
         commit(next)
     }
 
@@ -156,9 +147,13 @@ class SyncRepository(
         val next = HashMap(_records.value)
         ids.forEach { id ->
             val record = next[id] ?: return@forEach
+            if (!belongsToCurrent(record)) return@forEach
             if (!record.state.toBackupState().isRetryable) return@forEach
             next[id] = record.copy(state = BackupState.WAITING.name, errorMessage = null, updatedAtMillis = now)
-            runBlocking(Dispatchers.IO) { dao.find(id)?.let { dao.upsert(it.copy(uploadState = "RETRYING", lastError = null, updatedAt = now)) } }
+            runBlocking(Dispatchers.IO) {
+                val entity = dao.find(id) ?: return@runBlocking
+                upsertOwned(entity.copy(uploadState = "RETRYING", lastError = null, updatedAt = now))
+            }
             DeveloperLogger.warn(
                 category = LogCategory.ROOM,
                 event = "QUEUE_STATE",
@@ -176,24 +171,42 @@ class SyncRepository(
         commit(next)
     }
 
-    @Synchronized fun cancel(id: String) { val record = _records.value[id] ?: return; if (record.state.toBackupState() == BackupState.COMPLETED) return; updateState(id, BackupState.CANCELLED) }
+    @Synchronized fun cancel(id: String) { val record = ownedRecord(id) ?: return; if (record.state.toBackupState() == BackupState.COMPLETED) return; updateState(id, BackupState.CANCELLED) }
     fun setPaused(paused: Boolean) { if (_paused.value != paused) { _paused.value = paused; store.writePaused(paused) } }
 
     @Synchronized
     fun bindOwner(userId: String?) {
-        if (userId.isNullOrBlank()) return
-        val current = _records.value
-        var changed = false
-        val next = HashMap<String, SyncRecord>(current.size)
-        for ((id, record) in current) {
-            if (record.ownerUserId.isNullOrBlank()) {
-                next[id] = record.copy(ownerUserId = userId)
-                changed = true
-            } else {
-                next[id] = record
+        if (userId.isNullOrBlank()) {
+            clearSession()
+            return
+        }
+        ownerUserId = userId
+        store.bindUser(userId)
+        val loaded = store.read().mapValues { (_, record) ->
+            if (record.ownerUserId.isNullOrBlank()) record.copy(ownerUserId = userId) else record
+        }.filter { belongsTo(it.value, userId) }
+        _records.value = loaded
+        _paused.value = store.readPaused()
+        store.write(loaded)
+        runBlocking(Dispatchers.IO) {
+            loaded.forEach { (id, record) ->
+                upsertOwned(
+                    UploadQueueEntity(
+                        mediaId = id,
+                        uploadState = queueState(record.state.toBackupState()),
+                        retryCount = if (record.state.toBackupState().isRetryable) 1 else 0,
+                        lastError = record.errorMessage,
+                        clientUploadId = record.clientUploadId ?: UUID.randomUUID().toString(),
+                        cloudinaryAssetId = record.cloudinaryAssetId,
+                        cloudinaryPublicId = record.cloudinaryPublicId,
+                        cloudinarySecureUrl = record.cloudinarySecureUrl,
+                        finalizedMediaId = record.remoteMediaId,
+                        ownerUserId = userId,
+                        updatedAt = record.updatedAtMillis
+                    )
+                )
             }
         }
-        if (changed) commit(next)
     }
 
     fun belongsTo(record: SyncRecord, userId: String): Boolean {
@@ -202,7 +215,21 @@ class SyncRepository(
     }
 
     @Synchronized
-    fun retainOwner(userId: String?) = bindOwner(userId)
+    fun retainOwner(userId: String?) {
+        if (userId.isNullOrBlank()) {
+            clearSession()
+            return
+        }
+        bindOwner(userId)
+    }
+
+    @Synchronized
+    fun clearSession() {
+        ownerUserId = null
+        store.clearSession()
+        _records.value = emptyMap()
+        _paused.value = false
+    }
 
     @Synchronized
     fun reconcile(presentIds: Set<String>) {
@@ -210,51 +237,89 @@ class SyncRepository(
         if (current.isEmpty() || current.keys.none { it !in presentIds }) return
         commit(
             current.filter { (id, record) ->
-                id in presentIds ||
-                    record.state.toBackupState() == BackupState.COMPLETED ||
-                    !record.remoteMediaId.isNullOrBlank()
+                belongsToCurrent(record) && (
+                    id in presentIds ||
+                        record.state.toBackupState() == BackupState.COMPLETED ||
+                        !record.remoteMediaId.isNullOrBlank()
+                    )
             }
         )
     }
 
-    suspend fun reconcileMedia(items: List<MediaItem>) {
+    suspend fun reconcileMedia(items: List<MediaItem>, expectedOwner: String? = null) {
+        val owner = ownerUserId ?: return
+        if (!expectedOwner.isNullOrBlank() && expectedOwner != owner) return
         val now = System.currentTimeMillis()
-        dao.upsertAll(items.map { item ->
+        items.forEach { item ->
             val record = _records.value[item.id]
-            UploadQueueEntity(
-                mediaId = item.id, localMediaId = item.mediaStoreId, contentUri = item.uri,
-                fileName = item.filename, mimeType = item.mimeType, fileSize = item.fileSizeBytes,
-                createdAt = record?.queuedAtMillis?.takeIf { it > 0 } ?: now,
-                uploadState = queueState(record?.state?.toBackupState() ?: BackupState.NOT_STARTED),
-                retryCount = 0, lastError = record?.errorMessage,
-                clientUploadId = record?.clientUploadId ?: UUID.randomUUID().toString(),
-                cloudinaryAssetId = record?.cloudinaryAssetId, cloudinaryPublicId = record?.cloudinaryPublicId,
-                cloudinarySecureUrl = record?.cloudinarySecureUrl, finalizedMediaId = record?.remoteMediaId,
-                updatedAt = record?.updatedAtMillis ?: now
+            upsertOwned(
+                UploadQueueEntity(
+                    mediaId = item.id, localMediaId = item.mediaStoreId, contentUri = item.uri,
+                    fileName = item.filename, mimeType = item.mimeType, fileSize = item.fileSizeBytes,
+                    createdAt = record?.queuedAtMillis?.takeIf { it > 0 } ?: now,
+                    uploadState = queueState(record?.state?.toBackupState() ?: BackupState.NOT_STARTED),
+                    retryCount = 0, lastError = record?.errorMessage,
+                    clientUploadId = record?.clientUploadId ?: UUID.randomUUID().toString(),
+                    cloudinaryAssetId = record?.cloudinaryAssetId, cloudinaryPublicId = record?.cloudinaryPublicId,
+                    cloudinarySecureUrl = record?.cloudinarySecureUrl, finalizedMediaId = record?.remoteMediaId,
+                    ownerUserId = record?.ownerUserId ?: owner,
+                    updatedAt = record?.updatedAtMillis ?: now
+                )
             )
-        })
+        }
     }
 
-    fun pendingIds(): List<String> = runBlocking(Dispatchers.IO) { dao.pending().map { it.mediaId } }
+    fun pendingIds(): List<String> = runBlocking(Dispatchers.IO) {
+        val owner = ownerUserId ?: return@runBlocking emptyList()
+        dao.pendingForOwner(owner).map { it.mediaId }
+    }
 
-    suspend fun queueEntity(id: String): UploadQueueEntity? = dao.find(id)
+    suspend fun queueEntity(id: String): UploadQueueEntity? {
+        val owner = ownerUserId ?: return null
+        val entity = dao.find(id) ?: return null
+        return entity.takeIf { it.ownerUserId == owner }
+    }
 
     suspend fun updateQueueMedia(id: String, item: MediaItem) {
+        val owner = ownerUserId ?: return
         dao.find(id)?.let { entity ->
-            dao.upsert(
+            upsertOwned(
                 entity.copy(
                     localMediaId = item.mediaStoreId,
                     contentUri = item.uri,
                     fileName = item.filename,
                     mimeType = item.mimeType,
                     fileSize = item.fileSizeBytes,
+                    ownerUserId = entity.ownerUserId ?: owner,
                     updatedAt = System.currentTimeMillis()
                 )
             )
         }
     }
 
-    private fun commit(next: Map<String, SyncRecord>) { _records.value = next; store.write(next) }
+    private suspend fun upsertOwned(entity: UploadQueueEntity) {
+        val owner = entity.ownerUserId ?: ownerUserId ?: return
+        val existing = dao.find(entity.mediaId)
+        if (existing != null && !existing.ownerUserId.isNullOrBlank() && existing.ownerUserId != owner) return
+        dao.upsert(entity.copy(ownerUserId = owner))
+    }
+
+    private fun ownedRecord(id: String): SyncRecord? {
+        val record = _records.value[id] ?: return null
+        return record.takeIf { belongsToCurrent(it) }
+    }
+
+    private fun belongsToCurrent(record: SyncRecord): Boolean {
+        val owner = ownerUserId
+        if (owner.isNullOrBlank()) return false
+        return belongsTo(record, owner)
+    }
+
+    private fun commit(next: Map<String, SyncRecord>) {
+        if (ownerUserId.isNullOrBlank()) return
+        _records.value = next
+        store.write(next)
+    }
 }
 
 private fun queueState(state: BackupState): String = when (state) {

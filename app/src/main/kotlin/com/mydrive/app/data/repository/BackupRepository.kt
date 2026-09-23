@@ -158,6 +158,9 @@ class BackupRepository(
                     return QueueDrain.AwaitingSession
                 }
             }
+            if (com.mydrive.app.data.session.AccountSession.userId != userId) {
+                return QueueDrain.AwaitingSession
+            }
             syncRepository.bindOwner(userId)
             val next = nextWaiting(userId) ?: return QueueDrain.Idle
             when (processOne(next, userId)) {
@@ -183,6 +186,7 @@ class BackupRepository(
     private suspend fun processOne(id: String, userId: String): ItemOutcome {
         val operationId = OperationTrace.idFor(id)
         UploadLog.itemClaimed(id)
+        if (com.mydrive.app.data.session.AccountSession.userId != userId) return ItemOutcome.HaltQueue
         val record = syncRepository.records.value[id] ?: return ItemOutcome.Continue
         if (!syncRepository.belongsTo(record, userId)) return ItemOutcome.Continue
         if (record.state.toBackupState().resumeLocally() != BackupState.WAITING) return ItemOutcome.Continue

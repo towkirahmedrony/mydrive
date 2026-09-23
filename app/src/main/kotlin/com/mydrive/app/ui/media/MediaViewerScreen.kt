@@ -92,6 +92,7 @@ import androidx.core.view.WindowCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.mydrive.app.data.media.FullImageLoader
 import com.mydrive.app.data.model.MediaItem
+import com.mydrive.app.data.session.AccountSession
 import com.mydrive.app.data.model.MediaType
 import com.mydrive.app.ui.components.MediaImage
 import com.mydrive.app.ui.theme.Copper
@@ -246,7 +247,8 @@ fun MediaViewerScreen(
                         uriString = neighbor.displayUri,
                         maxDimPx = target,
                         fallbackMediaId = neighbor.remoteMediaId,
-                        sessionProvider = (context.applicationContext as? MyDriveApp)?.sessionProvider
+                        sessionProvider = (context.applicationContext as? MyDriveApp)?.sessionProvider,
+                        userId = AccountSession.userId
                     )
                 }
             }
@@ -569,6 +571,7 @@ private fun RemovePhotoSheet(
                         uri = item.displayUri,
                         seed = item.thumbnailSeed,
                         type = item.type,
+                        fallbackMediaId = item.remoteMediaId,
                         modifier = Modifier.fillMaxSize(),
                         contentScale = ContentScale.Crop,
                         sizePx = 144,

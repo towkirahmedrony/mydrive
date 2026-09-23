@@ -13,15 +13,14 @@ import android.util.Size
 import com.mydrive.app.BuildConfig
 import com.mydrive.app.data.auth.AuthenticatedSessionProvider
 import com.mydrive.app.data.auth.PreparedAuth
+import com.mydrive.app.data.session.AccountSession
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.InputStream
-import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
-import java.security.MessageDigest
 
 object ThumbnailLoader {
 
@@ -29,9 +28,26 @@ object ThumbnailLoader {
         override fun sizeOf(key: String, value: Bitmap): Int = value.byteCount / 1024
     }
 
-    fun peek(uriString: String, sizePx: Int): Bitmap? {
-        if (uriString.isBlank()) return null
-        return cache.get(cacheKey(uriString, sizePx))
+    fun evictMemory() {
+        cache.evictAll()
+    }
+
+    fun peek(
+        uriString: String,
+        sizePx: Int,
+        mediaId: String? = null,
+        userId: String? = AccountSession.userId
+    ): Bitmap? {
+        if (uriString.isBlank() && mediaId.isNullOrBlank()) return null
+        val key = MediaCacheKeys.memoryKey(
+            userId = userId,
+            mediaId = mediaId,
+            uri = uriString,
+            variant = MediaCacheKeys.VARIANT_THUMBNAIL,
+            sizePx = sizePx
+        )
+        if (key == "blocked-remote") return null
+        return cache.get(key)
     }
 
     suspend fun load(
@@ -39,15 +55,31 @@ object ThumbnailLoader {
         uriString: String,
         sizePx: Int,
         fallbackMediaId: String? = null,
-        sessionProvider: AuthenticatedSessionProvider? = null
+        sessionProvider: AuthenticatedSessionProvider? = null,
+        userId: String? = AccountSession.userId
     ): Bitmap? = withContext(Dispatchers.IO) {
-        val keySource = uriString.takeIf { it.isNotBlank() } ?: fallbackMediaId ?: return@withContext null
-        val key = cacheKey(keySource, sizePx)
+        if (uriString.isBlank() && fallbackMediaId.isNullOrBlank()) return@withContext null
+        val session = AccountSession.snapshot()
+        val ownerId = userId ?: session.userId
+        val remote = MediaCacheKeys.isRemoteUri(uriString)
+        if (remote && ownerId.isNullOrBlank()) return@withContext null
+        val key = MediaCacheKeys.memoryKey(
+            userId = ownerId,
+            mediaId = fallbackMediaId,
+            uri = uriString,
+            variant = MediaCacheKeys.VARIANT_THUMBNAIL,
+            sizePx = sizePx
+        )
+        if (key == "blocked-remote") return@withContext null
         cache.get(key)?.let { return@withContext it }
+        if (!stillCurrent(session, ownerId)) return@withContext null
         fallbackMediaId?.let { id ->
-            readDisk(context.applicationContext, id, sizePx)?.let {
-                cache.put(key, it)
-                return@withContext it
+            if (!ownerId.isNullOrBlank()) {
+                readDisk(context.applicationContext, ownerId, id, sizePx)?.let {
+                    if (!stillCurrent(session, ownerId)) return@withContext null
+                    cache.put(key, it)
+                    return@withContext it
+                }
             }
         }
         val bitmap = if (uriString.isNotBlank()) {
@@ -66,9 +98,18 @@ object ThumbnailLoader {
         } ?: fallbackMediaId?.let { mediaId ->
             sessionProvider?.let { provider -> decodeDriveThumbnail(mediaId, sizePx, provider) }
         } ?: return@withContext null
+        if (!stillCurrent(session, ownerId)) return@withContext null
         cache.put(key, bitmap)
-        fallbackMediaId?.let { writeDisk(context.applicationContext, it, sizePx, bitmap) }
+        if (!ownerId.isNullOrBlank() && !fallbackMediaId.isNullOrBlank()) {
+            writeDisk(context.applicationContext, ownerId, fallbackMediaId, sizePx, bitmap)
+        }
         bitmap
+    }
+
+    private fun stillCurrent(session: AccountSession.Snapshot, ownerId: String?): Boolean {
+        if (ownerId.isNullOrBlank()) return true
+        return AccountSession.isCurrent(session.userId, session.generation) &&
+            AccountSession.userId == ownerId
     }
 
     private fun decodeHttp(uri: Uri, sizePx: Int): Bitmap? {
@@ -254,26 +295,21 @@ object ThumbnailLoader {
         }
     }
 
-    private fun cacheKey(uriString: String, sizePx: Int): String = "$uriString@$sizePx"
-
     private fun cacheKb(): Int {
         val max = (Runtime.getRuntime().maxMemory() / 1024).toInt()
         return (max / 8).coerceIn(4096, 24_576)
     }
 
-    private fun diskFile(context: Context, mediaId: String, sizePx: Int): File {
-        val digest = MessageDigest.getInstance("SHA-256")
-            .digest("$mediaId@$sizePx".toByteArray())
-            .joinToString("") { "%02x".format(it) }
-        return File(context.filesDir, "media_thumbnails/$digest.webp")
-    }
-
-    private fun readDisk(context: Context, mediaId: String, sizePx: Int): Bitmap? =
-        runCatching { BitmapFactory.decodeFile(diskFile(context, mediaId, sizePx).path) }.getOrNull()
-
-    private fun writeDisk(context: Context, mediaId: String, sizePx: Int, bitmap: Bitmap) {
+    private fun readDisk(context: Context, userId: String, mediaId: String, sizePx: Int): Bitmap? =
         runCatching {
-            val file = diskFile(context, mediaId, sizePx)
+            BitmapFactory.decodeFile(
+                MediaCacheKeys.thumbnailFile(context.filesDir, userId, mediaId, sizePx).path
+            )
+        }.getOrNull()
+
+    private fun writeDisk(context: Context, userId: String, mediaId: String, sizePx: Int, bitmap: Bitmap) {
+        runCatching {
+            val file = MediaCacheKeys.thumbnailFile(context.filesDir, userId, mediaId, sizePx)
             file.parentFile?.mkdirs()
             file.outputStream().use { bitmap.compress(Bitmap.CompressFormat.WEBP, 88, it) }
         }

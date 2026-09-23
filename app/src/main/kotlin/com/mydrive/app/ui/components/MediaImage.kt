@@ -24,6 +24,7 @@ import com.mydrive.app.data.media.ThumbnailLoader
 import com.mydrive.app.data.model.MediaType
 import com.mydrive.app.BuildConfig
 import com.mydrive.app.MyDriveApp
+import com.mydrive.app.data.session.AccountSession
 import com.mydrive.app.ui.util.thumbnailBrush
 
 @Composable
@@ -40,23 +41,24 @@ fun MediaImage(
     onUnavailable: (() -> Unit)? = null
 ) {
     val context = LocalContext.current
-    var bitmap by remember(uri, fallbackMediaId, sizePx) {
+    val ownerId = AccountSession.userId
+    var bitmap by remember(uri, fallbackMediaId, sizePx, ownerId) {
         mutableStateOf(
             placeholderBitmap
-                ?: ThumbnailLoader.peek(uri, sizePx)
-                ?: ThumbnailLoader.peek(uri, 256)
+                ?: ThumbnailLoader.peek(uri, sizePx, mediaId = fallbackMediaId, userId = ownerId)
+                ?: ThumbnailLoader.peek(uri, 256, mediaId = fallbackMediaId, userId = ownerId)
         )
     }
-    var failed by remember(uri, fallbackMediaId, sizePx) { mutableStateOf(false) }
+    var failed by remember(uri, fallbackMediaId, sizePx, ownerId) { mutableStateOf(false) }
 
-    LaunchedEffect(uri, fallbackMediaId, sizePx) {
+    LaunchedEffect(uri, fallbackMediaId, sizePx, ownerId) {
         if (uri.isBlank() && fallbackMediaId.isNullOrBlank()) {
             bitmap = null
             failed = true
             onUnavailable?.invoke()
             return@LaunchedEffect
         }
-        val cached = ThumbnailLoader.peek(uri, sizePx)
+        val cached = ThumbnailLoader.peek(uri, sizePx, mediaId = fallbackMediaId, userId = ownerId)
         if (cached != null) {
             bitmap = cached
             return@LaunchedEffect
@@ -67,7 +69,8 @@ fun MediaImage(
             uriString = uri,
             sizePx = sizePx,
             fallbackMediaId = fallbackMediaId,
-            sessionProvider = app?.sessionProvider
+            sessionProvider = app?.sessionProvider,
+            userId = ownerId
         )
         if (loaded != null) {
             bitmap = loaded

@@ -17,7 +17,11 @@ import com.mydrive.app.debug.LogCategory
 import java.util.concurrent.TimeUnit
 
 object UploadWorkScheduler {
-    private const val UNIQUE_WORK_NAME = "mydrive-media-upload-queue"
+    const val UNIQUE_WORK_NAME = "mydrive-media-upload-queue"
+
+    fun cancel(context: Context) {
+        WorkManager.getInstance(context).cancelUniqueWork(UNIQUE_WORK_NAME)
+    }
 
     fun schedule(context: Context, replace: Boolean = false) {
         val request = OneTimeWorkRequestBuilder<UploadWorker>()
