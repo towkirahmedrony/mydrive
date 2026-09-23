@@ -234,16 +234,12 @@ class SyncRepository(
     @Synchronized
     fun reconcile(presentIds: Set<String>) {
         val current = _records.value
-        if (current.isEmpty() || current.keys.none { it !in presentIds }) return
-        commit(
-            current.filter { (id, record) ->
-                belongsToCurrent(record) && (
-                    id in presentIds ||
-                        record.state.toBackupState() == BackupState.COMPLETED ||
-                        !record.remoteMediaId.isNullOrBlank()
-                    )
-            }
-        )
+        if (current.isEmpty()) return
+        val next = current.filter { (id, record) ->
+            belongsToCurrent(record) && shouldKeepSyncRecord(id, record, presentIds)
+        }
+        if (next.size == current.size && next.keys == current.keys) return
+        commit(next)
     }
 
     suspend fun reconcileMedia(items: List<MediaItem>, expectedOwner: String? = null) {

@@ -24,12 +24,28 @@ class MediaStoreDataSource(context: Context) {
         var failures = 0
         val photos = try {
             queryCollection(imageCollection(), MediaType.PHOTO, "img")
+        } catch (error: SecurityException) {
+            DeveloperLogger.error(
+                category = LogCategory.MEDIASTORE,
+                event = "MEDIASTORE_QUERY_FAILED",
+                message = "MediaStore photo query denied",
+                throwable = error
+            )
+            throw error
         } catch (_: MediaQueryException) {
             failures += 1
             emptyList()
         }
         val videos = try {
             queryCollection(videoCollection(), MediaType.VIDEO, "vid")
+        } catch (error: SecurityException) {
+            DeveloperLogger.error(
+                category = LogCategory.MEDIASTORE,
+                event = "MEDIASTORE_QUERY_FAILED",
+                message = "MediaStore video query denied",
+                throwable = error
+            )
+            throw error
         } catch (_: MediaQueryException) {
             failures += 1
             emptyList()
@@ -62,11 +78,15 @@ class MediaStoreDataSource(context: Context) {
         }
         val photos = try {
             queryTrashedCollection(imageCollection(), MediaType.PHOTO, "img")
+        } catch (error: SecurityException) {
+            throw error
         } catch (_: MediaQueryException) {
             emptyList()
         }
         val videos = try {
             queryTrashedCollection(videoCollection(), MediaType.VIDEO, "vid")
+        } catch (error: SecurityException) {
+            throw error
         } catch (_: MediaQueryException) {
             emptyList()
         }
@@ -169,8 +189,8 @@ class MediaStoreDataSource(context: Context) {
                 ?: queryWithProjection(collection, type, idPrefix, buildProjection(type), sortOrder, null)
                 ?: queryWithProjection(collection, type, idPrefix, minimalProjection(type), sortOrder, null)
                 ?: throw MediaQueryException()
-        } catch (_: SecurityException) {
-            emptyList()
+        } catch (error: SecurityException) {
+            throw error
         }
     }
 
@@ -208,8 +228,8 @@ class MediaStoreDataSource(context: Context) {
                 selection = selection,
                 matchTrashedOnly = true
             ) ?: emptyList()
-        } catch (_: SecurityException) {
-            emptyList()
+        } catch (error: SecurityException) {
+            throw error
         }
     }
 
@@ -236,8 +256,8 @@ class MediaStoreDataSource(context: Context) {
             } else {
                 appContext.contentResolver.query(collection, projection, selection, null, sortOrder)
             }
-        } catch (_: SecurityException) {
-            return emptyList()
+        } catch (error: SecurityException) {
+            throw error
         } catch (_: IllegalArgumentException) {
             return null
         } catch (_: Exception) {

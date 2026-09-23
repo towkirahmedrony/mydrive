@@ -1,5 +1,6 @@
 import { corsHeaders, handleCors } from "../shared/cors.ts";
 import { getSupabaseAuth } from "../shared/auth.ts";
+import { selectUploadFolder } from "./upload-folder.ts";
 
 /**
  * Cloudinary Upload Auth - Generates signed upload authorization for Android.
@@ -19,9 +20,9 @@ import { getSupabaseAuth } from "../shared/auth.ts";
  *     Authorization: Bearer <user-jwt>
  *     Content-Type: application/json
  *
- * Request body (all optional – defaults are safe):
+ * Request body (all optional; `folder` from the client is always ignored):
  *   {
- *     "folder": "mydrive/<user-id>"   // folder path on Cloudinary
+ *     "folder": "<ignored>"            // never trusted; server sets mydrive/<user-id>
  *     "resource_type": "image"         // image | video | raw | auto
  *     "allowed_formats": ["jpg","png","mp4"]
  *     "max_file_size": 104857600       // bytes, e.g. 100 MB
@@ -44,6 +45,8 @@ import { getSupabaseAuth } from "../shared/auth.ts";
  *   - The signature is HMAC-SHA1 of the params+timestamp+secret –
  *     it proves the request was authorised by the server.
  *   - Each request uses a fresh timestamp so authorizations are short-lived.
+ *   - The Cloudinary folder is derived only from the verified JWT user id
+ *     (`mydrive/<user.id>`). Any client-supplied folder/public path is ignored.
  */
 Deno.serve(async (req: Request) => {
   const corsResponse = handleCors(req);
@@ -86,10 +89,9 @@ Deno.serve(async (req: Request) => {
       // Empty body is fine – all fields are optional
     }
 
-    const folder: string =
-      typeof body.folder === "string" && body.folder.length > 0
-        ? body.folder
-        : `mydrive/${user.id}`;
+    // Folder is server-controlled from the verified JWT user. Any client
+    // folder / path override (another user, traversal, empty, etc.) is ignored.
+    const folder = selectUploadFolder(user.id, body);
 
     const resourceType: string =
       typeof body.resource_type === "string" &&

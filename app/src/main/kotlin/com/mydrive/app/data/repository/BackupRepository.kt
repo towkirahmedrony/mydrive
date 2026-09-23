@@ -207,7 +207,33 @@ class BackupRepository(
         // The gallery StateFlow can be stale or temporarily partial. Room's
         // persisted URI is the queue source of truth; re-scan MediaStore only
         // when the in-memory lookup cannot find the item.
+        val alreadyUploaded = record.cloudinaryAssetId != null && record.cloudinaryPublicId != null
         val item = mediaLookup(id) ?: queueEntity?.let { queuedMediaResolver(it) }
+        if (item == null && alreadyUploaded) {
+            DeveloperLogger.info(
+                category = LogCategory.MEDIASTORE,
+                event = "MEDIASTORE_ITEM_NOT_FOUND",
+                message = "Local MediaStore item missing after Cloudinary upload; finalizing cloud asset",
+                operationId = operationId,
+                localMediaId = id,
+                clientUploadId = record.clientUploadId
+            )
+            val synthetic = MediaItem(
+                id = id,
+                filename = queueEntity?.fileName.orEmpty().ifBlank { "media" },
+                type = if (queueEntity?.mimeType?.startsWith("video/") == true) MediaType.VIDEO else MediaType.PHOTO,
+                fileSizeBytes = queueEntity?.fileSize ?: 0L,
+                capturedAtMillis = queueEntity?.createdAt ?: 0L,
+                device = "My Drive",
+                resolution = "Unknown",
+                thumbnailSeed = id.hashCode(),
+                mediaStoreId = queueEntity?.localMediaId ?: 0L,
+                uri = queueEntity?.contentUri.orEmpty(),
+                mimeType = queueEntity?.mimeType.orEmpty(),
+                originLocal = false
+            )
+            return finalizeOnSupabase(id, synthetic)
+        }
         if (item != null) {
             DeveloperLogger.info(
                 category = LogCategory.MEDIASTORE,

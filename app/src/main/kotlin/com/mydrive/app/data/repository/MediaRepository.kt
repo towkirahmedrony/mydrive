@@ -49,6 +49,8 @@ import com.mydrive.app.debug.LogCategory
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -103,7 +105,7 @@ class MediaRepository(
     private val telegramApiVerifier: TelegramApiVerifier,
     private val mediaAssetsRepository: MediaAssetsRepository,
     private val visibilityStore: LibraryVisibilityStore,
-    scope: CoroutineScope
+    private val scope: CoroutineScope
 ) {
 
     private val _media = MutableStateFlow<List<MediaItem>>(emptyList())
@@ -156,6 +158,7 @@ class MediaRepository(
     private val locallyHiddenIds = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
     @Volatile
     private var boundUserId: String? = null
+    private var overlayRefreshJob: Job? = null
 
     init {
         scope.launch {
@@ -206,11 +209,22 @@ class MediaRepository(
 
     private fun resetCatalog(showLoading: Boolean) {
         lastRefreshAt = 0L
+        overlayRefreshJob?.cancel()
+        overlayRefreshJob = null
         _media.value = emptyList()
         _deviceMedia.value = emptyList()
         _albums.value = emptyList()
         publishTrash(emptyList())
         _loadState.update { it.copy(isLoading = showLoading, errorMessage = null) }
+    }
+
+    fun onMediaStoreChanged() {
+        if (boundUserId.isNullOrBlank()) return
+        overlayRefreshJob?.cancel()
+        overlayRefreshJob = scope.launch {
+            delay(50)
+            refresh(force = true, localOverlayOnly = true)
+        }
     }
 
     @Volatile
@@ -279,7 +293,7 @@ class MediaRepository(
     fun markTelegramConnectionFailed(message: String) { telegramSettingsStore.markConnectionFailed(message) }
     fun clearTelegramConfiguration() { telegramSettingsStore.clear() }
 
-    suspend fun refresh(force: Boolean = false) {
+    suspend fun refresh(force: Boolean = false, localOverlayOnly: Boolean = false) {
         refreshMutex.withLock {
             val session = AccountSession.snapshot()
             val ownerId = boundUserId ?: session.userId
@@ -289,10 +303,13 @@ class MediaRepository(
                 return
             }
             val now = System.currentTimeMillis()
-            if (!force && _media.value.isNotEmpty() && now - lastRefreshAt < MIN_REFRESH_INTERVAL_MS) { applyAccessState(); return }
+            if (!force && !localOverlayOnly && _media.value.isNotEmpty() && now - lastRefreshAt < MIN_REFRESH_INTERVAL_MS) {
+                applyAccessState()
+                return
+            }
             applyAccessState()
             val canReadLocal = permissions.canReadMedia()
-            val showSpinner = _media.value.isEmpty()
+            val showSpinner = !localOverlayOnly && _media.value.isEmpty()
             _loadState.update { it.copy(isLoading = showSpinner, errorMessage = null) }
             try {
                 val favoriteIds = favorites.ids.value
@@ -301,38 +318,60 @@ class MediaRepository(
                 if (!sessionStillCurrent(session, ownerId)) return
                 val scannedIds = scanned.mapTo(HashSet(scanned.size)) { it.id }
                 val trashedIds = trashed.mapTo(HashSet(trashed.size)) { it.id }
-                locallyHiddenIds.removeAll { it !in scannedIds && it !in trashedIds }
+                if (canReadLocal) {
+                    locallyHiddenIds.removeAll { it !in scannedIds && it !in trashedIds }
+                }
                 val records = syncRepository.records.value
-                val deviceItems = scanned
-                    .filter { it.id !in locallyHiddenIds }
-                    .map { item -> item.copy(isFavorite = item.id in favoriteIds).withRecord(records[item.id]) }
+                val deviceItems = if (canReadLocal) {
+                    scanned
+                        .filter { it.id !in locallyHiddenIds }
+                        .map { item -> item.copy(isFavorite = item.id in favoriteIds).withRecord(records[item.id]) }
+                } else {
+                    _deviceMedia.value
+                }
                 if (!sessionStillCurrent(session, ownerId)) return
-                syncRepository.reconcileMedia(deviceItems, expectedOwner = ownerId)
+                if (canReadLocal) {
+                    syncRepository.reconcileMedia(deviceItems, expectedOwner = ownerId)
+                }
                 if (!sessionStillCurrent(session, ownerId)) return
                 if (canReadLocal && permissions.access() == MediaAccess.GRANTED) {
                     val presentIds = withContext(Dispatchers.Default) { deviceItems.mapTo(HashSet(deviceItems.size)) { it.id } }
                     synchronized(sessionLock) {
                         if (!sessionStillCurrent(session, ownerId)) return
                         favorites.retainAll(presentIds + visibilityStore.hiddenLocalIds() + visibilityStore.cloudEntries().keys)
-                        // Keep completed backup metadata even when the local MediaStore id is gone.
+                        // Missing MediaStore ids are local-unavailable, not cloud-deleted.
                         syncRepository.reconcile(presentIds + locallyHiddenIds + trashedIds)
                     }
                 }
-                // Offline-first: show the persisted cloud snapshot immediately. The
-                // remote rows below are a reconciliation pass, not a prerequisite
-                // for rendering media the user has already seen.
                 synchronized(sessionLock) {
                     if (!sessionStillCurrent(session, ownerId)) return
+                    if (canReadLocal) {
+                        val nextIds = deviceItems.mapTo(HashSet(deviceItems.size)) { it.id }
+                        _deviceMedia.value.forEach { previous ->
+                            if (previous.id !in nextIds) rememberCloudCopy(previous.id)
+                        }
+                    }
                     val cachedLibrary = composeLibrary(deviceItems, trashed, favoriteIds, records, emptyList())
-                    _deviceMedia.value = deviceItems
-                    _media.value = cachedLibrary
-                    _albums.value = buildAlbums(cachedLibrary)
-                    lastRefreshAt = now
-                    updateStorage(cachedLibrary)
-                    publishTrash(trashed)
-                    if (cachedLibrary.isNotEmpty()) {
+                    val libraryItems = if (localOverlayOnly) {
+                        mergePreservedCloudItems(cachedLibrary, deviceItems)
+                    } else {
+                        cachedLibrary
+                    }
+                    if (canReadLocal) {
+                        _deviceMedia.value = deviceItems
+                        publishTrash(trashed)
+                    }
+                    _media.value = libraryItems
+                    _albums.value = buildAlbums(libraryItems)
+                    if (!localOverlayOnly) lastRefreshAt = now
+                    updateStorage(libraryItems)
+                    if (libraryItems.isNotEmpty()) {
                         _loadState.update { it.copy(isLoading = false, errorMessage = null) }
                     }
+                }
+                if (localOverlayOnly) {
+                    _loadState.update { it.copy(isLoading = false) }
+                    return
                 }
                 val remoteRows = mediaAssetsRepository.loadOwnerAssets()
                 synchronized(sessionLock) {
@@ -340,20 +379,21 @@ class MediaRepository(
                     val libraryItems = composeLibrary(deviceItems, trashed, favoriteIds, records, remoteRows)
                     _media.value = libraryItems
                     _albums.value = buildAlbums(libraryItems)
+                    lastRefreshAt = now
                     updateStorage(libraryItems)
                     _loadState.update { it.copy(isLoading = false, errorMessage = null) }
                 }
             } catch (_: MediaQueryException) {
                 synchronized(sessionLock) {
                     if (!sessionStillCurrent(session, ownerId)) return
+                    applyAccessState()
                     val keepExisting = _media.value.isNotEmpty()
                     _loadState.update { it.copy(isLoading = false, errorMessage = if (keepExisting) null else "Couldn't load your photos and videos.") }
                 }
             } catch (_: SecurityException) {
                 synchronized(sessionLock) {
                     if (!sessionStillCurrent(session, ownerId)) return
-                    applyAccessState(); _media.value = emptyList(); _deviceMedia.value = emptyList(); _albums.value = emptyList()
-                    publishTrash(emptyList())
+                    applyAccessState()
                     _loadState.update { it.copy(isLoading = false, errorMessage = null) }
                 }
             }
@@ -510,6 +550,25 @@ class MediaRepository(
             presentRemoteIds += row.id
         }
         return library
+            .distinctBy { it.remoteMediaId?.takeIf(String::isNotBlank) ?: "local:${it.id}" }
+            .sortedByDescending { it.capturedAtMillis }
+    }
+
+    private fun mergePreservedCloudItems(
+        overlay: List<MediaItem>,
+        deviceItems: List<MediaItem>
+    ): List<MediaItem> {
+        val overlayIds = overlay.mapTo(HashSet(overlay.size)) { it.id }
+        val overlayRemoteIds = overlay.mapNotNullTo(HashSet()) { it.remoteMediaId?.takeIf(String::isNotBlank) }
+        val deviceIds = deviceItems.mapTo(HashSet(deviceItems.size)) { it.id }
+        val preserved = _media.value.filter { item ->
+            item.id !in overlayIds &&
+                item.id !in deviceIds &&
+                item.remoteMediaId !in overlayRemoteIds &&
+                (item.backupCompleted || !item.originLocal || !item.remoteMediaId.isNullOrBlank())
+        }
+        if (preserved.isEmpty()) return overlay
+        return (overlay + preserved)
             .distinctBy { it.remoteMediaId?.takeIf(String::isNotBlank) ?: "local:${it.id}" }
             .sortedByDescending { it.capturedAtMillis }
     }

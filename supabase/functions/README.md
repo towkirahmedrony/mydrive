@@ -85,6 +85,8 @@ supabase functions deploy telegram-replicate
 
 ### `cloudinary-upload-auth`
 Generates signed Cloudinary upload authorization for authenticated users.
+The Cloudinary folder is always `mydrive/<authenticated-user-id>` and is
+derived only from the verified JWT — any client-supplied `folder` is ignored.
 The API Secret is never exposed to the client. Requires authenticated user (JWT).
 
 **Server-side secrets required:**

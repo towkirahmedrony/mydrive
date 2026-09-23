@@ -10,6 +10,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.mydrive.app.data.auth.AuthState
+import com.mydrive.app.data.media.MediaStoreChangeMonitor
 import com.mydrive.app.ui.auth.AuthLoadingScreen
 import com.mydrive.app.ui.auth.AuthNavHost
 import com.mydrive.app.ui.auth.SuspendedAccountScreen
@@ -19,6 +20,8 @@ import com.mydrive.app.ui.theme.MyDriveTheme
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
+    private var mediaStoreMonitor: MediaStoreChangeMonitor? = null
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
@@ -51,6 +54,15 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onStart() {
+        super.onStart()
+        val app = application as MyDriveApp
+        val monitor = mediaStoreMonitor ?: MediaStoreChangeMonitor(this) {
+            app.mediaRepository.onMediaStoreChanged()
+        }.also { mediaStoreMonitor = it }
+        monitor.start()
+    }
+
     override fun onResume() {
         super.onResume()
         val app = application as MyDriveApp
@@ -58,5 +70,10 @@ class MainActivity : ComponentActivity() {
         lifecycleScope.launch {
             app.mediaRepository.refresh(force = false)
         }
+    }
+
+    override fun onStop() {
+        mediaStoreMonitor?.stop()
+        super.onStop()
     }
 }
