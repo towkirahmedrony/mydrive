@@ -106,7 +106,7 @@ fun ZoomablePhoto(
     }
 
     LaunchedEffect(item.id, placeholderPx) {
-        if (item.displayUri.isBlank()) {
+        if (item.displayUri.isBlank() && item.remoteMediaId.isNullOrBlank()) {
             loadFailed = true
             latestOnUnavailable()
             return@LaunchedEffect
@@ -127,7 +127,7 @@ fun ZoomablePhoto(
     }
 
     LaunchedEffect(item.id, fullTargetPx) {
-        if (item.displayUri.isBlank() || fullTargetPx <= 0) return@LaunchedEffect
+        if ((item.displayUri.isBlank() && item.remoteMediaId.isNullOrBlank()) || fullTargetPx <= 0) return@LaunchedEffect
         val app = context.applicationContext as? MyDriveApp
         val full = FullImageLoader.load(
             context = context,

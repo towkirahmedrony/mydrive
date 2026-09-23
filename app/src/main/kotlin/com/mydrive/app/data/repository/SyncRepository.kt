@@ -205,7 +205,17 @@ class SyncRepository(
     fun retainOwner(userId: String?) = bindOwner(userId)
 
     @Synchronized
-    fun reconcile(presentIds: Set<String>) { val current = _records.value; if (current.isNotEmpty() && current.keys.any { it !in presentIds }) commit(current.filterKeys { it in presentIds }) }
+    fun reconcile(presentIds: Set<String>) {
+        val current = _records.value
+        if (current.isEmpty() || current.keys.none { it !in presentIds }) return
+        commit(
+            current.filter { (id, record) ->
+                id in presentIds ||
+                    record.state.toBackupState() == BackupState.COMPLETED ||
+                    !record.remoteMediaId.isNullOrBlank()
+            }
+        )
+    }
 
     suspend fun reconcileMedia(items: List<MediaItem>) {
         val now = System.currentTimeMillis()

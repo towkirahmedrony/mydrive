@@ -156,6 +156,7 @@ fun AlbumCard(
                 uri = album.coverUri,
                 seed = album.coverSeed,
                 type = album.coverType,
+                fallbackMediaId = album.coverRemoteMediaId,
                 modifier = Modifier.fillMaxSize(),
                 sizePx = 256,
                 contentDescription = album.name

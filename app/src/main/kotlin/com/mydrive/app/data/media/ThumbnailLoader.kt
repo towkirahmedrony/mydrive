@@ -41,8 +41,8 @@ object ThumbnailLoader {
         fallbackMediaId: String? = null,
         sessionProvider: AuthenticatedSessionProvider? = null
     ): Bitmap? = withContext(Dispatchers.IO) {
-        if (uriString.isBlank()) return@withContext null
-        val key = cacheKey(uriString, sizePx)
+        val keySource = uriString.takeIf { it.isNotBlank() } ?: fallbackMediaId ?: return@withContext null
+        val key = cacheKey(keySource, sizePx)
         cache.get(key)?.let { return@withContext it }
         fallbackMediaId?.let { id ->
             readDisk(context.applicationContext, id, sizePx)?.let {
@@ -50,15 +50,19 @@ object ThumbnailLoader {
                 return@withContext it
             }
         }
-        val uri = try {
-            Uri.parse(uriString)
-        } catch (_: Exception) {
-            return@withContext null
-        }
-        val bitmap = if (uri.scheme == "http" || uri.scheme == "https") {
-            decodeHttp(uri, sizePx)
+        val bitmap = if (uriString.isNotBlank()) {
+            val uri = try {
+                Uri.parse(uriString)
+            } catch (_: Exception) {
+                null
+            }
+            when {
+                uri == null -> null
+                uri.scheme == "http" || uri.scheme == "https" -> decodeHttp(uri, sizePx)
+                else -> decode(context.applicationContext, uri, sizePx)
+            }
         } else {
-            decode(context.applicationContext, uri, sizePx)
+            null
         } ?: fallbackMediaId?.let { mediaId ->
             sessionProvider?.let { provider -> decodeDriveThumbnail(mediaId, sizePx, provider) }
         } ?: return@withContext null

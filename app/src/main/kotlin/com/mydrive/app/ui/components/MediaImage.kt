@@ -40,17 +40,17 @@ fun MediaImage(
     onUnavailable: (() -> Unit)? = null
 ) {
     val context = LocalContext.current
-    var bitmap by remember(uri, sizePx) {
+    var bitmap by remember(uri, fallbackMediaId, sizePx) {
         mutableStateOf(
             placeholderBitmap
                 ?: ThumbnailLoader.peek(uri, sizePx)
                 ?: ThumbnailLoader.peek(uri, 256)
         )
     }
-    var failed by remember(uri, sizePx) { mutableStateOf(false) }
+    var failed by remember(uri, fallbackMediaId, sizePx) { mutableStateOf(false) }
 
     LaunchedEffect(uri, fallbackMediaId, sizePx) {
-        if (uri.isBlank()) {
+        if (uri.isBlank() && fallbackMediaId.isNullOrBlank()) {
             bitmap = null
             failed = true
             onUnavailable?.invoke()

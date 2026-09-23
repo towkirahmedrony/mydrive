@@ -2,6 +2,7 @@ package com.mydrive.app.data.repository
 
 import com.mydrive.app.data.auth.AuthenticatedSessionProvider
 import com.mydrive.app.data.auth.PreparedAuth
+import com.mydrive.app.data.remote.dto.DriveArchiveJobRow
 import com.mydrive.app.data.remote.dto.MediaAssetRow
 import com.mydrive.app.debug.DeveloperLogger
 import com.mydrive.app.debug.LogCategory
@@ -33,11 +34,15 @@ class MediaAssetsRepository(
             else -> return@withContext emptyList()
         }
         try {
-            supabase.from(TABLE)
+            val rows = supabase.from(TABLE)
                 .select {
                     filter { eq("owner_id", userId) }
                 }
                 .decodeList<MediaAssetRow>()
+            val archivedIds = loadCompletedDriveArchiveIds(supabase, rows)
+            if (archivedIds.isEmpty()) rows else rows.map { row ->
+                if (row.id in archivedIds) row.copy(hasCompletedDriveArchive = true) else row
+            }
         } catch (error: Exception) {
             DeveloperLogger.error(
                 category = LogCategory.DATABASE,
@@ -46,6 +51,37 @@ class MediaAssetsRepository(
                 throwable = error
             )
             emptyList()
+        }
+    }
+
+    private suspend fun loadCompletedDriveArchiveIds(
+        supabase: SupabaseClient,
+        rows: List<MediaAssetRow>
+    ): Set<String> {
+        val candidates = rows.mapNotNull { row ->
+            row.id.takeIf { row.status == "READY" && row.storageUrl.isNullOrBlank() && row.thumbnailUrl.isNullOrBlank() }
+        }
+        if (candidates.isEmpty()) return emptySet()
+        return try {
+            val completed = supabase.from(TABLE_REPLICATION_JOBS)
+                .select {
+                    filter {
+                        eq("destination_type", "google_drive")
+                        eq("status", "COMPLETED")
+                    }
+                }
+                .decodeList<DriveArchiveJobRow>()
+                .mapNotNull { it.mediaId.takeIf(String::isNotBlank) }
+                .toSet()
+            completed.intersect(candidates.toSet())
+        } catch (error: Exception) {
+            DeveloperLogger.error(
+                category = LogCategory.DATABASE,
+                event = "DRIVE_ARCHIVE_LOAD_FAILED",
+                message = "Failed to load completed Drive archive jobs",
+                throwable = error
+            )
+            emptySet()
         }
     }
 
@@ -143,5 +179,6 @@ class MediaAssetsRepository(
 
     companion object {
         private const val TABLE = "media_assets"
+        private const val TABLE_REPLICATION_JOBS = "replication_jobs"
     }
 }

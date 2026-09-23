@@ -104,7 +104,7 @@ fun AlbumsScreen(
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
-    if (state.needsPermission || state.permissionDenied) {
+    if ((state.needsPermission || state.permissionDenied) && !state.hasAlbums && !state.isLoading) {
         MediaPermissionScreen(
             denied = state.permissionDenied,
             onAllowAccess = {

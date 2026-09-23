@@ -2,6 +2,7 @@ package com.mydrive.app.data.remote.dto
 
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.Transient
 
 @Serializable
 data class MediaAssetRow(
@@ -21,11 +22,18 @@ data class MediaAssetRow(
     @SerialName("user_hidden_at") val userHiddenAt: String? = null,
     @SerialName("deleted_at") val deletedAt: String? = null,
     @SerialName("uploaded_at") val uploadedAt: String? = null,
-    @SerialName("created_at") val createdAt: String? = null
+    @SerialName("created_at") val createdAt: String? = null,
+    @SerialName("drive_archived_at") val driveArchivedAt: String? = null,
+    @Transient val hasCompletedDriveArchive: Boolean = false
 ) {
     val isHiddenFromLibrary: Boolean
         get() = !userHiddenAt.isNullOrBlank()
 
     val isCloudAvailable: Boolean
-        get() = status != "DELETED" && (!storageUrl.isNullOrBlank() || !thumbnailUrl.isNullOrBlank())
+        get() {
+            if (status == "DELETED") return false
+            if (!storageUrl.isNullOrBlank() || !thumbnailUrl.isNullOrBlank()) return true
+            if (status != "READY") return false
+            return hasCompletedDriveArchive || !driveArchivedAt.isNullOrBlank()
+        }
 }

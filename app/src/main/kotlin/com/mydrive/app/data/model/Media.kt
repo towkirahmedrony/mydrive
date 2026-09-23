@@ -99,7 +99,8 @@ data class AlbumFolder(
     val coverSeed: Int,
     val coverType: MediaType = MediaType.PHOTO,
     val mediaCount: Int = 0,
-    val coverUri: String = ""
+    val coverUri: String = "",
+    val coverRemoteMediaId: String? = null
 )
 
 data class ActivityEvent(

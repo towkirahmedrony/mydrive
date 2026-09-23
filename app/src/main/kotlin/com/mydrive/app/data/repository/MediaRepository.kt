@@ -261,7 +261,7 @@ class MediaRepository(
                 if (canReadLocal && permissions.access() == MediaAccess.GRANTED) {
                     val presentIds = withContext(Dispatchers.Default) { deviceItems.mapTo(HashSet(deviceItems.size)) { it.id } }
                     favorites.retainAll(presentIds + visibilityStore.hiddenLocalIds() + visibilityStore.cloudEntries().keys)
-                    // Keep local backup metadata for items only moved to device Trash.
+                    // Keep completed backup metadata even when the local MediaStore id is gone.
                     syncRepository.reconcile(presentIds + locallyHiddenIds + trashedIds)
                 }
                 // Offline-first: show the persisted cloud snapshot immediately. The
@@ -274,12 +274,15 @@ class MediaRepository(
                 lastRefreshAt = now
                 updateStorage(cachedLibrary)
                 publishTrash(trashed)
-                _loadState.update { it.copy(isLoading = false, errorMessage = null) }
+                if (cachedLibrary.isNotEmpty()) {
+                    _loadState.update { it.copy(isLoading = false, errorMessage = null) }
+                }
                 val remoteRows = mediaAssetsRepository.loadOwnerAssets()
                 val libraryItems = composeLibrary(deviceItems, trashed, favoriteIds, records, remoteRows)
                 _media.value = libraryItems
                 _albums.value = buildAlbums(libraryItems)
                 updateStorage(libraryItems)
+                _loadState.update { it.copy(isLoading = false, errorMessage = null) }
             } catch (_: MediaQueryException) {
                 val keepExisting = _media.value.isNotEmpty()
                 _loadState.update { it.copy(isLoading = false, errorMessage = if (keepExisting) null else "Couldn't load your photos and videos.") }
@@ -293,8 +296,7 @@ class MediaRepository(
 
     private fun initialLoadState(): MediaLoadState {
         val access = permissions.access()
-        val canRead = access == MediaAccess.GRANTED || access == MediaAccess.PARTIAL
-        return MediaLoadState(accessGranted = access == MediaAccess.GRANTED, accessPartial = access == MediaAccess.PARTIAL, needsPermission = access == MediaAccess.NEEDS_REQUEST, permissionDenied = access == MediaAccess.DENIED, isLoading = canRead)
+        return MediaLoadState(accessGranted = access == MediaAccess.GRANTED, accessPartial = access == MediaAccess.PARTIAL, needsPermission = access == MediaAccess.NEEDS_REQUEST, permissionDenied = access == MediaAccess.DENIED, isLoading = true)
     }
 
     private fun applyAccessState() {
@@ -304,7 +306,15 @@ class MediaRepository(
 
     private fun buildAlbums(items: List<MediaItem>): List<AlbumFolder> = items.groupBy { it.albumId }.map { (albumId, albumItems) ->
         val cover = albumItems.maxByOrNull { it.capturedAtMillis }
-        AlbumFolder(id = albumId, name = cover?.albumName?.ifBlank { "Other" } ?: "Other", coverSeed = cover?.thumbnailSeed ?: 0, coverType = cover?.type ?: MediaType.PHOTO, mediaCount = albumItems.size, coverUri = cover?.displayUri.orEmpty())
+        AlbumFolder(
+            id = albumId,
+            name = cover?.albumName?.ifBlank { "Other" } ?: "Other",
+            coverSeed = cover?.thumbnailSeed ?: 0,
+            coverType = cover?.type ?: MediaType.PHOTO,
+            mediaCount = albumItems.size,
+            coverUri = cover?.displayUri.orEmpty(),
+            coverRemoteMediaId = cover?.remoteMediaId
+        )
     }.sortedByDescending { it.mediaCount }
 
     private fun updateStorage(items: List<MediaItem>) {
@@ -424,6 +434,7 @@ class MediaRepository(
             val cloudId = cached?.localId ?: "cloud-${row.id}"
             library += cached?.toMediaItem(favoriteIds, records[cloudId])
                 ?: row.toCloudOnlyMediaItem(cloudId, favoriteIds)
+            rememberCloudFromRow(row, cloudId)
             presentRemoteIds += row.id
         }
         return library
@@ -438,6 +449,8 @@ class MediaRepository(
         val mediaType = if (mimeType?.startsWith("video/") == true) MediaType.VIDEO else MediaType.PHOTO
         val preview = thumbnailUrl ?: storageUrl.orEmpty()
         val captured = runCatching { java.time.Instant.parse(createdAt ?: "").toEpochMilli() }.getOrDefault(0L)
+            .takeIf { it > 0L }
+            ?: runCatching { java.time.Instant.parse(uploadedAt ?: "").toEpochMilli() }.getOrDefault(0L)
         return MediaItem(
             id = stableId,
             filename = fileName.orEmpty().ifBlank { "My Drive media" },
@@ -457,22 +470,26 @@ class MediaRepository(
             height = height ?: 0,
             durationMillis = durationMs,
             remoteMediaId = id,
-            thumbnailUrl = preview,
-            originLocal = false
+            thumbnailUrl = preview.takeIf { it.isNotBlank() },
+            originLocal = false,
+            albumId = "mydrive",
+            albumName = "My Drive"
         )
     }
 
     private fun rememberCloudCopy(id: String) {
         val item = lookupAnyItem(id) ?: return
         val record = syncRepository.records.value[id]
+        val remoteId = item.remoteMediaId ?: record?.remoteMediaId.orEmpty()
+        if (remoteId.isBlank()) return
         val preview = item.thumbnailUrl
             ?: record?.cloudinarySecureUrl
             ?: item.uri.takeIf { it.startsWith("http") }
-        if (preview.isNullOrBlank()) return
+            ?: ""
         visibilityStore.putCloud(
             CloudLibraryEntry(
                 localId = id,
-                remoteMediaId = item.remoteMediaId ?: record?.remoteMediaId.orEmpty(),
+                remoteMediaId = remoteId,
                 uri = preview,
                 thumbnailUrl = preview,
                 filename = item.filename,
@@ -494,14 +511,14 @@ class MediaRepository(
         row: com.mydrive.app.data.remote.dto.MediaAssetRow,
         record: SyncRecord?
     ) {
-        val preview = row.thumbnailUrl ?: row.storageUrl ?: record?.cloudinarySecureUrl
-        if (preview.isNullOrBlank()) return
+        if (!row.isCloudAvailable) return
+        val preview = row.thumbnailUrl ?: row.storageUrl ?: record?.cloudinarySecureUrl ?: ""
         visibilityStore.putCloud(
             CloudLibraryEntry(
                 localId = item.id,
                 remoteMediaId = row.id,
                 uri = preview,
-                thumbnailUrl = preview,
+                thumbnailUrl = preview.takeIf { it.isNotBlank() },
                 filename = item.filename,
                 mimeType = item.mimeType.ifBlank { row.mimeType.orEmpty() },
                 fileSizeBytes = item.fileSizeBytes.takeIf { it > 0L } ?: row.fileSize ?: 0L,
@@ -512,6 +529,36 @@ class MediaRepository(
                 albumId = item.albumId,
                 albumName = item.albumName,
                 type = item.type.name
+            )
+        )
+    }
+
+    private fun rememberCloudFromRow(
+        row: com.mydrive.app.data.remote.dto.MediaAssetRow,
+        stableId: String
+    ) {
+        if (!row.isCloudAvailable) return
+        val preview = row.thumbnailUrl ?: row.storageUrl ?: ""
+        val mediaType = if (row.mimeType?.startsWith("video/") == true) MediaType.VIDEO else MediaType.PHOTO
+        val captured = runCatching { java.time.Instant.parse(row.createdAt ?: "").toEpochMilli() }.getOrDefault(0L)
+            .takeIf { it > 0L }
+            ?: runCatching { java.time.Instant.parse(row.uploadedAt ?: "").toEpochMilli() }.getOrDefault(0L)
+        visibilityStore.putCloud(
+            CloudLibraryEntry(
+                localId = stableId,
+                remoteMediaId = row.id,
+                uri = preview,
+                thumbnailUrl = preview.takeIf { it.isNotBlank() },
+                filename = row.fileName.orEmpty().ifBlank { "My Drive media" },
+                mimeType = row.mimeType.orEmpty(),
+                fileSizeBytes = row.fileSize ?: 0L,
+                width = row.width ?: 0,
+                height = row.height ?: 0,
+                durationMillis = row.durationMs,
+                capturedAtMillis = captured,
+                albumId = "mydrive",
+                albumName = "My Drive",
+                type = mediaType.name
             )
         )
     }

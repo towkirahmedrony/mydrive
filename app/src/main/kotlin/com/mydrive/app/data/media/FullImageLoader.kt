@@ -55,8 +55,8 @@ object FullImageLoader {
         fallbackMediaId: String? = null,
         sessionProvider: AuthenticatedSessionProvider? = null
     ): Bitmap? = withContext(Dispatchers.IO) {
-        if (uriString.isBlank()) return@withContext null
-        val key = cacheKey(uriString, maxDimPx)
+        if (uriString.isBlank() && fallbackMediaId.isNullOrBlank()) return@withContext null
+        val key = cacheKey(uriString.takeIf { it.isNotBlank() } ?: fallbackMediaId.orEmpty(), maxDimPx)
         cache.get(key)?.let { return@withContext it }
 
         val appContext = context.applicationContext
@@ -71,6 +71,7 @@ object FullImageLoader {
                 }
             }
             ?: run {
+                if (uriString.isBlank()) return@run null
                 val uri = runCatching { Uri.parse(uriString) }.getOrNull()
                     ?: return@run null
                 if (uri.scheme == "http" || uri.scheme == "https") {

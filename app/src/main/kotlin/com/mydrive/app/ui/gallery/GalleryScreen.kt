@@ -80,7 +80,7 @@ fun GalleryScreen(
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
-    if (state.needsPermission || state.permissionDenied) {
+    if ((state.needsPermission || state.permissionDenied) && !state.hasMedia && !state.isLoading) {
         MediaPermissionScreen(
             denied = state.permissionDenied,
             onAllowAccess = {
