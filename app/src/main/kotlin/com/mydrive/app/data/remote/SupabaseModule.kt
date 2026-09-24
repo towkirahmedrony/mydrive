@@ -1,6 +1,7 @@
 package com.mydrive.app.data.remote
 
 import io.github.jan.supabase.SupabaseClient
+import io.github.jan.supabase.annotations.SupabaseInternal
 import io.github.jan.supabase.auth.Auth
 import io.github.jan.supabase.createSupabaseClient
 import io.github.jan.supabase.postgrest.Postgrest
@@ -26,6 +27,7 @@ object SupabaseModule {
     private const val CONNECT_TIMEOUT_MS = 10_000L
     private const val SOCKET_TIMEOUT_MS = 25_000L
 
+    @OptIn(SupabaseInternal::class)
     fun create(): SupabaseClient {
         return createSupabaseClient(
             supabaseUrl = SupabaseConfig.url,
