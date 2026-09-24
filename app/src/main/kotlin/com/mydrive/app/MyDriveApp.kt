@@ -19,6 +19,7 @@ import com.mydrive.app.data.remote.SupabaseModule
 import com.mydrive.app.data.remote.TelegramApiVerifier
 import com.mydrive.app.data.worker.UploadWorkScheduler
 import com.mydrive.app.data.local.LibraryVisibilityStore
+import com.mydrive.app.data.local.MediaSyncCursorStore
 import com.mydrive.app.data.repository.AuthRepository
 import com.mydrive.app.data.repository.BackupRepository
 import com.mydrive.app.data.repository.MediaAssetsRepository
@@ -63,6 +64,9 @@ class MyDriveApp : Application() {
             telegramApiVerifier = TelegramApiVerifier(networkMonitor),
             mediaAssetsRepository = mediaAssetsRepository,
             visibilityStore = LibraryVisibilityStore(this),
+            // Per-account incremental synchronization position, so a refresh only
+            // fetches the media records that changed since the last one.
+            mediaSyncCursorStore = MediaSyncCursorStore(this),
             scope = applicationScope
         )
     }

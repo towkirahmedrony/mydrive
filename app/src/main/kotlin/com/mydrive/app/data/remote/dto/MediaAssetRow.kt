@@ -23,6 +23,15 @@ data class MediaAssetRow(
     @SerialName("deleted_at") val deletedAt: String? = null,
     @SerialName("uploaded_at") val uploadedAt: String? = null,
     @SerialName("created_at") val createdAt: String? = null,
+    /**
+     * Server-maintained last-write timestamp.
+     *
+     * This is the incremental synchronization cursor: a refresh asks for the rows
+     * whose `updated_at` moved past the last successfully synchronized position.
+     * It is not unique — rows written in the same transaction share one value —
+     * so it is always paired with [id] (see `MediaSyncCursor`).
+     */
+    @SerialName("updated_at") val updatedAt: String? = null,
     @SerialName("drive_archived_at") val driveArchivedAt: String? = null,
     @Transient val hasCompletedDriveArchive: Boolean = false
 ) {

@@ -16,12 +16,14 @@ import androidx.exifinterface.media.ExifInterface
 import com.mydrive.app.data.local.CloudLibraryEntry
 import com.mydrive.app.data.local.FavoritesStore
 import com.mydrive.app.data.local.LibraryVisibilityStore
+import com.mydrive.app.data.local.MediaSyncCursorStore
 import com.mydrive.app.data.local.SyncRecord
 import com.mydrive.app.data.local.TelegramSettingsStore
 import com.mydrive.app.data.media.FullImageLoader
 import com.mydrive.app.data.media.MediaAlbumStats
 import com.mydrive.app.data.media.MediaLibraryPaging
 import com.mydrive.app.data.media.MediaPageCursor
+import com.mydrive.app.data.media.MediaSyncCursor
 import com.mydrive.app.data.media.ThumbnailLoader
 import com.mydrive.app.data.session.AccountSession
 import com.mydrive.app.data.media.MediaAccess
@@ -112,6 +114,7 @@ class MediaRepository(
     private val telegramApiVerifier: TelegramApiVerifier,
     private val mediaAssetsRepository: MediaAssetsRepository,
     private val visibilityStore: LibraryVisibilityStore,
+    private val mediaSyncCursorStore: MediaSyncCursorStore,
     private val scope: CoroutineScope
 ) {
 
@@ -203,6 +206,10 @@ class MediaRepository(
             boundUserId = userId
             visibilityStore.bindUser(userId)
             favorites.bindUser(userId)
+            // The synchronization cursor is account-scoped for the same reason
+            // the visibility and favorite caches are: account B must never resume
+            // from account A's position.
+            mediaSyncCursorStore.bindUser(userId)
             resetCatalog(showLoading = true)
         }
     }
@@ -214,6 +221,7 @@ class MediaRepository(
             locallyHiddenIds.clear()
             visibilityStore.clearSession()
             favorites.clearSession()
+            mediaSyncCursorStore.clearSession()
             ThumbnailLoader.evictMemory()
             FullImageLoader.evictMemory()
             resetCatalog(showLoading = false)
@@ -357,6 +365,13 @@ class MediaRepository(
             }
             applyAccessState()
             val canReadLocal = permissions.canReadMedia()
+            // A routine refresh is incremental whenever this account already has a
+            // synchronized position *and* its catalog is already in memory. The
+            // initial load is still the paginated `created_at` load, so a cold
+            // start, a new account or a new device keeps the existing behavior
+            // and re-establishes the page cursor from real data.
+            val incrementalCursor = if (localOverlayOnly) null else mediaSyncCursorStore.read()
+            val incrementalSync = incrementalCursor != null && loadedRemoteRows.isNotEmpty()
             if (!localOverlayOnly) {
                 // Only the epoch is bumped: the last known page cursor and rows are
                 // kept so a failed refresh leaves pagination exactly as it was.
@@ -368,7 +383,10 @@ class MediaRepository(
                     isLoading = showSpinner,
                     isRefreshing = !localOverlayOnly && !showSpinner,
                     isLoadingMore = false,
-                    hasNextPage = if (localOverlayOnly) it.hasNextPage else false,
+                    // An incremental pass leaves the `created_at` keyset cursor and
+                    // its paging state exactly as they were; only a first-page load
+                    // restarts them, from its own response.
+                    hasNextPage = if (localOverlayOnly || incrementalSync) it.hasNextPage else false,
                     errorMessage = null
                 )
             }
@@ -457,7 +475,20 @@ class MediaRepository(
                     }
                 }
                 if (localOverlayOnly) return
-                loadFirstPageLocked(session, ownerId, deviceItems, trashed, favoriteIds, records, now)
+                if (incrementalSync && incrementalCursor != null) {
+                    syncChangedRows(
+                        session = session,
+                        ownerId = ownerId,
+                        deviceItems = deviceItems,
+                        trashed = trashed,
+                        favoriteIds = favoriteIds,
+                        records = records,
+                        cursor = incrementalCursor,
+                        now = now
+                    )
+                } else {
+                    loadFirstPageLocked(session, ownerId, deviceItems, trashed, favoriteIds, records, now)
+                }
             } catch (cancelled: CancellationException) {
                 // The caller went away (screen left, refresh superseded). Nothing
                 // partial was committed, and the transient loading flags are only
@@ -542,6 +573,12 @@ class MediaRepository(
                     }
                     loadedRemoteRows = MediaLibraryPaging.mergeRows(loadedRemoteRows, page.rows)
                     nextPageCursor = page.nextCursor
+                    // Paging forward reads rows this account already had; it may
+                    // therefore only ever move the synchronization position
+                    // forward, never back.
+                    mediaSyncCursorStore.advanceTo(
+                        MediaLibraryPaging.latestSyncCursor(null, page.rows)
+                    )
                     val libraryItems = composeLibrary(deviceItems, trashed, favoriteIds, records, loadedRemoteRows)
                     _media.value = libraryItems
                     _albums.value = buildAlbums(libraryItems, cloudAlbumStats)
@@ -609,6 +646,13 @@ class MediaRepository(
                 loadedRemoteRows = page.rows
                 nextPageCursor = page.nextCursor
                 if (albumStats != null) cloudAlbumStats = albumStats
+                // The newest `updated_at` that was actually read and processed
+                // becomes this account's synchronization position. It is written
+                // here — after the page and its processing succeeded — and only
+                // forwards, so an initial load can never rewind a later position.
+                mediaSyncCursorStore.advanceTo(
+                    MediaLibraryPaging.latestSyncCursor(null, page.rows)
+                )
                 val libraryItems = composeLibrary(deviceItems, trashed, favoriteIds, records, page.rows)
                 _media.value = libraryItems
                 _albums.value = buildAlbums(libraryItems, cloudAlbumStats)
@@ -658,6 +702,147 @@ class MediaRepository(
                 }
             }
         }
+    }
+
+    /**
+     * Incremental synchronization: read the rows that changed after [cursor] and
+     * fold them into the catalog already loaded in memory.
+     *
+     * Unlike [loadFirstPageLocked] this never re-reads the visible page: a refresh
+     * with nothing new costs one empty request, and a refresh after a handful of
+     * changes transfers only those rows. The `created_at` keyset pagination and
+     * its page cursor are left completely alone.
+     *
+     * The cursor is advanced exactly once, at the end, and only when the batch was
+     * read and merged successfully. Offline, a timeout, a backend error, a
+     * cancelled caller or a superseded session therefore all keep the previous
+     * cursor: the next refresh resumes from the same position and applies the
+     * changes it never saw instead of skipping them.
+     */
+    private suspend fun syncChangedRows(
+        session: AccountSession.Snapshot,
+        ownerId: String,
+        deviceItems: List<MediaItem>,
+        trashed: List<MediaItem>,
+        favoriteIds: Set<String>,
+        records: Map<String, SyncRecord>,
+        cursor: MediaSyncCursor,
+        now: Long
+    ) {
+        val epoch = catalogEpoch
+        var merged = loadedRemoteRows
+        var position = cursor
+        var changedCount = 0
+        var pages = 0
+        val tombstoned = HashSet<String>()
+        try {
+            while (true) {
+                val page = mediaAssetsRepository.loadChangedAssetsPage(position)
+                if (!sessionStillCurrent(session, ownerId) || epoch != catalogEpoch) return
+                changedCount += page.rows.size
+                for (row in page.rows) {
+                    if (MediaLibraryPaging.isRemoteTombstone(row)) tombstoned += row.id
+                }
+                // Upsert by stable remote id: a changed row replaces the loaded
+                // copy, an unknown id is appended, and no id is ever duplicated.
+                merged = MediaLibraryPaging.upsertRows(merged, page.rows)
+                val before = position
+                position = MediaLibraryPaging.latestSyncCursor(position, page.rows) ?: position
+                pages += 1
+                val more = page.hasNextPage && page.nextCursor != null
+                // A short page ends the batch; a page that could not move the
+                // cursor would be requested again unchanged, so it ends it too.
+                if (!more || MediaSyncCursor.compare(position, before) <= 0) break
+                if (pages >= MediaLibraryPaging.MAX_INCREMENTAL_PAGES) break
+            }
+        } catch (cancelled: CancellationException) {
+            // Nothing was committed and the cursor was not written: a cancelled
+            // caller must never look like a completed synchronization.
+            throw cancelled
+        } catch (error: Exception) {
+            val failure = RemoteFailureClassifier.classify(error)
+            DeveloperLogger.warn(
+                category = LogCategory.DATABASE,
+                event = "CATALOG_SYNC_FAILED",
+                message = "Incremental catalog sync failed; keeping the last known catalog and cursor",
+                throwable = error,
+                metadata = mapOf(
+                    "failure" to failure.name,
+                    "kept_media" to _media.value.size.toString(),
+                    "kept_cloud_rows" to loadedRemoteRows.size.toString(),
+                    "cursor_updated_at" to cursor.updatedAt,
+                    "cursor_id" to cursor.id
+                )
+            )
+            synchronized(sessionLock) {
+                if (!sessionStillCurrent(session, ownerId) || epoch != catalogEpoch) return
+                val keepExisting = _media.value.isNotEmpty()
+                _loadState.update {
+                    it.copy(
+                        isLoading = false,
+                        isRefreshing = false,
+                        isLoadingMore = false,
+                        // Paging continues to work against what is already loaded.
+                        hasNextPage = nextPageCursor != null,
+                        errorMessage = if (keepExisting) null else RemoteFailureClassifier.message(failure)
+                    )
+                }
+            }
+            return
+        }
+        synchronized(sessionLock) {
+            if (!sessionStillCurrent(session, ownerId) || epoch != catalogEpoch) return
+            if (changedCount > 0) {
+                loadedRemoteRows = merged
+                if (tombstoned.isNotEmpty()) {
+                    // Only an authoritative server tombstone (status = DELETED)
+                    // removes a record. Absence from a response never does.
+                    loadedRemoteRows = loadedRemoteRows.filterNot { it.id in tombstoned }
+                    dropCachedCloudEntries(tombstoned)
+                }
+            }
+            // Last, and only now: everything above is committed under the same
+            // guard that proved this pass still owns the catalog.
+            mediaSyncCursorStore.advanceTo(position)
+            val libraryItems = composeLibrary(deviceItems, trashed, favoriteIds, records, loadedRemoteRows)
+            _media.value = libraryItems
+            _albums.value = buildAlbums(libraryItems, cloudAlbumStats)
+            lastRefreshAt = now
+            updateStorage(libraryItems)
+            _loadState.update {
+                it.copy(
+                    isLoading = false,
+                    isRefreshing = false,
+                    isLoadingMore = false,
+                    errorMessage = null
+                )
+            }
+            DeveloperLogger.info(
+                category = LogCategory.DATABASE,
+                event = "CATALOG_SYNCED_INCREMENTALLY",
+                message = "Incremental catalog sync applied",
+                metadata = mapOf(
+                    "changed_rows" to changedCount.toString(),
+                    "pages" to pages.toString(),
+                    "tombstones" to tombstoned.size.toString(),
+                    "cursor_updated_at" to position.updatedAt,
+                    "cursor_id" to position.id
+                )
+            )
+        }
+    }
+
+    /**
+     * Forgets the persisted catalog entry of an authoritative server tombstone.
+     *
+     * Without this the cached entry would keep re-adding the deleted record to
+     * "My Drive" on every composition.
+     */
+    private fun dropCachedCloudEntries(remoteIds: Set<String>) {
+        if (remoteIds.isEmpty()) return
+        val cached = visibilityStore.cloudEntries()
+        val remaining = cached.filterValues { it.remoteMediaId !in remoteIds }
+        if (remaining.size != cached.size) visibilityStore.replaceCloud(remaining)
     }
 
     private fun sessionStillCurrent(session: AccountSession.Snapshot, ownerId: String): Boolean {
@@ -760,11 +945,22 @@ class MediaRepository(
         remoteRows: List<com.mydrive.app.data.remote.dto.MediaAssetRow>
     ): List<MediaItem> {
         val hidden = HashSet(visibilityStore.hiddenLocalIds())
-        val byLocalMediaId = remoteRows.mapNotNull { row ->
+        // One snapshot of the persisted catalog for the whole composition. An
+        // incremental page can now carry rows that left the library, so the
+        // hidden mapping and the cloud-only pass both need it; looking it up per
+        // item re-parsed the entire map every time.
+        val cloudCache = visibilityStore.cloudEntries()
+        val cachedByRemoteId = cloudCache.values.associateBy { it.remoteMediaId }
+        // Only rows the catalog rule accepts may be composed into the library.
+        // The rule itself is unchanged (`status = READY` and not hidden) — it used
+        // to be enforced by the request filter, and is now enforced here as well
+        // because the incremental request deliberately returns departing rows too.
+        val visibleRows = remoteRows.filter { MediaLibraryPaging.isVisibleInCatalog(it) }
+        val byLocalMediaId = visibleRows.mapNotNull { row ->
             row.localMediaId?.takeIf { it > 0L }?.let { it to row }
         }.toMap()
-        val byRemoteId = remoteRows.associateBy { it.id }
-        val byClientUpload = remoteRows.mapNotNull { row ->
+        val byRemoteId = visibleRows.associateBy { it.id }
+        val byClientUpload = visibleRows.mapNotNull { row ->
             row.clientUploadId?.takeIf { it.isNotBlank() }?.let { it to row }
         }.toMap()
 
@@ -779,13 +975,17 @@ class MediaRepository(
             val row = matchRow(item, record)
             if (row != null) {
                 rememberCloudFromItem(item, row, record)
-                if (row.isHiddenFromLibrary) hidden += item.id
             }
         }
         for (row in remoteRows) {
             if (!row.isHiddenFromLibrary) continue
             records.entries.firstOrNull { it.value.remoteMediaId == row.id }?.key?.let { hidden += it }
             records.entries.firstOrNull { it.value.clientUploadId == row.clientUploadId }?.key?.let { hidden += it }
+            // A cloud-only record has neither a MediaStore row nor a queue
+            // record, so the persisted catalog entry is the only handle on its
+            // local id. Without it, a record trashed elsewhere would stay on
+            // screen, and a restored one would never come back.
+            cachedByRemoteId[row.id]?.let { hidden += it.localId }
         }
         visibilityStore.replaceHidden(hidden)
 
@@ -811,7 +1011,7 @@ class MediaRepository(
             if (item.id in hidden || item.id in present || item.id in deviceIds) continue
             val record = records[item.id]
             val row = matchRow(item, record)
-            val cloud = visibilityStore.cloudEntry(item.id)
+            val cloud = cloudCache[item.id]
             if (row != null && !row.isHiddenFromLibrary && row.status != "DELETED") {
                 rememberCloudFromItem(item, row, record)
                 library += cloudMediaItem(item, row, record, favoriteIds)
@@ -822,7 +1022,7 @@ class MediaRepository(
             }
         }
 
-        for ((localId, entry) in visibilityStore.cloudEntries()) {
+        for ((localId, entry) in cloudCache) {
             if (localId in hidden || localId in present || localId in deviceIds) continue
             library += entry.toMediaItem(favoriteIds, records[localId])
             presentRemoteIds += entry.remoteMediaId
@@ -830,9 +1030,8 @@ class MediaRepository(
 
         // MediaStore is only the local-copy index. A backed-up row remains part
         // of My Drive even after another Gallery/File Manager removes its copy.
-        val cachedByRemoteId = visibilityStore.cloudEntries().values.associateBy { it.remoteMediaId }
-        for (row in remoteRows) {
-            if (!row.isCloudAvailable || row.isHiddenFromLibrary || row.id in presentRemoteIds) continue
+        for (row in visibleRows) {
+            if (!row.isCloudAvailable || row.id in presentRemoteIds) continue
             val cached = cachedByRemoteId[row.id]
             val cloudId = cached?.localId ?: "cloud-${row.id}"
             library += cached?.toMediaItem(favoriteIds, records[cloudId])

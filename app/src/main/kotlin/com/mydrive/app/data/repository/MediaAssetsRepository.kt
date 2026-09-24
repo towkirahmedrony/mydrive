@@ -6,6 +6,8 @@ import com.mydrive.app.data.media.MediaAlbumStats
 import com.mydrive.app.data.media.MediaAssetsPage
 import com.mydrive.app.data.media.MediaLibraryPaging
 import com.mydrive.app.data.media.MediaPageCursor
+import com.mydrive.app.data.media.MediaSyncCursor
+import com.mydrive.app.data.media.MediaSyncPage
 import com.mydrive.app.data.media.RemoteFailureClassifier
 import com.mydrive.app.data.media.RemoteMediaException
 import com.mydrive.app.data.media.RemoteMediaFailure
@@ -117,6 +119,96 @@ class MediaAssetsRepository(
                 DeveloperLogger.error(
                     category = LogCategory.DATABASE,
                     event = "MEDIA_ASSETS_LOAD_FAILED",
+                    message = message,
+                    throwable = error,
+                    metadata = metadata
+                )
+            }
+            throw error
+        }
+    }
+
+    /**
+     * One page of the cloud catalog that changed after [cursor].
+     *
+     * The `updated_at` + `id` pair is the cursor because `updated_at` is not
+     * unique: several rows written in one transaction share the exact same
+     * instant, and a bare timestamp would either skip the rest of that batch or
+     * replay it forever. Ordering by the same pair ascending (with `id` breaking
+     * the tie) makes the keyset stable, so a large batch of changes is walked
+     * page by page without offsets, repeats or gaps.
+     *
+     * The library's visibility rule is deliberately **not** applied here — unlike
+     * [loadOwnerAssetsPage], which serves the visible page. A row that just left
+     * the library (trashed, restored, or moved on by the server lifecycle) has to
+     * come back so the caller can apply the unchanged rule locally; see
+     * [MediaLibraryPaging.isVisibleInCatalog].
+     *
+     * Throws [RemoteMediaException] exactly like [loadOwnerAssetsPage]: an empty
+     * page is only ever a genuinely successful "nothing changed" answer, never a
+     * failed request.
+     */
+    suspend fun loadChangedAssetsPage(
+        cursor: MediaSyncCursor,
+        pageSize: Int = MediaLibraryPaging.PAGE_SIZE
+    ): MediaSyncPage = withContext(Dispatchers.IO) {
+        val supabase = client
+        if (supabase == null) {
+            // No backend configured (local build): nothing can have changed.
+            return@withContext MediaSyncPage(emptyList(), null, false)
+        }
+        val userId = currentUserId()
+        if (userId.isNullOrBlank()) {
+            DeveloperLogger.warn(
+                category = LogCategory.DATABASE,
+                event = "MEDIA_ASSETS_SYNC_SKIPPED",
+                message = "Skipped incremental media_assets load: no authenticated user id",
+                metadata = mapOf("failure" to RemoteMediaFailure.UNAUTHORIZED.name)
+            )
+            throw RemoteMediaException(RemoteMediaFailure.UNAUTHORIZED)
+        }
+        try {
+            val rows = remote {
+                supabase.from(TABLE)
+                    .select(columns = Columns.raw(MediaLibraryPaging.LISTING_COLUMNS)) {
+                        filter {
+                            eq("owner_id", userId)
+                            applySyncCursor(cursor)
+                        }
+                        order(column = "updated_at", order = Order.ASCENDING)
+                        order(column = "id", order = Order.ASCENDING)
+                        limit(pageSize.toLong())
+                    }
+                    .decodeList<MediaAssetRow>()
+            }
+            val annotated = annotateDriveArchives(supabase, rows)
+            MediaSyncPage(
+                rows = annotated,
+                nextCursor = MediaLibraryPaging.nextSyncCursor(annotated, pageSize),
+                hasNextPage = MediaLibraryPaging.hasNextPage(annotated.size, pageSize)
+            )
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            val failure = RemoteFailureClassifier.classify(error)
+            val message = "Failed to load incrementally changed media_assets rows"
+            val metadata = mapOf(
+                "failure" to failure.name,
+                "cursor_updated_at" to cursor.updatedAt,
+                "cursor_id" to cursor.id
+            )
+            if (failure == RemoteMediaFailure.OFFLINE) {
+                DeveloperLogger.warn(
+                    category = LogCategory.DATABASE,
+                    event = "MEDIA_ASSETS_SYNC_SKIPPED",
+                    message = message,
+                    throwable = error,
+                    metadata = metadata
+                )
+            } else {
+                DeveloperLogger.error(
+                    category = LogCategory.DATABASE,
+                    event = "MEDIA_ASSETS_SYNC_FAILED",
                     message = message,
                     throwable = error,
                     metadata = metadata
@@ -479,6 +571,25 @@ class MediaAssetsRepository(
             and {
                 eq("created_at", cursor.createdAt)
                 lt("id", cursor.id)
+            }
+        }
+    }
+
+    /**
+     * Everything strictly after the cursor position, in the same
+     * (`updated_at`, `id`) order the page is read in.
+     *
+     * The comparison stays on the server's `timestamptz` type — the exact
+     * `updated_at` text is sent back verbatim — so no precision is lost between
+     * the cursor and the row that produced it, and the `id` tie-break is what
+     * carries the rest of a batch that shares one timestamp.
+     */
+    private fun PostgrestFilterBuilder.applySyncCursor(cursor: MediaSyncCursor) {
+        or {
+            gt("updated_at", cursor.updatedAt)
+            and {
+                eq("updated_at", cursor.updatedAt)
+                gt("id", cursor.id)
             }
         }
     }
