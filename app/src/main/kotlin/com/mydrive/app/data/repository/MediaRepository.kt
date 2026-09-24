@@ -211,6 +211,7 @@ class MediaRepository(
             // from account A's position.
             mediaSyncCursorStore.bindUser(userId)
             resetCatalog(showLoading = true)
+            hydrateCachedCloudCatalog()
         }
     }
 
@@ -249,6 +250,34 @@ class MediaRepository(
                 errorMessage = null
             )
         }
+    }
+
+    /** Publishes the last successful account-scoped cloud snapshot immediately. */
+    private fun hydrateCachedCloudCatalog() {
+        val cached = visibilityStore.cloudEntries()
+        if (cached.isEmpty()) return
+        val records = syncRepository.records.value
+        val favoriteIds = favorites.ids.value
+        val cachedRows = cached.values.map { entry ->
+            MediaAssetRow(
+                id = entry.remoteMediaId,
+                fileName = entry.filename,
+                mimeType = entry.mimeType,
+                fileSize = entry.fileSizeBytes,
+                width = entry.width,
+                height = entry.height,
+                durationMs = entry.durationMillis,
+                storageUrl = entry.uri.takeIf { it.isNotBlank() },
+                thumbnailUrl = entry.thumbnailUrl,
+                status = "READY",
+                createdAt = entry.capturedAtMillis.takeIf { it > 0L }
+                    ?.let { java.time.Instant.ofEpochMilli(it).toString() }
+            )
+        }
+        loadedRemoteRows = cachedRows
+        _media.value = cached.values.map { it.toMediaItem(favoriteIds, records[it.localId]) }
+        _albums.value = buildAlbums(_media.value, cloudAlbumStats)
+        updateStorage(_media.value)
     }
 
     fun onMediaStoreChanged() {

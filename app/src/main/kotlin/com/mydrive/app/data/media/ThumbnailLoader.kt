@@ -13,10 +13,15 @@ import android.util.Size
 import com.mydrive.app.data.auth.AuthenticatedSessionProvider
 import com.mydrive.app.data.session.AccountSession
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancelChildren
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
 import java.net.HttpURLConnection
+import java.util.concurrent.ConcurrentHashMap
 
 object ThumbnailLoader {
 
@@ -26,9 +31,13 @@ object ThumbnailLoader {
     private val cache: LruCache<String, Bitmap> = object : LruCache<String, Bitmap>(cacheKb()) {
         override fun sizeOf(key: String, value: Bitmap): Int = value.byteCount / 1024
     }
+    private val refreshScope = kotlinx.coroutines.CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val refreshJobs = ConcurrentHashMap<String, Job>()
 
     fun evictMemory() {
         cache.evictAll()
+        refreshScope.coroutineContext.cancelChildren()
+        refreshJobs.clear()
     }
 
     fun peek(
@@ -56,7 +65,8 @@ object ThumbnailLoader {
         fallbackMediaId: String? = null,
         previewUri: String? = null,
         sessionProvider: AuthenticatedSessionProvider? = null,
-        userId: String? = AccountSession.userId
+        userId: String? = AccountSession.userId,
+        forceRefresh: Boolean = false
     ): Bitmap? = withContext(Dispatchers.IO) {
         if (uriString.isBlank() && previewUri.isNullOrBlank() && fallbackMediaId.isNullOrBlank()) {
             return@withContext null
@@ -80,7 +90,12 @@ object ThumbnailLoader {
             sizePx = sizePx
         )
         if (key == "blocked-remote") return@withContext null
-        cache.get(key)?.let { return@withContext it }
+        if (!forceRefresh) {
+            cache.get(key)?.let {
+                scheduleRefreshIfStale(context, ownerId, fallbackMediaId, sizePx, key, uriString, preview, sessionProvider)
+                return@withContext it
+            }
+        }
         if (!stillCurrent(session, ownerId)) return@withContext null
         val appContext = context.applicationContext
         var fromDisk = false
@@ -90,7 +105,7 @@ object ThumbnailLoader {
                 uriString,
                 hasStableMediaId = !fallbackMediaId.isNullOrBlank(),
                 previewUri = preview
-            )) {
+            ).let { steps -> if (forceRefresh) steps.filter { it != MediaFetchSource.DISK } else steps }) {
                 if (!stillCurrent(session, ownerId)) return@withContext null
                 val decoded = when (step) {
                     MediaFetchSource.DISK -> {
@@ -127,8 +142,50 @@ object ThumbnailLoader {
         cache.put(key, bitmap)
         if (!fromDisk && !ownerId.isNullOrBlank() && !fallbackMediaId.isNullOrBlank()) {
             writeDisk(appContext, ownerId, fallbackMediaId, sizePx, bitmap)
+            MediaCacheFreshness.markThumbnailFresh(appContext.filesDir, ownerId, fallbackMediaId, sizePx)
+        } else if (fromDisk) {
+            scheduleRefreshIfStale(context, ownerId, fallbackMediaId, sizePx, key, uriString, preview, sessionProvider)
         }
         bitmap
+    }
+
+    private fun scheduleRefreshIfStale(
+        context: Context,
+        ownerId: String?,
+        mediaId: String?,
+        sizePx: Int,
+        key: String,
+        uriString: String,
+        previewUri: String,
+        sessionProvider: AuthenticatedSessionProvider?
+    ) {
+        if (ownerId.isNullOrBlank() || mediaId.isNullOrBlank() || !isOnline(context)) return
+        if (!MediaCacheFreshness.isThumbnailStale(context.filesDir, ownerId, mediaId, sizePx)) return
+        val job = refreshScope.launch {
+            try {
+                load(
+                    context = context,
+                    uriString = uriString,
+                    sizePx = sizePx,
+                    fallbackMediaId = mediaId,
+                    previewUri = previewUri,
+                    sessionProvider = sessionProvider,
+                    userId = ownerId,
+                    forceRefresh = true
+                )
+            } finally {
+                refreshJobs.remove(key)
+            }
+        }
+        refreshJobs.putIfAbsent(key, job)?.let { job.cancel() }
+    }
+
+    private fun isOnline(context: Context): Boolean {
+        val connectivity = context.applicationContext.getSystemService(Context.CONNECTIVITY_SERVICE)
+            as? android.net.ConnectivityManager ?: return true
+        val network = connectivity.activeNetwork ?: return false
+        val capabilities = connectivity.getNetworkCapabilities(network) ?: return false
+        return capabilities.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET)
     }
 
     private fun stillCurrent(session: AccountSession.Snapshot, ownerId: String?): Boolean {

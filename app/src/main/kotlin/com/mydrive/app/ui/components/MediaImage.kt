@@ -70,7 +70,6 @@ fun MediaImage(
         val cached = ThumbnailLoader.peek(primaryUri, sizePx, mediaId = fallbackMediaId, userId = ownerId)
         if (cached != null) {
             bitmap = cached
-            return@LaunchedEffect
         }
         val app = context.applicationContext as? MyDriveApp
         val loaded = ThumbnailLoader.load(
