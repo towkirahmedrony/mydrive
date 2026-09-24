@@ -32,6 +32,7 @@ object MediaFetchOrder {
                 }
             }
             MediaCacheKeys.isRemoteUri(uriString) -> ordered.add(MediaFetchSource.CLOUDINARY)
+            MediaCacheKeys.isRemoteUri(previewUri.orEmpty()) -> ordered.add(MediaFetchSource.CLOUDINARY)
         }
         if (hasStableMediaId) ordered.add(MediaFetchSource.DRIVE)
         return ordered

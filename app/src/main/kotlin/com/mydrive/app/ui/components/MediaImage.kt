@@ -48,7 +48,10 @@ fun MediaImage(
     // preview becomes the primary, so the cache key stays URL-derived-or-media-id
     // based instead of collapsing onto an empty URI.
     val primaryUri = uri.ifBlank { previewUri.orEmpty() }
-    val cloudFallback = previewUri?.takeIf { uri.isNotBlank() }
+    // Keep a supplied preview even when the primary URI is empty. Cloud-only
+    // entries may have no local URI, but a valid preview/storage URL should
+    // still be tried before the authenticated Drive fallback.
+    val cloudFallback = previewUri?.trim()?.takeIf { it.isNotBlank() && it != uri }
     var bitmap by remember(primaryUri, cloudFallback, fallbackMediaId, sizePx, ownerId) {
         mutableStateOf(
             placeholderBitmap
@@ -74,7 +77,7 @@ fun MediaImage(
         val app = context.applicationContext as? MyDriveApp
         val loaded = ThumbnailLoader.load(
             context = context,
-            uriString = uri,
+            uriString = primaryUri,
             sizePx = sizePx,
             fallbackMediaId = fallbackMediaId,
             previewUri = cloudFallback,
