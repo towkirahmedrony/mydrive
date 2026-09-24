@@ -39,10 +39,12 @@ object SupabaseModule {
                 }
             )
             httpEngine = OkHttp.create()
-            install(HttpTimeout) {
-                requestTimeoutMillis = REQUEST_TIMEOUT_MS
-                connectTimeoutMillis = CONNECT_TIMEOUT_MS
-                socketTimeoutMillis = SOCKET_TIMEOUT_MS
+            httpConfig {
+                install(HttpTimeout) {
+                    requestTimeoutMillis = REQUEST_TIMEOUT_MS
+                    connectTimeoutMillis = CONNECT_TIMEOUT_MS
+                    socketTimeoutMillis = SOCKET_TIMEOUT_MS
+                }
             }
             install(Auth) {
                 autoLoadFromStorage = true
