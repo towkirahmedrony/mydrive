@@ -220,10 +220,15 @@ internal object MediaDriveClient {
     private fun classify(error: Exception): String {
         var current: Throwable? = error
         while (current != null) {
-            if (current is java.net.SocketTimeoutException || current is java.net.ConnectTimeoutException) {
+            // HttpURLConnection has no distinct connect-timeout type on Android:
+            // both connect and read timeouts surface as SocketTimeoutException,
+            // so that is the only reliable signal here.
+            if (current is java.net.SocketTimeoutException) {
                 return "TIMEOUT"
             }
-            if (current is java.net.UnknownHostException) return "NETWORK_ERROR"
+            if (current is java.net.UnknownHostException || current is java.net.ConnectException) {
+                return "NETWORK_ERROR"
+            }
             current = current.cause
         }
         return "TRANSPORT_FAILURE"

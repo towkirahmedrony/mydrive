@@ -1112,7 +1112,7 @@ class MediaRepository(
                 deletedAtPresent = !row.deletedAt.isNullOrBlank(),
                 userHiddenAtPresent = row.isHiddenFromLibrary,
                 localFileExists = null,
-                localUriPresent = !row.localMediaId.isNullOrBlank()
+                localUriPresent = row.localMediaId != null
             )
             MediaDiagnosticLogger.cloudMetadata(
                 mediaId = row.id,

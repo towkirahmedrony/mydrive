@@ -228,7 +228,7 @@ object FullImageLoader {
     private fun downloadHttp(attempt: MediaDiagnosticLogger.Attempt, uri: Uri): ByteArray? {
         val startedAt = System.currentTimeMillis()
         MediaDiagnosticLogger.httpStart(attempt, "CLOUDINARY", uri.host, uri.encodedPath?.take(80))
-        try {
+        return try {
             val connection = (URL(uri.toString()).openConnection() as HttpURLConnection).apply {
                 connectTimeout = 10_000
                 readTimeout = 30_000
@@ -256,7 +256,7 @@ object FullImageLoader {
                 attempt, "CLOUDINARY", error.javaClass.simpleName, error.message,
                 System.currentTimeMillis() - startedAt
             )
-            return null
+            null
         }
     }
 

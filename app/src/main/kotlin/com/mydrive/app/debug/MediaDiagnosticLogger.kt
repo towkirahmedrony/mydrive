@@ -31,7 +31,7 @@ object MediaDiagnosticLogger {
     private val lastFailureByMedia = ConcurrentHashMap<String, String>()
 
     fun newRequestId(variant: String): String {
-        val prefix = if (variant == VARIANT_ORIGINAL) "OR" else "TH"
+        val prefix = if (variant == Variant.ORIGINAL.name) "OR" else "TH"
         val suffix = java.lang.Long.toHexString(requestIdCounter.incrementAndGet()).uppercase()
         return "$prefix-${suffix.takeLast(4)}"
     }
@@ -231,15 +231,15 @@ object MediaDiagnosticLogger {
     fun httpStart(attempt: Attempt, source: String, urlHost: String?, urlPathSafe: String?) {
         val event = if (attempt.variant == Variant.ORIGINAL) "ORIGINAL_HTTP_START" else "THUMB_HTTP_START"
         attempt.networkResult = "ATTEMPTED"
-        DeveloperLogger.info(
-            category = LogCategory.NETWORK,
-            event = event,
-            message = "HTTP request started source=$source",
-            localMediaId = attempt.localMediaId,
-            urlPath = urlPathSafe,
-            metadata = baseMetadata(attempt) + mapOf(
+        log(
+            LogLevel.INFO,
+            LogCategory.NETWORK,
+            event,
+            "HTTP request started source=$source url_host=$urlHost",
+            baseMetadata(attempt) + mapOf(
                 "source" to source,
-                "url_host" to urlHost
+                "url_host" to urlHost,
+                "url_path_safe" to urlPathSafe
             )
         )
     }
