@@ -21,7 +21,14 @@ data class CloudLibraryEntry(
     val capturedAtMillis: Long = 0L,
     val albumId: String = "mydrive",
     val albumName: String = "My Drive",
-    val type: String = "PHOTO"
+    val type: String = "PHOTO",
+    /**
+     * The ORIGINAL's cloud URL, kept apart from [thumbnailUrl] (the persistent
+     * thumbnail). Nullable with a default, so entries persisted by an earlier
+     * build still decode; they simply carry no original and full resolution falls
+     * back to the Drive copy.
+     */
+    val originalUrl: String? = null
 )
 
 class LibraryVisibilityStore(context: Context) {

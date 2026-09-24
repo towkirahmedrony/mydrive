@@ -32,6 +32,13 @@ object CloudinaryPreview {
     private const val MIN_SIZE_PX = 64
     private const val MAX_SIZE_PX = 1024
 
+    /**
+     * Folder segment the backend stores persistent thumbnails under
+     * (`mydrive/{owner}/thumbnails/{media_id}`). Must match
+     * `supabase/functions/shared/thumbnail-lifecycle.ts`.
+     */
+    private const val THUMBNAIL_FOLDER_SEGMENT = "thumbnails"
+
     /** Video containers Cloudinary can derive a still frame from. */
     private val VIDEO_EXTENSIONS = listOf(
         ".mp4", ".mov", ".m4v", ".webm", ".avi", ".mkv", ".3gp", ".3g2", ".mts"
@@ -44,6 +51,36 @@ object CloudinaryPreview {
      */
     fun isVideoDeliveryUrl(url: String): Boolean =
         url.contains(VIDEO_UPLOAD_MARKER, ignoreCase = true)
+
+    /**
+     * True when [url] addresses the media's PERSISTENT thumbnail rather than the
+     * original.
+     *
+     * This is the signal that a preview does not depend on the original still
+     * existing: the thumbnail is its own Cloudinary asset under
+     * `…/thumbnails/…`, so it survives the original's cleanup. Used for
+     * diagnostics and to keep the resolver's behaviour explicit; it never changes
+     * which URL is requested.
+     *
+     * Deliberately strict on the path shape: `…/{cloud}/{type}/upload/…/thumbnails/…`
+     * must have at least one segment after the folder, and the folder must be a
+     * whole path segment (an original named `thumbnails.jpg` must not match).
+     */
+    fun isPersistentThumbnailUrl(url: String): Boolean {
+        val trimmed = url.trim()
+        if (trimmed.isEmpty()) return false
+        val marker = when {
+            trimmed.contains(IMAGE_UPLOAD_MARKER, ignoreCase = true) -> IMAGE_UPLOAD_MARKER
+            trimmed.contains(VIDEO_UPLOAD_MARKER, ignoreCase = true) -> VIDEO_UPLOAD_MARKER
+            else -> return false
+        }
+        val markerAt = trimmed.indexOf(marker, ignoreCase = true)
+        val segments = trimmed.substring(markerAt + marker.length)
+            .split('/')
+            .filter { it.isNotEmpty() }
+        if (segments.size < 3) return false
+        return segments.dropLast(1).any { it == THUMBNAIL_FOLDER_SEGMENT }
+    }
 
     /**
      * A size-bounded delivery URL for [url], or `null` when no bitmap can be

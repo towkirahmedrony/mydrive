@@ -1034,7 +1034,13 @@ class MediaRepository(
             val row = matchRow(item, record)
             library += item.copy(
                 remoteMediaId = row?.id ?: record?.remoteMediaId,
-                thumbnailUrl = row?.cloudinarySourceUrl
+                // The persistent thumbnail (`…/thumbnails/…`) is the tile preview
+                // and outlives the original.
+                thumbnailUrl = row?.persistentThumbnailUrl
+                    ?: record?.cloudinarySecureUrl?.takeUnless { row?.isPrimaryCleaned == true },
+                // The original is tracked separately: it is what full resolution
+                // may use, and it disappears with the verified cleanup.
+                originalUrl = row?.originalCloudUrl
                     ?: record?.cloudinarySecureUrl?.takeUnless { row?.isPrimaryCleaned == true },
                 originLocal = true,
                 hiddenFromLibrary = false
@@ -1128,7 +1134,25 @@ class MediaRepository(
                 userHiddenAtPresent = row.isHiddenFromLibrary,
                 primaryCleaned = row.isPrimaryCleaned
             )
-            val driveOnly = row.storageUrl.isNullOrBlank() && row.thumbnailUrl.isNullOrBlank() &&
+            // Thumbnail availability is tracked separately from original
+            // availability: a row whose Cloudinary ORIGINAL was cleaned up is
+            // still fully displayable from its persistent thumbnail.
+            if (row.isThumbnailOnly) {
+                MediaDiagnosticLogger.log(
+                    LogLevel.INFO,
+                    LogCategory.THUMBNAIL,
+                    "THUMBNAIL_ONLY_AVAILABILITY",
+                    "original cleaned up; media stays displayable from its persistent thumbnail",
+                    mapOf(
+                        "media_id" to row.id,
+                        "thumbnail_available" to "true",
+                        "original_available" to "false",
+                        "drive_archived" to (!row.driveArchivedAt.isNullOrBlank()).toString()
+                    )
+                )
+            }
+            val driveOnly = row.originalCloudUrl.isNullOrBlank() &&
+                row.persistentThumbnailUrl.isNullOrBlank() &&
                 (!row.driveArchivedAt.isNullOrBlank() || row.hasCompletedDriveArchive)
             if (driveOnly) {
                 MediaDiagnosticLogger.cloudDriveCheck(
@@ -1143,6 +1167,9 @@ class MediaRepository(
                 row.status == "DELETED" -> "DELETED"
                 row.isHiddenFromLibrary -> "USER_HIDDEN"
                 row.status != "READY" -> "MEDIA_STATUS_NOT_READY"
+                // Still displayable: the original is gone but the persistent
+                // thumbnail is not, so this is NOT "no remote source".
+                row.isThumbnailOnly -> "THUMBNAIL_ONLY"
                 row.isPrimaryCleaned && !driveOnly -> "NO_REMOTE_SOURCE"
                 cloudAvailable -> "AVAILABLE"
                 else -> "NO_REMOTE_SOURCE"
@@ -1159,6 +1186,7 @@ class MediaRepository(
                 selectedSource = when {
                     !cloudAvailable -> "NONE"
                     driveOnly -> "DRIVE"
+                    row.isThumbnailOnly -> "CLOUDINARY_THUMBNAIL"
                     else -> "CLOUDINARY"
                 }
             )
@@ -1189,7 +1217,10 @@ class MediaRepository(
         favoriteIds: Set<String>
     ): MediaItem {
         val mediaType = if (mimeType?.startsWith("video/") == true) MediaType.VIDEO else MediaType.PHOTO
-        val preview = cloudinarySourceUrl.orEmpty()
+        // The persistent thumbnail drives the tile; the original drives full
+        // resolution and playback, and is absent once the verified cleanup ran.
+        val preview = persistentThumbnailUrl
+        val original = originalCloudUrl
         val captured = runCatching { java.time.Instant.parse(createdAt ?: "").toEpochMilli() }.getOrDefault(0L)
             .takeIf { it > 0L }
             ?: runCatching { java.time.Instant.parse(uploadedAt ?: "").toEpochMilli() }.getOrDefault(0L)
@@ -1206,16 +1237,19 @@ class MediaRepository(
             backupState = BackupState.COMPLETED,
             backupCompleted = true,
             thumbnailSeed = stableId.hashCode(),
-            uri = preview,
+            // The original, and only the original: a legacy row whose Cloudinary
+            // original is already gone keeps today's behaviour (Drive serves it).
+            uri = original.orEmpty(),
             mimeType = mimeType.orEmpty(),
             width = width ?: 0,
             height = height ?: 0,
             durationMillis = durationMs,
             remoteMediaId = id,
-            thumbnailUrl = preview.takeIf { it.isNotBlank() },
+            thumbnailUrl = preview,
             originLocal = false,
             albumId = "mydrive",
-            albumName = "My Drive"
+            albumName = "My Drive",
+            originalUrl = original
         )
     }
 
@@ -1228,12 +1262,16 @@ class MediaRepository(
             ?: record?.cloudinarySecureUrl
             ?: item.uri.takeIf { it.startsWith("http") }
             ?: ""
+        val original = item.originalUrl
+            ?: record?.cloudinarySecureUrl
+            ?: item.uri.takeIf { it.startsWith("http") }
         visibilityStore.putCloud(
             CloudLibraryEntry(
                 localId = id,
                 remoteMediaId = remoteId,
-                uri = preview,
-                thumbnailUrl = preview,
+                uri = original.orEmpty(),
+                thumbnailUrl = preview.takeIf { it.isNotBlank() },
+                originalUrl = original,
                 filename = item.filename,
                 mimeType = item.mimeType,
                 fileSizeBytes = item.fileSizeBytes,
@@ -1254,15 +1292,16 @@ class MediaRepository(
         record: SyncRecord?
     ) {
         if (!row.isCloudAvailable) return
-        val preview = row.cloudinarySourceUrl
+        val original = row.originalCloudUrl
             ?: record?.cloudinarySecureUrl?.takeUnless { row.isPrimaryCleaned }
-            ?: ""
+        val preview = row.persistentThumbnailUrl ?: original ?: ""
         visibilityStore.putCloud(
             CloudLibraryEntry(
                 localId = item.id,
                 remoteMediaId = row.id,
-                uri = preview,
+                uri = original.orEmpty(),
                 thumbnailUrl = preview.takeIf { it.isNotBlank() },
+                originalUrl = original,
                 filename = item.filename,
                 mimeType = item.mimeType.ifBlank { row.mimeType.orEmpty() },
                 fileSizeBytes = item.fileSizeBytes.takeIf { it > 0L } ?: row.fileSize ?: 0L,
@@ -1282,7 +1321,8 @@ class MediaRepository(
         stableId: String
     ) {
         if (!row.isCloudAvailable) return
-        val preview = row.cloudinarySourceUrl.orEmpty()
+        val original = row.originalCloudUrl
+        val preview = row.persistentThumbnailUrl ?: original.orEmpty()
         val mediaType = if (row.mimeType?.startsWith("video/") == true) MediaType.VIDEO else MediaType.PHOTO
         val captured = runCatching { java.time.Instant.parse(row.createdAt ?: "").toEpochMilli() }.getOrDefault(0L)
             .takeIf { it > 0L }
@@ -1291,8 +1331,9 @@ class MediaRepository(
             CloudLibraryEntry(
                 localId = stableId,
                 remoteMediaId = row.id,
-                uri = preview,
+                uri = original.orEmpty(),
                 thumbnailUrl = preview.takeIf { it.isNotBlank() },
+                originalUrl = original,
                 filename = row.fileName.orEmpty().ifBlank { "My Drive media" },
                 mimeType = row.mimeType.orEmpty(),
                 fileSizeBytes = row.fileSize ?: 0L,
@@ -1313,12 +1354,14 @@ class MediaRepository(
         record: SyncRecord?,
         favoriteIds: Set<String>
     ): MediaItem {
-        val preview = row.cloudinarySourceUrl
+        val original = row.originalCloudUrl
             ?: record?.cloudinarySecureUrl?.takeUnless { row.isPrimaryCleaned }
-            ?: item.uri
+        val preview = row.persistentThumbnailUrl ?: original
         return item.copy(
-            uri = preview,
+            // `uri` is the full-size candidate; the tile uses `thumbnailUrl`.
+            uri = original.orEmpty(),
             thumbnailUrl = preview,
+            originalUrl = original,
             remoteMediaId = row.id,
             originLocal = false,
             isTrashed = false,
@@ -1331,7 +1374,10 @@ class MediaRepository(
 
     private fun CloudLibraryEntry.toMediaItem(favoriteIds: Set<String>, record: SyncRecord?): MediaItem {
         val mediaType = runCatching { MediaType.valueOf(type) }.getOrDefault(MediaType.PHOTO)
+        // The persisted entry keeps the thumbnail and the original apart; an entry
+        // written by an earlier build has no original and falls back to `uri`.
         val preview = thumbnailUrl ?: uri
+        val original = originalUrl ?: uri.takeIf { it.isNotBlank() && it != preview }
         return MediaItem(
             id = localId,
             filename = filename,
@@ -1355,7 +1401,8 @@ class MediaRepository(
             remoteMediaId = remoteMediaId.takeIf { it.isNotBlank() } ?: record?.remoteMediaId,
             thumbnailUrl = preview,
             originLocal = false,
-            hiddenFromLibrary = false
+            hiddenFromLibrary = false,
+            originalUrl = original
         )
     }
 

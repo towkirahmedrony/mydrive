@@ -82,13 +82,17 @@ fun ViewerVideoPlayer(
     // viewer cancels it instead of leaving work running for hidden media.
     LaunchedEffect(item.id, active, AccountSession.userId, exhaustedSources) {
         if (!active) return@LaunchedEffect
+        // The player must open the ORIGINAL video, never the persistent thumbnail
+        // (a JPEG still frame cannot be played). `originalUri` is the device copy
+        // for a local item and the Cloudinary original for a cloud-only one; when
+        // that original is gone, the authenticated Drive copy serves playback.
         val resolved = VideoSourceResolver.resolve(
             context = context,
-            uriString = item.displayUri,
+            uriString = item.originalUri,
             mediaId = item.remoteMediaId,
             sessionProvider = (context.applicationContext as? MyDriveApp)?.sessionProvider,
             userId = AccountSession.userId,
-            previewUri = item.thumbnailUrl,
+            previewUri = item.originalUrl,
             exclude = exhaustedSources
         )
         playbackSource = resolved

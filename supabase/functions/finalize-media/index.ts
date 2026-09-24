@@ -1,5 +1,10 @@
 import { corsHeaders, handleCors } from "../shared/cors.ts";
 import { getSupabaseAdmin, getSupabaseAuth } from "../shared/auth.ts";
+import {
+  ensurePersistentThumbnail,
+  type EnsureThumbnailOutcome,
+  type ThumbnailMediaRow,
+} from "../shared/thumbnail-lifecycle.ts";
 
 /**
  * Finalize Media - Records a successful Cloudinary upload as a Supabase
@@ -19,6 +24,15 @@ import { getSupabaseAdmin, getSupabaseAuth } from "../shared/auth.ts";
  *     (never from the client), status READY, storage_provider cloudinary
  *   - is idempotent on client_upload_id, so retrying the same request
  *     never creates a duplicate media record
+ *   - materializes the media's PERSISTENT Cloudinary thumbnail: an
+ *     independent Cloudinary asset under
+ *     `mydrive/{owner_id}/thumbnails/{media_assets.id}`, recorded on
+ *     `media_assets.thumbnail_url` and on a `media_variants` row with
+ *     `variant_type = 'thumbnail'`. Because it is a separate asset with its
+ *     own public ID, it outlives the Cloudinary ORIGINAL — which the Drive
+ *     cleanup later deletes once the archive is verified. Idempotent:
+ *     deterministic public ID + one variant row per media. A failure here is
+ *     logged and reported, never fatal (see ensureThumbnailForMedia).
  *   - ALWAYS creates the PENDING Google Drive replication job for the media
  *     (enqueue_drive_replication_job), which is what makes the media lifecycle
  *     run: media_assets -> Drive archive -> verified -> Cloudinary cleanup.
@@ -88,18 +102,28 @@ import { getSupabaseAdmin, getSupabaseAuth } from "../shared/auth.ts";
  *       "id": "uuid",
  *       "destination_type": "google_drive",
  *       "status": "PENDING"
+ *     },
+ *     "thumbnail": {                       // persistent gallery thumbnail
+ *       "status": "PERSISTENT" | "UNAVAILABLE",
+ *       "reason": "CREATED" | "ALREADY_PERSISTENT" | "UNSUPPORTED_RESOURCE_TYPE" | …,
+ *       "url": "https://res.cloudinary.com/…/thumbnails/<media id>.jpg" | null
  *     }
  *   }
  *
- * Response compatibility: `drive_job` is an ADDITIVE field. The Android
- * request/response contract for the existing fields is unchanged, so a client
- * that ignores it keeps working.
+ * Response compatibility: `drive_job` and `thumbnail` are ADDITIVE fields, and
+ * `media` now carries the standard `thumbnail_url` / `mime_type` /
+ * `primary_cleanup_*` columns. The Android request/response contract for the
+ * existing fields is unchanged, so a client that ignores them keeps working.
  */
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+// `mime_type`, `thumbnail_url` and the primary-cleanup columns are part of the
+// select because the persistent-thumbnail step needs them to decide whether a
+// thumbnail can be materialized at all. The extra columns are additive to the
+// response `media` object.
 const MEDIA_SELECT =
-  "id, owner_id, status, client_upload_id, storage_asset_id, storage_path, storage_url, uploaded_at";
+  "id, owner_id, status, client_upload_id, storage_asset_id, storage_path, storage_url, thumbnail_url, mime_type, primary_cleanup_status, primary_deleted_at, uploaded_at";
 
 const TELEGRAM_JOB_SELECT =
   "id, media_id, destination_type, status, telegram_config_id, attempt_count, last_error, created_at";
@@ -287,15 +311,102 @@ async function ensureDriveReplicationJob(
   return (existing as DriveJobRow | null) ?? null;
 }
 
+/**
+ * Materializes and records the media's PERSISTENT Cloudinary thumbnail.
+ *
+ * This is what makes the gallery survive the Cloudinary ORIGINAL's deletion: the
+ * thumbnail is stored as an independent Cloudinary asset under
+ * `mydrive/{owner}/thumbnails/{media_id}` and referenced by both
+ * `media_assets.thumbnail_url` and a `media_variants` row
+ * (`variant_type = 'thumbnail'`), so it never depends on the original.
+ *
+ * Idempotent by construction — the Cloudinary asset is addressed by a
+ * deterministic public ID and the variant row is unique per media — so a retried
+ * or concurrent finalize can neither duplicate the asset nor the thumbnail
+ * record. The media row was already written, so a failure here is logged and
+ * reported but MUST NOT fail the finalize request: the upload and the media
+ * record are durable, and the thumbnail can be materialized later (an admin
+ * backfill, or any later finalize retry, converges on the same asset).
+ *
+ * Never logs or returns a credential, a signature or a signed URL.
+ */
+async function ensureThumbnailForMedia(
+  admin: AdminClient,
+  media: Record<string, unknown> | null,
+): Promise<EnsureThumbnailOutcome | null> {
+  if (!media || typeof media.id !== "string") return null;
+  const mediaId = media.id;
+
+  const row: ThumbnailMediaRow = {
+    id: mediaId,
+    owner_id: typeof media.owner_id === "string" ? media.owner_id : "",
+    mime_type: typeof media.mime_type === "string" ? media.mime_type : null,
+    storage_path: typeof media.storage_path === "string" ? media.storage_path : null,
+    storage_url: typeof media.storage_url === "string" ? media.storage_url : null,
+    thumbnail_url: typeof media.thumbnail_url === "string" ? media.thumbnail_url : null,
+    status: typeof media.status === "string" ? media.status : null,
+    primary_cleanup_status: typeof media.primary_cleanup_status === "string"
+      ? media.primary_cleanup_status
+      : null,
+    primary_deleted_at: typeof media.primary_deleted_at === "string"
+      ? media.primary_deleted_at
+      : null,
+  };
+
+  try {
+    const outcome = await ensurePersistentThumbnail(admin, row);
+    if (outcome.ok) {
+      console.log(
+        `[THUMBNAIL_PERSISTED] media_id=${mediaId} result=${outcome.reason} ` +
+          `uploaded=${outcome.uploaded === true} persisted=${outcome.persisted === true}`,
+      );
+    } else {
+      console.warn(
+        `[THUMBNAIL_SKIPPED] media_id=${mediaId} reason=${outcome.reason}` +
+          (outcome.detail ? ` detail=${outcome.detail}` : ""),
+      );
+    }
+    return outcome;
+  } catch (error) {
+    // Defensive: ensurePersistentThumbnail reports expected cases as an outcome.
+    console.error(
+      `[THUMBNAIL_FAILED] media_id=${mediaId} reason=UNEXPECTED_ERROR detail=${
+        (error as Error).message
+      }`,
+    );
+    return { ok: false, reason: "UNEXPECTED_ERROR", detail: (error as Error).message };
+  }
+}
+
+/**
+ * Returns [media] with `thumbnail_url` reflecting the outcome of this request,
+ * so the response never contradicts the row it just wrote.
+ */
+function withThumbnailUrl<T>(media: T, thumbnail: EnsureThumbnailOutcome | null): T {
+  if (!thumbnail?.ok || !thumbnail.thumbnailUrl) return media;
+  return { ...(media as Record<string, unknown>), thumbnail_url: thumbnail.thumbnailUrl } as T;
+}
+
 function successWithJob(
   media: unknown,
   job: TelegramJobRow | null,
   driveJob: DriveJobRow | null,
+  thumbnail: EnsureThumbnailOutcome | null = null,
 ): Response {
   return json(
     {
       success: true,
       media,
+      // Additive: a client that ignores this keeps working unchanged. It lets
+      // the caller distinguish "thumbnail is persistent" from "thumbnail could
+      // not be created" without a second request.
+      thumbnail: thumbnail
+        ? {
+          status: thumbnail.ok ? "PERSISTENT" : "UNAVAILABLE",
+          reason: thumbnail.reason,
+          url: thumbnail.thumbnailUrl ?? null,
+        }
+        : null,
       telegram_job: job
         ? { id: job.id, destination_type: job.destination_type, status: job.status }
         : null,
@@ -401,9 +512,22 @@ Deno.serve(async (req: Request) => {
       }
       // Ensure the Telegram and Drive jobs exist even on a retry (self-healing
       // when the previous attempt failed after the media row was written).
+      // The jobs are enqueued BEFORE the thumbnail is materialized so a slow
+      // thumbnail fetch can never delay the Drive archive from being queued.
       const job = await ensureTelegramReplicationJob(admin, user.id, existing.data.id);
       const driveJob = await ensureDriveReplicationJob(admin, existing.data.id);
-      return successWithJob(existing.data, job, driveJob);
+      // Self-healing: a retry materializes the persistent thumbnail when the
+      // previous attempt wrote the media row but failed before the thumbnail.
+      const thumbnail = await ensureThumbnailForMedia(
+        admin,
+        existing.data as Record<string, unknown>,
+      );
+      return successWithJob(
+        withThumbnailUrl(existing.data, thumbnail),
+        job,
+        driveJob,
+        thumbnail,
+      );
     }
 
     // ── 6. Create the media record (all identity fields from the JWT) ──
@@ -440,7 +564,11 @@ Deno.serve(async (req: Request) => {
     if (inserted) {
       const job = await ensureTelegramReplicationJob(admin, user.id, inserted.id);
       const driveJob = await ensureDriveReplicationJob(admin, inserted.id);
-      return successWithJob(inserted, job, driveJob);
+      const thumbnail = await ensureThumbnailForMedia(
+        admin,
+        inserted as Record<string, unknown>,
+      );
+      return successWithJob(withThumbnailUrl(inserted, thumbnail), job, driveJob, thumbnail);
     }
 
     // A concurrent request won the race. Return its row only if it is ours.
@@ -458,7 +586,16 @@ Deno.serve(async (req: Request) => {
     }
     const racedJob = await ensureTelegramReplicationJob(admin, user.id, raced.data.id);
     const racedDriveJob = await ensureDriveReplicationJob(admin, raced.data.id);
-    return successWithJob(raced.data, racedJob, racedDriveJob);
+    const racedThumbnail = await ensureThumbnailForMedia(
+      admin,
+      raced.data as Record<string, unknown>,
+    );
+    return successWithJob(
+      withThumbnailUrl(raced.data, racedThumbnail),
+      racedJob,
+      racedDriveJob,
+      racedThumbnail,
+    );
   } catch (error) {
     const message = (error as Error).message;
     const isAuthError =

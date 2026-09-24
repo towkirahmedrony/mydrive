@@ -26,6 +26,23 @@ import java.io.InputStream
 import java.net.HttpURLConnection
 import java.util.concurrent.ConcurrentHashMap
 
+/**
+ * Resolves one grid/cover/viewer-neighbour thumbnail.
+ *
+ * Source priority, in order (see [MediaFetchOrder]):
+ *   1. the in-memory bitmap cache,
+ *   2. the on-disk thumbnail cache,
+ *   3. the device MediaStore thumbnail (only meaningful for a local copy),
+ *   4. the CLOUDINARY candidate — in practice the media's PERSISTENT thumbnail,
+ *      which is `…/thumbnails/…` and therefore does NOT require the Cloudinary
+ *      original to still exist,
+ *   5. the authenticated Drive (`media-drive`) fallback, and only as a last
+ *      resort: Drive holds originals, it is not the normal thumbnail source.
+ *
+ * A thumbnail that resolves from step 4 is cached to memory AND disk keyed by
+ * {user, media id, variant, size} — never by the URL — so a later render of the
+ * same media is served locally instead of being downloaded again.
+ */
 object ThumbnailLoader {
 
     /** The preview size album covers, grid cells and viewer neighbours ask for. */
@@ -219,6 +236,25 @@ object ThumbnailLoader {
                         // A stored delivery URL is the full-size original; ask
                         // Cloudinary for a thumbnail-sized derivative instead of
                         // downloading the original to show a preview.
+                        //
+                        // A PERSISTENT thumbnail (`…/thumbnails/…`) is already a
+                        // small asset of its own, so this step needs neither the
+                        // original nor the Drive archive: it is the normal
+                        // thumbnail source once the original has been cleaned up.
+                        val persistentThumbnail =
+                            CloudinaryPreview.isPersistentThumbnailUrl(cloudCandidate)
+                        if (persistentThumbnail) {
+                            trace(
+                                LogLevel.INFO,
+                                "THUMB_PERSISTENT_SOURCE",
+                                "resolving from the persistent Cloudinary thumbnail",
+                                mapOf(
+                                    "media_id" to fallbackMediaId,
+                                    "requires_original" to "false",
+                                    "requires_drive" to "false"
+                                )
+                            )
+                        }
                         val previewUrl = CloudinaryPreview.previewUrl(cloudCandidate, sizePx)
                         trace(
                             LogLevel.INFO,
@@ -226,6 +262,7 @@ object ThumbnailLoader {
                             "resolve step=CLOUDINARY",
                             mapOf(
                                 "url_present" to (previewUrl != null).toString(),
+                                "persistent_thumbnail" to persistentThumbnail.toString(),
                                 "result" to if (previewUrl != null) "SELECTED" else "SKIPPED"
                             )
                         )

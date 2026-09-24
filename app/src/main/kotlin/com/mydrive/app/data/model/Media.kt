@@ -77,7 +77,19 @@ data class MediaItem(
     val remoteMediaId: String? = null,
     val thumbnailUrl: String? = null,
     val originLocal: Boolean = true,
-    val hiddenFromLibrary: Boolean = false
+    val hiddenFromLibrary: Boolean = false,
+    /**
+     * The ORIGINAL's cloud delivery URL, or `null` once the Cloudinary original
+     * has been cleaned up.
+     *
+     * Kept strictly apart from [thumbnailUrl]: the thumbnail is the persistent
+     * gallery asset (`…/thumbnails/…`, its own Cloudinary public ID) and is
+     * available for the whole life of the media, while this is the full-size
+     * source and disappears with the verified cleanup. Full resolution must never
+     * be served by upscaling a thumbnail, so the two are never substituted for
+     * each other.
+     */
+    val originalUrl: String? = null
 ) {
     val displayUri: String
         get() = when {
@@ -86,6 +98,16 @@ data class MediaItem(
             uri.isNotBlank() -> uri
             else -> thumbnailUrl.orEmpty()
         }
+
+    /**
+     * The candidate for FULL RESOLUTION — never a thumbnail.
+     *
+     * For a device item this is its own MediaStore URI. For a cloud-only item it
+     * is the Cloudinary original, or blank once that original is gone, which is
+     * exactly when the authenticated Drive copy is the right source.
+     */
+    val originalUri: String
+        get() = if (originLocal) uri else originalUrl.orEmpty()
 }
 
 data class TrashSummary(

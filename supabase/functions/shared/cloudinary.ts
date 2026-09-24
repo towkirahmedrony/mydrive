@@ -36,8 +36,8 @@
  *   `deleted:false, alreadyAbsent:true`.
  */
 
-const CLOUDINARY_API_BASE = "https://api.cloudinary.com/v1_1";
-const CLOUDINARY_DELIVERY_BASE = "https://res.cloudinary.com";
+export const CLOUDINARY_API_BASE = "https://api.cloudinary.com/v1_1";
+export const CLOUDINARY_DELIVERY_BASE = "https://res.cloudinary.com";
 
 /** Cloudinary resource types an uploaded asset can live under. */
 export type CloudinaryResourceType = "image" | "video" | "raw";
@@ -95,7 +95,7 @@ export class CloudinaryDeleteError extends Error {
   }
 }
 
-interface CloudinaryCredentials {
+export interface CloudinaryCredentials {
   cloudName: string;
   apiKey: string;
   apiSecret: string;
@@ -104,8 +104,12 @@ interface CloudinaryCredentials {
 /**
  * Reads Cloudinary credentials from Edge Function secrets.
  * Throws a message that never contains any part of a credential.
+ *
+ * Exported so every module that talks to Cloudinary (the cleanup worker and the
+ * persistent-thumbnail module) reads — and can therefore redact — exactly the
+ * same credential set from exactly one place.
  */
-function getCredentials(): CloudinaryCredentials {
+export function getCloudinaryCredentials(): CloudinaryCredentials {
   const cloudName = Deno.env.get("CLOUDINARY_CLOUD_NAME");
   const apiKey = Deno.env.get("CLOUDINARY_API_KEY");
   const apiSecret = Deno.env.get("CLOUDINARY_API_SECRET");
@@ -153,8 +157,11 @@ async function sha1Hex(input: string): Promise<string> {
  * Documented rule: take every parameter except `file`, `api_key` and
  * `signature`, sort them alphabetically by key, join as `k=v&k=v`, append the
  * API secret, and SHA-1 the result. The signature is returned, never logged.
+ *
+ * Exported so an upload request (the persistent thumbnail) is signed by this
+ * one implementation instead of a second copy of the same algorithm.
  */
-async function signParams(
+export async function signParams(
   params: Record<string, string>,
   apiSecret: string,
 ): Promise<string> {
@@ -207,7 +214,7 @@ function describeStatus(status: number): string {
  * but the API key and secret are defensively redacted anyway so no failure path
  * can ever leak a credential into logs, sync_logs or replication_jobs.
  */
-function sanitizeProviderMessage(
+export function sanitizeProviderMessage(
   message: string | null,
   credentials: CloudinaryCredentials,
 ): string | null {
@@ -321,7 +328,7 @@ export async function destroyCloudinaryAsset(params: {
     throw new CloudinaryDeleteError("Missing Cloudinary public_id", 0, false);
   }
 
-  const credentials = getCredentials();
+  const credentials = getCloudinaryCredentials();
   const { cloudName, apiKey, apiSecret } = credentials;
   const fetchImpl = params.fetchImpl ?? fetch;
 

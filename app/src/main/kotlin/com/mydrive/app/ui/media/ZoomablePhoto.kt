@@ -105,7 +105,9 @@ fun ZoomablePhoto(
 
     var bitmap by remember(item.id, ownerId) {
         mutableStateOf(
-            FullImageLoader.peek(item.displayUri, mediaId = item.remoteMediaId, userId = ownerId)
+            // Full resolution first, from the ORIGINAL candidate: a thumbnail is
+            // never upscaled into the "original" slot.
+            FullImageLoader.peek(item.originalUri, mediaId = item.remoteMediaId, userId = ownerId)
                 ?: ThumbnailLoader.peek(item.displayUri, placeholderPx, mediaId = item.remoteMediaId, userId = ownerId)
                 ?: ThumbnailLoader.peek(item.displayUri, 256, mediaId = item.remoteMediaId, userId = ownerId)
         )
@@ -154,14 +156,19 @@ fun ZoomablePhoto(
     }
 
     LaunchedEffect(item.id, fullTargetPx, ownerId) {
-        if ((item.displayUri.isBlank() && item.remoteMediaId.isNullOrBlank()) || fullTargetPx <= 0) return@LaunchedEffect
+        if ((item.originalUri.isBlank() && item.remoteMediaId.isNullOrBlank()) || fullTargetPx <= 0) return@LaunchedEffect
         val app = context.applicationContext as? MyDriveApp
+        // Full resolution resolves the ORIGINAL only: `originalUri` is the device
+        // copy for a local item and the Cloudinary original for a cloud-only one,
+        // and `originalUrl` is its cloud fallback. Passing the persistent
+        // thumbnail here would show a 512px upscale whenever the original is
+        // gone, instead of the readable Drive copy.
         val full = FullImageLoader.load(
             context = context,
-            uriString = item.displayUri,
+            uriString = item.originalUri,
             maxDimPx = fullTargetPx,
             fallbackMediaId = item.remoteMediaId,
-            previewUri = item.thumbnailUrl,
+            previewUri = item.originalUrl,
             sessionProvider = app?.sessionProvider,
             userId = ownerId
         )

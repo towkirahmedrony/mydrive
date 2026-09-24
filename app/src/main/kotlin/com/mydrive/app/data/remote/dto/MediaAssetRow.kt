@@ -49,13 +49,54 @@ data class MediaAssetRow(
             return hasCompletedDriveArchive || !driveArchivedAt.isNullOrBlank()
         }
 
-    /** The Cloudinary source is no longer live after verified primary cleanup. */
-    val cloudinarySourceUrl: String?
+    /**
+     * The PERSISTENT thumbnail reference.
+     *
+     * The backend stores it as a Cloudinary asset of its own
+     * (`mydrive/{owner}/thumbnails/{media_id}`, recorded on `media_variants` with
+     * `variant_type = 'thumbnail'`), so it is addressable independently of the
+     * original and outlives the Cloudinary ORIGINAL's deletion. It never depends
+     * on the Drive archive either: Drive is for originals, not for previews.
+     */
+    val persistentThumbnailUrl: String?
+        get() = thumbnailUrl?.takeIf { it.isNotBlank() }
+
+    /**
+     * The Cloudinary ORIGINAL, or `null` once the verified cleanup deleted it.
+     *
+     * `storage_url` keeps its historical meaning here: after a successful primary
+     * cleanup the original no longer exists, so it is never offered as a live
+     * source.
+     */
+    val originalCloudUrl: String?
         get() {
             if (isPrimaryCleaned) return null
-            return thumbnailUrl?.takeIf { it.isNotBlank() }
-                ?: storageUrl?.takeIf { it.isNotBlank() }
+            return storageUrl?.takeIf { it.isNotBlank() }
         }
+
+    /**
+     * The Cloudinary candidate a preview is requested from.
+     *
+     * The persistent thumbnail is preferred because it is the asset meant to be
+     * rendered in a gallery tile, and it is the one that still exists after the
+     * original is cleaned up; the original is the fallback while it is alive.
+     */
+    val cloudinarySourceUrl: String?
+        get() = persistentThumbnailUrl ?: originalCloudUrl
+
+    /**
+     * Thumbnail availability, tracked separately from original availability.
+     *
+     * A media whose Cloudinary original was deleted — and whose Drive archive may
+     * not be reachable at gallery-render time — is still displayable from its
+     * persistent thumbnail, so it must never be shown as "Media unavailable".
+     */
+    val hasPersistentThumbnail: Boolean
+        get() = !persistentThumbnailUrl.isNullOrBlank()
+
+    /** A row that can only be previewed: the original is gone, the thumbnail is not. */
+    val isThumbnailOnly: Boolean
+        get() = hasPersistentThumbnail && originalCloudUrl.isNullOrBlank()
 
     val isPrimaryCleaned: Boolean
         get() = !primaryDeletedAt.isNullOrBlank() ||

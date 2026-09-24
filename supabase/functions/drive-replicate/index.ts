@@ -32,6 +32,10 @@ import {
   CloudinaryDeleteError,
   type CloudinaryDeliveryProbe,
 } from "../shared/cloudinary.ts";
+import {
+  isThumbnailPublicId,
+  publicIdFromDeliveryUrl,
+} from "../shared/thumbnail-lifecycle.ts";
 
 /**
  * drive-replicate — server-side media lifecycle worker.
@@ -144,6 +148,13 @@ interface CleanupCandidate {
   storage_url: string | null;
   storage_path: string | null;
   storage_asset_id: string;
+  /**
+   * The PERSISTENT thumbnail's delivery URL (`mydrive/{owner}/thumbnails/{id}`).
+   *
+   * Cleanup only reads it to report the thumbnail's disposition: the thumbnail
+   * lives under its own public ID, so deleting the original does not touch it.
+   */
+  thumbnail_url: string | null;
   status: string;
   primary_cleanup_status: string;
   primary_cleanup_attempts: number;
@@ -1111,6 +1122,11 @@ async function processCleanup(
   if (!media.storage_asset_id) {
     const msg = "Media has no Cloudinary asset id to delete";
     log(`FAIL (permanent): ${msg}`);
+    console.error(
+      `[CLOUDINARY_CLEANUP_ORIGINAL]\nmedia_id=${media.id}\nresult=SKIPPED\nreason=NO_CLOUDINARY_ASSET_ID`,
+    );
+    // The original was never touched, so the thumbnail is preserved as well.
+    logThumbnailDisposition(media);
     await completeCleanup(admin, media.id, "cleanup_failed", msg);
     return { status: "cleanup_failed", error: msg };
   }
@@ -1188,10 +1204,31 @@ async function processCleanup(
     return { status: "cleanup_failed", error: msg };
   }
 
-  // ── 3. Delete the Cloudinary copy ─────────────────────────────────────
+  // ── 3. Delete the Cloudinary ORIGINAL ─────────────────────────────────
   const publicId = (media.storage_path ?? media.storage_asset_id ?? "").trim();
   const cloudName = getCloudinaryCloudName();
   const primaryType = resourceTypeForMime(media.mime_type);
+
+  // A persistent thumbnail is INDEPENDENTLY addressable and must never be the
+  // asset this cleanup deletes. `storage_path` addresses only the original; if
+  // it ever resolves to a thumbnail, the row is inconsistent and deleting it
+  // would destroy the gallery's only remaining Cloudinary copy.
+  if (isThumbnailPublicId(publicId)) {
+    const msg = "Refusing cleanup: storage_path addresses a persistent thumbnail, not an original";
+    log(`SKIP (unsafe): ${msg}`);
+    console.error(
+      `[CLOUDINARY_CLEANUP_ORIGINAL]\nmedia_id=${media.id}\nresult=REFUSED\nreason=THUMBNAIL_IS_NOT_THE_ORIGINAL`,
+    );
+    await logCleanupEvent(admin, media, driveJob.id, "CLOUDINARY_CLEANUP_FAILED", {
+      ...base,
+      reason: msg,
+      reason_code: "THUMBNAIL_IS_NOT_THE_ORIGINAL",
+      public_id: publicId || null,
+      cloudinary_preserved: true,
+    });
+    await completeCleanup(admin, media.id, "cleanup_pending", msg);
+    return { status: "cleanup_pending", error: msg };
+  }
 
   await logCleanupEvent(admin, media, driveJob.id, "CLOUDINARY_DELETE_STARTED", {
     ...base,
@@ -1317,6 +1354,20 @@ async function processCleanup(
     });
 
     // Every precondition passed AND the asset is independently confirmed gone.
+    //
+    // The ORIGINAL is now deleted and the THUMBNAIL is deliberately KEPT: it is
+    // the gallery's remaining Cloudinary asset for as long as the media exists
+    // in My Drive. It lives under its own public ID
+    // (`mydrive/{owner}/thumbnails/{media_id}`), so the destroy above — which
+    // also invalidates "all its transformed versions that share the same public
+    // ID" — cannot reach it.
+    console.log(
+      `[CLOUDINARY_CLEANUP_ORIGINAL]\nmedia_id=${media.id}\nresult=${
+        result.deleted ? "DELETED" : result.alreadyAbsent ? "ALREADY_ABSENT" : "UNKNOWN"
+      }\nreason=DRIVE_ARCHIVE_VERIFIED`,
+    );
+    logThumbnailDisposition(media);
+
     await completeCleanup(admin, media.id, "cleanup_success", null);
     await logCleanupEvent(admin, media, driveJob.id, "CLOUDINARY_CLEANUP_SUCCESS", {
       ...base,
@@ -1357,6 +1408,16 @@ async function processCleanup(
       });
     }
 
+    // The original survives (the delete failed or could not be verified), so the
+    // thumbnail must survive too. Recorded explicitly so a preserved thumbnail is
+    // never inferred from a missing log line.
+    console.error(
+      `[CLOUDINARY_CLEANUP_ORIGINAL]\nmedia_id=${media.id}\nresult=FAILED\nreason=${
+        retryable ? "RETRYABLE" : "PERMANENT"
+      }`,
+    );
+    logThumbnailDisposition(media);
+
     await completeCleanup(admin, media.id, "cleanup_failed", msg);
     await logCleanupEvent(admin, media, driveJob.id, "CLOUDINARY_CLEANUP_FAILED", {
       ...base,
@@ -1379,6 +1440,47 @@ async function processCleanup(
     });
     return { status: "cleanup_failed", error: msg };
   }
+}
+
+/**
+ * Records the PERSISTENT THUMBNAIL's disposition for one cleanup candidate.
+ *
+ * Original cleanup never deletes a thumbnail: the two live under different
+ * public IDs, and the thumbnail must survive so the gallery keeps rendering
+ * after the original is gone. This is emitted on EVERY terminal cleanup outcome
+ * so an operator can always see, per media, that the thumbnail was preserved and
+ * why.
+ *
+ * Never logs a credential, a signature or a signed URL — only the media id, the
+ * action and a reason code.
+ */
+function logThumbnailDisposition(media: CleanupCandidate): void {
+  const originalPublicId = (media.storage_path ?? "").trim();
+  const thumbnailPublicId = publicIdFromDeliveryUrl(media.thumbnail_url);
+
+  if (!thumbnailPublicId) {
+    // Legacy/cleaned rows carry no persistent thumbnail; nothing to preserve.
+    console.log(
+      `[CLOUDINARY_CLEANUP_THUMBNAIL]\nmedia_id=${media.id}\naction=NONE\nreason=NO_PERSISTENT_THUMBNAIL`,
+    );
+    return;
+  }
+
+  // A thumbnail that is not independently addressable (or that resolves to the
+  // original's own public ID) is a derived resource of the original and cannot
+  // outlive it — reported, never silently treated as preserved.
+  if (!isThumbnailPublicId(thumbnailPublicId) || thumbnailPublicId === originalPublicId) {
+    console.log(
+      `[CLOUDINARY_CLEANUP_THUMBNAIL]\nmedia_id=${media.id}\naction=NONE\n` +
+        `reason=THUMBNAIL_SHARES_ORIGINAL_IDENTITY`,
+    );
+    return;
+  }
+
+  console.log(
+    `[CLOUDINARY_CLEANUP_THUMBNAIL]\nmedia_id=${media.id}\naction=KEEP\n` +
+      `reason=ACTIVE_THUMBNAIL_REQUIRED`,
+  );
 }
 
 /** Best-effort Cloudinary resource type hint for observability only. */
