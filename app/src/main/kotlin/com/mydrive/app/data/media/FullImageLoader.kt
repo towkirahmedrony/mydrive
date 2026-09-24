@@ -53,18 +53,20 @@ object FullImageLoader {
         uriString: String,
         maxDimPx: Int = 2048,
         fallbackMediaId: String? = null,
+        previewUri: String? = null,
         sessionProvider: AuthenticatedSessionProvider? = null,
         userId: String? = AccountSession.userId
     ): Bitmap? = withContext(Dispatchers.IO) {
-        if (uriString.isBlank() && fallbackMediaId.isNullOrBlank()) return@withContext null
+        val preview = previewUri?.trim().orEmpty()
+        if (uriString.isBlank() && preview.isBlank() && fallbackMediaId.isNullOrBlank()) return@withContext null
         val session = AccountSession.snapshot()
         val ownerId = userId ?: session.userId
-        val remote = MediaCacheKeys.isRemoteUri(uriString)
+        val remote = MediaCacheKeys.isRemoteUri(uriString) || MediaCacheKeys.isRemoteUri(preview)
         if (remote && ownerId.isNullOrBlank()) return@withContext null
         val key = MediaCacheKeys.memoryKey(
             userId = ownerId,
             mediaId = fallbackMediaId,
-            uri = uriString,
+            uri = uriString.ifBlank { preview },
             variant = MediaCacheKeys.VARIANT_ORIGINAL,
             sizePx = maxDimPx
         )
@@ -77,8 +79,13 @@ object FullImageLoader {
         } else {
             null
         }
+        val cloudCandidate = if (MediaCacheKeys.isRemoteUri(uriString)) uriString else preview
         val bitmap = run {
-            for (step in MediaFetchOrder.steps(uriString, hasStableMediaId = !fallbackMediaId.isNullOrBlank())) {
+            for (step in MediaFetchOrder.steps(
+                uriString,
+                hasStableMediaId = !fallbackMediaId.isNullOrBlank(),
+                previewUri = preview
+            )) {
                 if (!stillCurrent(session, ownerId)) return@withContext null
                 val decoded = when (step) {
                     MediaFetchSource.DISK -> diskFile?.let { readDisk(it, maxDimPx) }
@@ -86,12 +93,14 @@ object FullImageLoader {
                         runCatching { Uri.parse(uriString) }.getOrNull()?.let { decode(appContext, it, maxDimPx) }
                     }
                     MediaFetchSource.CLOUDINARY -> {
-                        runCatching { Uri.parse(uriString) }.getOrNull()?.let { uri ->
-                            downloadHttp(uri)?.let { bytes ->
-                                diskFile?.let { writeCache(appContext, it, bytes) }
-                                decodeBytes(bytes, maxDimPx)
+                        cloudCandidate.takeIf { MediaCacheKeys.isRemoteUri(it) }
+                            ?.let { runCatching { Uri.parse(it) }.getOrNull() }
+                            ?.let { uri ->
+                                downloadHttp(uri)?.let { bytes ->
+                                    diskFile?.let { writeCache(appContext, it, bytes) }
+                                    decodeBytes(bytes, maxDimPx)
+                                }
                             }
-                        }
                     }
                     MediaFetchSource.DRIVE -> {
                         fallbackMediaId?.let { mediaId ->

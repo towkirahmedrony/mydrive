@@ -337,9 +337,11 @@ fun TrashActionSheet(
                         .background(MaterialTheme.colorScheme.surfaceVariant)
                 ) {
                     MediaImage(
-                        uri = preview.uri,
+                        uri = preview.displayUri,
                         seed = preview.thumbnailSeed,
                         type = preview.type,
+                        fallbackMediaId = preview.remoteMediaId,
+                        previewUri = preview.thumbnailUrl,
                         modifier = Modifier.fillMaxSize(),
                         sizePx = 144,
                         contentDescription = preview.filename

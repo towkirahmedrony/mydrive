@@ -580,6 +580,7 @@ private fun RemovePhotoSheet(
                         seed = item.thumbnailSeed,
                         type = item.type,
                         fallbackMediaId = item.remoteMediaId,
+                        previewUri = item.thumbnailUrl,
                         modifier = Modifier.fillMaxSize(),
                         contentScale = ContentScale.Crop,
                         sizePx = 144,

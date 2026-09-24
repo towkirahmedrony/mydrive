@@ -34,6 +34,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -44,6 +45,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.platform.LocalContext
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavDestination.Companion.hierarchy
 import androidx.navigation.NavGraph.Companion.findStartDestination
@@ -69,6 +71,7 @@ import com.mydrive.app.ui.gallery.GalleryScreen
 import com.mydrive.app.ui.gallery.GalleryViewModel
 import com.mydrive.app.ui.media.MediaViewerScreen
 import com.mydrive.app.ui.media.MediaViewerViewModel
+import com.mydrive.app.ui.permission.MediaAccessRequest
 import com.mydrive.app.ui.settings.SettingsScreen
 import com.mydrive.app.ui.settings.SettingsViewModel
 import com.mydrive.app.ui.settings.TelegramSettingsScreen
@@ -81,6 +84,7 @@ import com.mydrive.app.ui.trash.TrashViewModel
 import com.mydrive.app.ui.trash.TrashViewerScreen
 import com.mydrive.app.ui.trash.TrashViewerViewModel
 import kotlin.math.roundToInt
+import kotlinx.coroutines.launch
 
 private data class TabItem(
     val destination: AppDestination,
@@ -115,6 +119,16 @@ fun AppNavHost(
     val showBottomBar = !isViewer && !isDeveloperConsole && currentDestination?.route in bottomDestinations.map { it.route }
     val colors = MaterialTheme.colorScheme
     var developerFabOffset by remember { mutableStateOf(Offset.Zero) }
+    val permissionScope = rememberCoroutineScope()
+    val loadState by repository.loadState.collectAsStateWithLifecycle()
+    MediaAccessRequest(
+        needsPermission = loadState.needsPermission,
+        permissions = repository.requiredPermissions(),
+        onResult = {
+            repository.markPermissionAsked()
+            permissionScope.launch { repository.refresh(force = true) }
+        }
+    )
 
     Scaffold(
         containerColor = colors.background,

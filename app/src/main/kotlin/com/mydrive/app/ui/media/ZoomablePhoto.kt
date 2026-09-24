@@ -141,6 +141,7 @@ fun ZoomablePhoto(
             uriString = item.displayUri,
             maxDimPx = fullTargetPx,
             fallbackMediaId = item.remoteMediaId,
+            previewUri = item.thumbnailUrl,
             sessionProvider = app?.sessionProvider,
             userId = ownerId
         )
@@ -292,7 +293,7 @@ fun ZoomablePhoto(
             .onSizeChanged { containerSize = it },
         contentAlignment = Alignment.Center
     ) {
-        if (loadFailed || item.uri.isBlank()) {
+        if (loadFailed) {
             MediaUnavailableState()
         } else {
             val current = bitmap

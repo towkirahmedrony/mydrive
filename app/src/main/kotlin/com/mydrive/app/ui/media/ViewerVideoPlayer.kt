@@ -84,10 +84,11 @@ fun ViewerVideoPlayer(
         if (!active) return@LaunchedEffect
         val resolved = VideoSourceResolver.resolve(
             context = context,
-            uriString = item.uri,
+            uriString = item.displayUri,
             mediaId = item.remoteMediaId,
             sessionProvider = (context.applicationContext as? MyDriveApp)?.sessionProvider,
             userId = AccountSession.userId,
+            previewUri = item.thumbnailUrl,
             exclude = exhaustedSources
         )
         playbackSource = resolved
@@ -175,7 +176,7 @@ fun ViewerVideoPlayer(
     ) {
         val source = playbackSource
         if (!active || state.error || source == null) {
-            if (state.error || (item.uri.isBlank() && item.remoteMediaId.isNullOrBlank())) {
+            if (state.error || (item.displayUri.isBlank() && item.remoteMediaId.isNullOrBlank())) {
                 MediaUnavailableState()
             } else {
                 MediaImage(
@@ -183,12 +184,13 @@ fun ViewerVideoPlayer(
                     seed = item.thumbnailSeed,
                     type = item.type,
                     fallbackMediaId = item.remoteMediaId,
+                    previewUri = item.thumbnailUrl,
                     modifier = Modifier.fillMaxSize(),
                     contentScale = ContentScale.Fit,
                     sizePx = 720,
                     contentDescription = item.filename,
                     placeholderBitmap = ThumbnailLoader.peek(
-                        item.uri,
+                        item.displayUri,
                         256,
                         mediaId = item.remoteMediaId,
                         userId = AccountSession.userId

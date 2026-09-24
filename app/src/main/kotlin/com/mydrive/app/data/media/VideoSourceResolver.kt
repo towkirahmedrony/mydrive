@@ -32,9 +32,12 @@ object VideoSourceResolver {
         mediaId: String?,
         sessionProvider: AuthenticatedSessionProvider?,
         userId: String? = AccountSession.userId,
+        previewUri: String? = null,
         exclude: Set<MediaFetchSource> = emptySet()
     ): VideoSource? = withContext(Dispatchers.IO) {
         val ownerId = userId ?: AccountSession.userId
+        val preview = previewUri?.trim().orEmpty()
+        val cloudCandidate = if (MediaCacheKeys.isRemoteUri(uriString)) uriString else preview
         val cachedOriginal = if (!ownerId.isNullOrBlank() && !mediaId.isNullOrBlank()) {
             MediaCacheKeys.originalFile(context.applicationContext.filesDir, ownerId, mediaId)
                 .also { MediaDiskCache.discardInvalid(it) }
@@ -43,7 +46,11 @@ object VideoSourceResolver {
             null
         }
 
-        val steps = MediaFetchOrder.steps(uriString, hasStableMediaId = !mediaId.isNullOrBlank())
+        val steps = MediaFetchOrder.steps(
+            uriString,
+            hasStableMediaId = !mediaId.isNullOrBlank(),
+            previewUri = preview
+        )
         for (step in steps) {
             if (step in exclude) continue
             val resolved = when (step) {
@@ -52,7 +59,8 @@ object VideoSourceResolver {
                     VideoSource(Uri.fromFile(it), source = MediaFetchSource.DISK, file = it)
                 }
                 MediaFetchSource.LOCAL -> localSource(context, uriString)
-                MediaFetchSource.CLOUDINARY -> runCatching { Uri.parse(uriString) }.getOrNull()
+                MediaFetchSource.CLOUDINARY -> cloudCandidate.takeIf { MediaCacheKeys.isRemoteUri(it) }
+                    ?.let { runCatching { Uri.parse(it) }.getOrNull() }
                     ?.let { VideoSource(it, source = MediaFetchSource.CLOUDINARY) }
                 MediaFetchSource.DRIVE -> driveSource(mediaId, sessionProvider)
             }

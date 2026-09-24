@@ -1,11 +1,5 @@
 package com.mydrive.app.ui.sync
 
-import android.content.Context
-import android.content.Intent
-import android.net.Uri
-import android.provider.Settings
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -46,7 +40,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
@@ -64,7 +57,6 @@ import com.mydrive.app.ui.components.PrimaryActionButton
 import com.mydrive.app.ui.components.SecondaryActionButton
 import com.mydrive.app.ui.components.SectionHeader
 import com.mydrive.app.ui.components.StatCard
-import com.mydrive.app.ui.permission.MediaPermissionScreen
 import com.mydrive.app.ui.theme.ChipShape
 import com.mydrive.app.ui.theme.Copper
 import com.mydrive.app.ui.theme.Radius
@@ -83,15 +75,8 @@ fun SyncScreen(
     onOpenTelegramSettings: () -> Unit
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
-    val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val colors = MaterialTheme.colorScheme
-
-    val permissionLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestMultiplePermissions()
-    ) {
-        viewModel.onPermissionResult()
-    }
 
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
@@ -101,15 +86,6 @@ fun SyncScreen(
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
-    }
-
-    if (state.needsPermission || state.permissionDenied) {
-        MediaPermissionScreen(
-            denied = state.permissionDenied,
-            onAllowAccess = { permissionLauncher.launch(viewModel.permissionPermissions()) },
-            onOpenSettings = { openAppSettings(context) }
-        )
-        return
     }
 
     LazyColumn(
@@ -541,6 +517,7 @@ private fun JobThumbnail(job: SyncJob) {
             seed = job.media.thumbnailSeed,
             type = job.media.type,
             fallbackMediaId = job.media.remoteMediaId,
+            previewUri = job.media.thumbnailUrl,
             modifier = Modifier.fillMaxSize(),
             sizePx = 128
         )
@@ -608,14 +585,6 @@ private fun statusVisual(status: SyncStatus): Pair<Color, ImageVector> = when (s
     SyncStatus.IN_PROGRESS -> StatusSyncing to Icons.Outlined.CloudUpload
     SyncStatus.PAUSED -> StatusIdle to Icons.Outlined.Pause
     SyncStatus.FAILED -> StatusAttention to Icons.Outlined.ErrorOutline
-}
-
-private fun openAppSettings(context: Context) {
-    val intent = Intent(
-        Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
-        Uri.fromParts("package", context.packageName, null)
-    )
-    context.startActivity(intent)
 }
 
 private const val MAX_COMPLETED_ROWS = 50

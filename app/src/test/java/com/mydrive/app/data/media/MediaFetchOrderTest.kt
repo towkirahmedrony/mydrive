@@ -140,6 +140,28 @@ class MediaFetchOrderTest {
     }
 
     @Test
+    fun driveOnlyBlankUriStillEndsAtDrive() {
+        val steps = MediaFetchOrder.steps(
+            uriString = "",
+            hasStableMediaId = true,
+            previewUri = null
+        )
+        assertEquals(listOf(MediaFetchSource.DISK, MediaFetchSource.DRIVE), steps)
+        assertEquals(MediaFetchSource.DRIVE, MediaFetchOrder.firstRemote("", hasStableMediaId = true))
+    }
+
+    @Test
+    fun localUriWithCloudPreviewDoesNotSkipDriveWhenCloudinaryWouldFail() {
+        val steps = MediaFetchOrder.steps(
+            uriString = "content://media/external/images/media/12",
+            hasStableMediaId = true,
+            previewUri = "https://res.cloudinary.com/demo/image/upload/v1/mydrive/user/file.jpg"
+        )
+        assertEquals(MediaFetchSource.DRIVE, steps.last())
+        assertEquals(4, steps.size)
+    }
+
+    @Test
     fun aNonRemotePreviewNeverAddsACloudStep() {
         val steps = MediaFetchOrder.steps(
             uriString = "content://media/external/images/media/12",
