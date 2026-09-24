@@ -55,6 +55,7 @@ import com.mydrive.app.data.remote.TelegramApiVerifier
 import com.mydrive.app.data.remote.TelegramVerificationResult
 import com.mydrive.app.debug.DeveloperLogger
 import com.mydrive.app.debug.LogCategory
+import com.mydrive.app.debug.MediaDiagnosticLogger
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -175,6 +176,12 @@ class MediaRepository(
     private var nextPageCursor: MediaPageCursor? = null
     private var loadedRemoteRows: List<MediaAssetRow> = emptyList()
     private var cloudAlbumStats: MediaAlbumStats = MediaAlbumStats()
+
+    private companion object {
+        /** Per-composition cap for the verbose cloud availability trace. */
+        const val AVAILABILITY_TRACE_BUDGET = 30
+        private const val MIN_REFRESH_INTERVAL_MS = 1_500L
+    }
 
     init {
         scope.launch {
@@ -984,6 +991,7 @@ class MediaRepository(
         // to be enforced by the request filter, and is now enforced here as well
         // because the incremental request deliberately returns departing rows too.
         val visibleRows = remoteRows.filter { MediaLibraryPaging.isVisibleInCatalog(it) }
+        logCloudAvailability(visibleRows, remoteRows)
         val byLocalMediaId = visibleRows.mapNotNull { row ->
             row.localMediaId?.takeIf { it > 0L }?.let { it to row }
         }.toMap()
@@ -1072,6 +1080,89 @@ class MediaRepository(
         return library
             .distinctBy { it.remoteMediaId?.takeIf(String::isNotBlank) ?: "local:${it.id}" }
             .sortedByDescending { it.capturedAtMillis }
+    }
+
+    /**
+     * Point-to-point diagnostics for the availability decision on cloud-backed
+     * rows. The full per-row trace is emitted for the first [AVAILABILITY_TRACE_BUDGET]
+     * rows of a composition plus every row that is NOT cloud-available, so a
+     * thousand-row catalog never floods the Developer Log.
+     */
+    private fun logCloudAvailability(
+        visibleRows: List<com.mydrive.app.data.remote.dto.MediaAssetRow>,
+        allRows: List<com.mydrive.app.data.remote.dto.MediaAssetRow>
+    ) {
+        var traced = 0
+        val visibleIds = visibleRows.mapTo(HashSet()) { it.id }
+        for (row in allRows) {
+            val visible = row.id in visibleIds
+            val cloudAvailable = row.isCloudAvailable
+            val shouldTrace = traced < AVAILABILITY_TRACE_BUDGET || !cloudAvailable || !visible
+            if (!shouldTrace) continue
+            traced += 1
+            MediaDiagnosticLogger.availabilityStart(
+                mediaId = row.id,
+                localMediaId = row.localMediaId?.toString(),
+                status = row.status,
+                storageProvider = null,
+                hasStorageUrl = !row.storageUrl.isNullOrBlank(),
+                hasThumbnailUrl = !row.thumbnailUrl.isNullOrBlank(),
+                storageAssetIdPresent = !row.storageAssetId.isNullOrBlank(),
+                driveArchivedAtPresent = !row.driveArchivedAt.isNullOrBlank(),
+                deletedAtPresent = !row.deletedAt.isNullOrBlank(),
+                userHiddenAtPresent = row.isHiddenFromLibrary,
+                localFileExists = null,
+                localUriPresent = !row.localMediaId.isNullOrBlank()
+            )
+            MediaDiagnosticLogger.cloudMetadata(
+                mediaId = row.id,
+                localMediaId = row.localMediaId?.toString(),
+                ownerIdPresent = !row.ownerId.isNullOrBlank(),
+                status = row.status,
+                storageProvider = null,
+                storageUrlPresent = !row.storageUrl.isNullOrBlank(),
+                thumbnailUrlPresent = !row.thumbnailUrl.isNullOrBlank(),
+                storageAssetIdPresent = !row.storageAssetId.isNullOrBlank(),
+                driveArchivedAtPresent = !row.driveArchivedAt.isNullOrBlank(),
+                deletedAtPresent = !row.deletedAt.isNullOrBlank(),
+                userHiddenAtPresent = row.isHiddenFromLibrary,
+                primaryCleaned = row.isPrimaryCleaned
+            )
+            val driveOnly = row.storageUrl.isNullOrBlank() && row.thumbnailUrl.isNullOrBlank() &&
+                (!row.driveArchivedAt.isNullOrBlank() || row.hasCompletedDriveArchive)
+            if (driveOnly) {
+                MediaDiagnosticLogger.cloudDriveCheck(
+                    mediaId = row.id,
+                    localMediaId = row.localMediaId?.toString(),
+                    driveArchivedAtPresent = !row.driveArchivedAt.isNullOrBlank() || row.hasCompletedDriveArchive,
+                    storageUrlPresent = false,
+                    thumbnailUrlPresent = false
+                )
+            }
+            val reason = when {
+                row.status == "DELETED" -> "DELETED"
+                row.isHiddenFromLibrary -> "USER_HIDDEN"
+                row.status != "READY" -> "MEDIA_STATUS_NOT_READY"
+                row.isPrimaryCleaned && !driveOnly -> "NO_REMOTE_SOURCE"
+                cloudAvailable -> "AVAILABLE"
+                else -> "NO_REMOTE_SOURCE"
+            }
+            val attempt = MediaDiagnosticLogger.attempt(
+                variant = MediaDiagnosticLogger.Variant.THUMBNAIL,
+                mediaId = row.id,
+                localMediaId = row.localMediaId?.toString()
+            )
+            MediaDiagnosticLogger.availabilityResult(
+                attempt = attempt,
+                available = visible && cloudAvailable,
+                reason = reason,
+                selectedSource = when {
+                    !cloudAvailable -> "NONE"
+                    driveOnly -> "DRIVE"
+                    else -> "CLOUDINARY"
+                }
+            )
+        }
     }
 
     private fun mergePreservedCloudItems(
@@ -2001,5 +2092,4 @@ class MediaRepository(
 
     private fun rebuildAlbums() { _albums.value = buildAlbums(_media.value, cloudAlbumStats) }
 
-    companion object { private const val MIN_REFRESH_INTERVAL_MS = 1_500L }
 }

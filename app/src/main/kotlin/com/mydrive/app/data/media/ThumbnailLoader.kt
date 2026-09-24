@@ -12,6 +12,9 @@ import android.util.LruCache
 import android.util.Size
 import com.mydrive.app.data.auth.AuthenticatedSessionProvider
 import com.mydrive.app.data.session.AccountSession
+import com.mydrive.app.debug.LogCategory
+import com.mydrive.app.debug.LogLevel
+import com.mydrive.app.debug.MediaDiagnosticLogger
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
@@ -75,9 +78,53 @@ object ThumbnailLoader {
         val ownerId = userId ?: session.userId
         val preview = previewUri?.trim().orEmpty()
         val remote = MediaCacheKeys.isRemoteUri(uriString)
+
+        val attempt = MediaDiagnosticLogger.attempt(
+            variant = MediaDiagnosticLogger.Variant.THUMBNAIL,
+            mediaId = fallbackMediaId,
+            localMediaId = null,
+            mimeType = null,
+            fileName = null
+        )
+        val traceVerbose = !forceRefresh && MediaDiagnosticLogger.shouldTraceVerbose(attempt)
+        fun trace(
+            level: LogLevel,
+            event: String,
+            message: String,
+            metadata: Map<String, String?> = emptyMap()
+        ) {
+            // Failures always trace; successes only inside the verbose budget so
+            // fast grid scrolling cannot flood the Developer Log.
+            if (traceVerbose || event.endsWith("_ERROR") || event.endsWith("_CANCELLED")) {
+                MediaDiagnosticLogger.log(level, LogCategory.THUMBNAIL, event, message, metadata)
+            }
+        }
+
         // A cloud candidate must never be fetched for an unauthenticated (or
         // previous-account) session, whichever URL carries it.
+        if (remote || MediaCacheKeys.isRemoteUri(preview)) {
+            val sessionSnapshotUsable = ownerId != null
+            MediaDiagnosticLogger.cloudAuthState(
+                sessionAvailable = sessionSnapshotUsable,
+                userIdPresent = !session.userId.isNullOrBlank(),
+                tokenAvailable = sessionSnapshotUsable
+            )
+            if (!sessionSnapshotUsable) {
+                MediaDiagnosticLogger.cloudAuthRace(
+                    mediaId = fallbackMediaId,
+                    localMediaId = null,
+                    reason = "remote thumbnail candidate with no signed-in owner"
+                )
+            }
+        }
         if ((remote || MediaCacheKeys.isRemoteUri(preview)) && ownerId.isNullOrBlank()) {
+            MediaDiagnosticLogger.error(
+                attempt,
+                stage = "AUTH",
+                reason = "REMOTE_BUT_NO_SESSION",
+                detail = "remote URI present but no signed-in owner id"
+            )
+            MediaDiagnosticLogger.summary(attempt)
             return@withContext null
         }
         // The cache identity stays {user, media id, variant, size}: a rotating or
@@ -89,14 +136,36 @@ object ThumbnailLoader {
             variant = MediaCacheKeys.VARIANT_THUMBNAIL,
             sizePx = sizePx
         )
-        if (key == "blocked-remote") return@withContext null
+        if (key == "blocked-remote") {
+            MediaDiagnosticLogger.error(attempt, "AVAILABILITY", "REMOTE_CACHE_KEY_BLOCKED", "no owner id for a remote URI")
+            MediaDiagnosticLogger.summary(attempt)
+            return@withContext null
+        }
+        trace(
+            LogLevel.INFO,
+            "THUMB_START",
+            "thumbnail load started",
+            mapOf("uri" to MediaDiagnosticLogger.safeUri(uriString.ifBlank { preview }), "size_px" to sizePx.toString())
+        )
         if (!forceRefresh) {
-            cache.get(key)?.let {
+            val memoryHit = cache.get(key)
+            MediaDiagnosticLogger.cacheLookup(
+                attempt, "MEMORY", key, if (memoryHit != null) "HIT" else "MISS"
+            )
+            if (memoryHit != null) {
+                attempt.cacheResult = "MEMORY_HIT"
+                attempt.selectedSource = "CACHE"
+                attempt.finalResult = "SUCCESS"
+                MediaDiagnosticLogger.summary(attempt)
                 scheduleRefreshIfStale(context, ownerId, fallbackMediaId, sizePx, key, uriString, preview, sessionProvider)
-                return@withContext it
+                return@withContext memoryHit
             }
         }
-        if (!stillCurrent(session, ownerId)) return@withContext null
+        if (!stillCurrent(session, ownerId)) {
+            MediaDiagnosticLogger.cancelled(attempt, "SESSION_NO_LONGER_CURRENT")
+            MediaDiagnosticLogger.summary(attempt)
+            return@withContext null
+        }
         val appContext = context.applicationContext
         var fromDisk = false
         val cloudCandidate = if (remote) uriString else preview
@@ -106,39 +175,110 @@ object ThumbnailLoader {
                 hasStableMediaId = !fallbackMediaId.isNullOrBlank(),
                 previewUri = preview
             ).let { steps -> if (forceRefresh) steps.filter { it != MediaFetchSource.DISK } else steps }) {
-                if (!stillCurrent(session, ownerId)) return@withContext null
+                if (!stillCurrent(session, ownerId)) {
+                    MediaDiagnosticLogger.cancelled(attempt, "SESSION_NO_LONGER_CURRENT")
+                    return@withContext null
+                }
                 val decoded = when (step) {
                     MediaFetchSource.DISK -> {
-                        if (!ownerId.isNullOrBlank() && !fallbackMediaId.isNullOrBlank()) {
+                        val disk = if (!ownerId.isNullOrBlank() && !fallbackMediaId.isNullOrBlank()) {
                             readDisk(appContext, ownerId, fallbackMediaId, sizePx)
                         } else {
                             null
                         }
+                        trace(
+                            LogLevel.INFO,
+                            "THUMB_RESOLVE",
+                            "resolve step=DISK",
+                            mapOf("cache_key" to key, "result" to if (disk != null) "HIT" else "MISS")
+                        )
+                        attempt.cacheResult = if (disk != null) "DISK_HIT" else attempt.cacheResult
+                        disk
                     }
                     MediaFetchSource.LOCAL -> {
-                        runCatching { Uri.parse(uriString) }.getOrNull()?.let { decode(appContext, it, sizePx) }
+                        val localUri = runCatching { Uri.parse(uriString) }.getOrNull()
+                        val startedAt = System.currentTimeMillis()
+                        val bitmapLocal = localUri?.let { decode(appContext, it, sizePx) }
+                        trace(
+                            LogLevel.INFO,
+                            if (bitmapLocal != null) "LOCAL_THUMB_RESULT" else "LOCAL_THUMB_ERROR",
+                            if (bitmapLocal != null) {
+                                "MediaStore thumbnail loaded"
+                            } else {
+                                "MediaStore thumbnail failed uri=${MediaDiagnosticLogger.safeUri(uriString)}"
+                            },
+                            mapOf(
+                                "content_uri" to MediaDiagnosticLogger.safeUri(uriString),
+                                "result" to if (bitmapLocal != null) "SUCCESS" else "FAILURE",
+                                "elapsed_ms" to (System.currentTimeMillis() - startedAt).toString()
+                            )
+                        )
+                        bitmapLocal
                     }
                     MediaFetchSource.CLOUDINARY -> {
                         // A stored delivery URL is the full-size original; ask
                         // Cloudinary for a thumbnail-sized derivative instead of
                         // downloading the original to show a preview.
-                        CloudinaryPreview.previewUrl(cloudCandidate, sizePx)
-                            ?.let { decodeHttp(Uri.parse(it), sizePx) }
+                        val previewUrl = CloudinaryPreview.previewUrl(cloudCandidate, sizePx)
+                        trace(
+                            LogLevel.INFO,
+                            "THUMB_RESOLVE",
+                            "resolve step=CLOUDINARY",
+                            mapOf(
+                                "url_present" to (previewUrl != null).toString(),
+                                "result" to if (previewUrl != null) "SELECTED" else "SKIPPED"
+                            )
+                        )
+                        previewUrl?.let { decodeHttp(attempt, "CLOUDINARY", Uri.parse(it), sizePx) }
                     }
                     MediaFetchSource.DRIVE -> {
-                        fallbackMediaId?.let { mediaId ->
-                            sessionProvider?.let { provider -> decodeDriveThumbnail(mediaId, sizePx, provider) }
+                        val driveResult = fallbackMediaId?.let { mediaId ->
+                            sessionProvider?.let { provider ->
+                                decodeDriveThumbnail(attempt, mediaId, sizePx, provider)
+                            }
                         }
+                        trace(
+                            LogLevel.INFO,
+                            "THUMB_RESOLVE",
+                            "resolve step=MEDIA_DRIVE",
+                            mapOf(
+                                "result" to if (driveResult != null) "SELECTED" else
+                                    if (fallbackMediaId.isNullOrBlank() || sessionProvider == null) "SKIPPED" else "FAILED"
+                            )
+                        )
+                        driveResult
                     }
                 }
                 if (decoded != null) {
                     fromDisk = step == MediaFetchSource.DISK
+                    attempt.selectedSource = step.name
                     return@run decoded
                 }
             }
             null
-        } ?: return@withContext null
-        if (!stillCurrent(session, ownerId)) return@withContext null
+        } ?: run {
+            attempt.failureStage = "RESOLVE"
+            attempt.failureReason = "RESOLVER_RETURNED_NULL"
+            trace(
+                LogLevel.WARNING,
+                "THUMB_RESOLVE_RESULT",
+                "resolver returned null (all sources exhausted)",
+                mapOf("result" to "FAILURE", "reason" to "RESOLVER_RETURNED_NULL")
+            )
+            MediaDiagnosticLogger.error(
+                attempt,
+                stage = "RESOLVE",
+                reason = "RESOLVER_RETURNED_NULL",
+                detail = "all sources returned null"
+            )
+            MediaDiagnosticLogger.summary(attempt)
+            return@withContext null
+        }
+        if (!stillCurrent(session, ownerId)) {
+            MediaDiagnosticLogger.cancelled(attempt, "SESSION_NO_LONGER_CURRENT")
+            MediaDiagnosticLogger.summary(attempt)
+            return@withContext null
+        }
         cache.put(key, bitmap)
         if (!fromDisk && !ownerId.isNullOrBlank() && !fallbackMediaId.isNullOrBlank()) {
             writeDisk(appContext, ownerId, fallbackMediaId, sizePx, bitmap)
@@ -146,6 +286,19 @@ object ThumbnailLoader {
         } else if (fromDisk) {
             scheduleRefreshIfStale(context, ownerId, fallbackMediaId, sizePx, key, uriString, preview, sessionProvider)
         }
+        trace(
+            LogLevel.INFO,
+            "THUMB_RESOLVE_RESULT",
+            "resolver success source=${attempt.selectedSource}",
+            mapOf(
+                "result" to "SUCCESS",
+                "source" to attempt.selectedSource,
+                "width" to bitmap.width.toString(),
+                "height" to bitmap.height.toString()
+            )
+        )
+        attempt.finalResult = "SUCCESS"
+        MediaDiagnosticLogger.summary(attempt)
         bitmap
     }
 
@@ -161,6 +314,11 @@ object ThumbnailLoader {
     ) {
         if (ownerId.isNullOrBlank() || mediaId.isNullOrBlank() || !isOnline(context)) return
         if (!MediaCacheFreshness.isThumbnailStale(context.filesDir, ownerId, mediaId, sizePx)) return
+        val existing = refreshJobs[key]
+        if (existing != null) {
+            MediaDiagnosticLogger.deduplicated(mediaId, null, MediaDiagnosticLogger.Variant.THUMBNAIL, key)
+            return
+        }
         val job = refreshScope.launch {
             try {
                 load(
@@ -177,7 +335,10 @@ object ThumbnailLoader {
                 refreshJobs.remove(key)
             }
         }
-        refreshJobs.putIfAbsent(key, job)?.let { job.cancel() }
+        refreshJobs.putIfAbsent(key, job)?.let { replaced ->
+            replaced.cancel()
+            MediaDiagnosticLogger.replaced(mediaId, null, MediaDiagnosticLogger.Variant.THUMBNAIL)
+        }
     }
 
     private fun isOnline(context: Context): Boolean {
@@ -194,67 +355,62 @@ object ThumbnailLoader {
             AccountSession.userId == ownerId
     }
 
-    private fun decodeHttp(uri: Uri, sizePx: Int): Bitmap? {
+    private fun decodeHttp(attempt: MediaDiagnosticLogger.Attempt, source: String, uri: Uri, sizePx: Int): Bitmap? {
+        val startedAt = System.currentTimeMillis()
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        val first = openHttp(uri) ?: return null
+        val first = openHttp(attempt, source, uri) ?: return null
         try {
             first.inputStream.use { BitmapFactory.decodeStream(it, null, bounds) }
-        } catch (_: Exception) {
+        } catch (error: Exception) {
+            MediaDiagnosticLogger.decodeError(
+                attempt, source, first.contentType, error.javaClass.simpleName, error.message
+            )
             return null
         } finally {
             first.disconnect()
         }
-        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
+            MediaDiagnosticLogger.decodeError(
+                attempt, source, first.contentType, "EmptyDecodeBounds", "decoded bounds ${bounds.outWidth}x${bounds.outHeight}"
+            )
+            return null
+        }
 
         val maxDim = maxOf(bounds.outWidth, bounds.outHeight)
         var sample = 1
         while (maxDim / sample > sizePx * 2) sample *= 2
-        val second = openHttp(uri) ?: return null
-        return try {
+        val second = openHttp(attempt, source, uri) ?: return null
+        val decoded: Bitmap? = try {
             val opts = BitmapFactory.Options().apply {
                 inSampleSize = sample
                 inPreferredConfig = Bitmap.Config.RGB_565
             }
-            second.inputStream.use { BitmapFactory.decodeStream(it, null, opts) }
-        } catch (_: Exception) {
+            val decodedBitmap = second.inputStream.use { BitmapFactory.decodeStream(it, null, opts) }
+            if (decodedBitmap == null) {
+                MediaDiagnosticLogger.decodeError(attempt, source, second.contentType, "DecodeStreamNull", "BitmapFactory returned null")
+            }
+            decodedBitmap
+        } catch (error: Exception) {
+            MediaDiagnosticLogger.decodeError(attempt, source, second.contentType, error.javaClass.simpleName, error.message)
             null
         } finally {
             second.disconnect()
         }
+        if (decoded != null) {
+            attempt.selectedSource = source
+            MediaDiagnosticLogger.success(
+                attempt, source, decoded.width, decoded.height, System.currentTimeMillis() - startedAt
+            )
+        }
+        return decoded
     }
 
-    private suspend fun decodeDriveThumbnail(
-        mediaId: String,
-        sizePx: Int,
-        sessionProvider: AuthenticatedSessionProvider
-    ): Bitmap? {
-        val bytes = MediaDriveClient.fetchBytes(
-            mediaId = mediaId,
-            variant = MediaDriveClient.VARIANT_THUMB,
-            sessionProvider = sessionProvider,
-            maxBytes = MAX_THUMBNAIL_BYTES.toLong(),
-            connectTimeoutMs = 10_000,
-            readTimeoutMs = 15_000
-        ) ?: return null
-        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
-        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
-        val maxDim = maxOf(bounds.outWidth, bounds.outHeight)
-        var sample = 1
-        while (maxDim / sample > sizePx * 2) sample *= 2
-        return BitmapFactory.decodeByteArray(
-            bytes,
-            0,
-            bytes.size,
-            BitmapFactory.Options().apply {
-                inSampleSize = sample
-                inPreferredConfig = Bitmap.Config.RGB_565
-            }
+    private fun openHttp(attempt: MediaDiagnosticLogger.Attempt, source: String, uri: Uri): HttpURLConnection? {
+        val startedAt = System.currentTimeMillis()
+        MediaDiagnosticLogger.httpStart(
+            attempt, source, uri.host, uri.encodedPath?.take(80)
         )
-    }
-
-    private fun openHttp(uri: Uri): HttpURLConnection? {
-        return try {
+        try {
             (java.net.URL(uri.toString()).openConnection() as HttpURLConnection).apply {
                 connectTimeout = 8_000
                 readTimeout = 8_000
@@ -264,15 +420,71 @@ object ThumbnailLoader {
                 setRequestProperty("Accept", "image/*")
                 connect()
                 if (responseCode !in 200..299) {
+                    MediaDiagnosticLogger.httpResponse(
+                        attempt, source, responseCode, contentType, contentLengthLong,
+                        System.currentTimeMillis() - startedAt
+                    )
                     disconnect()
-                    null
-                } else {
-                    this
+                    return null
                 }
+                MediaDiagnosticLogger.httpResponse(
+                    attempt, source, responseCode, contentType, contentLengthLong,
+                    System.currentTimeMillis() - startedAt
+                )
+                return this
             }
-        } catch (_: Exception) {
-            null
+        } catch (error: Exception) {
+            MediaDiagnosticLogger.httpError(
+                attempt, source, error.javaClass.simpleName, error.message, System.currentTimeMillis() - startedAt
+            )
+            return null
         }
+    }
+
+    private suspend fun decodeDriveThumbnail(
+        attempt: MediaDiagnosticLogger.Attempt,
+        mediaId: String,
+        sizePx: Int,
+        sessionProvider: AuthenticatedSessionProvider
+    ): Bitmap? {
+        val startedAt = System.currentTimeMillis()
+        val bytes = MediaDriveClient.fetchBytes(
+            attempt = attempt,
+            mediaId = mediaId,
+            variant = MediaDriveClient.VARIANT_THUMB,
+            sessionProvider = sessionProvider,
+            maxBytes = MAX_THUMBNAIL_BYTES.toLong(),
+            connectTimeoutMs = 10_000,
+            readTimeoutMs = 15_000
+        ) ?: return null
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
+            MediaDiagnosticLogger.decodeError(
+                attempt, "MEDIA_DRIVE", null, "EmptyDecodeBounds", "Drive thumb decoded bounds ${bounds.outWidth}x${bounds.outHeight}"
+            )
+            return null
+        }
+        val maxDim = maxOf(bounds.outWidth, bounds.outHeight)
+        var sample = 1
+        while (maxDim / sample > sizePx * 2) sample *= 2
+        val decoded = BitmapFactory.decodeByteArray(
+            bytes,
+            0,
+            bytes.size,
+            BitmapFactory.Options().apply {
+                inSampleSize = sample
+                inPreferredConfig = Bitmap.Config.RGB_565
+            }
+        )
+        if (decoded != null) {
+            MediaDiagnosticLogger.success(
+                attempt, "MEDIA_DRIVE", decoded.width, decoded.height, System.currentTimeMillis() - startedAt
+            )
+        } else {
+            MediaDiagnosticLogger.decodeError(attempt, "MEDIA_DRIVE", null, "DecodeByteArrayNull", "BitmapFactory returned null for Drive thumb")
+        }
+        return decoded
     }
 
     private fun decode(context: Context, uri: Uri, sizePx: Int): Bitmap? {

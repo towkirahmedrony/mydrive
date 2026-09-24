@@ -21,7 +21,13 @@ enum class LogCategory {
     REPLICATION,
     DATABASE,
     UI,
-    SYSTEM
+    SYSTEM,
+    // Media display diagnostics (thumbnail / original lifecycle instrumentation).
+    MEDIA,
+    THUMBNAIL,
+    ORIGINAL,
+    DRIVE,
+    CACHE
 }
 
 enum class QuickLogFilter {
@@ -31,7 +37,10 @@ enum class QuickLogFilter {
     NETWORK,
     AUTH,
     UPLOAD,
-    WORKMANAGER
+    WORKMANAGER,
+    MEDIA,
+    THUMBNAIL,
+    ORIGINAL
 }
 
 data class DeveloperLogEvent(

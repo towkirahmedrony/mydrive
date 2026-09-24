@@ -42,6 +42,7 @@ import com.mydrive.app.data.media.ThumbnailLoader
 import com.mydrive.app.MyDriveApp
 import com.mydrive.app.data.model.MediaItem
 import com.mydrive.app.data.session.AccountSession
+import com.mydrive.app.debug.MediaDiagnosticLogger
 import com.mydrive.app.ui.util.thumbnailBrush
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
@@ -109,9 +110,23 @@ fun ZoomablePhoto(
                 ?: ThumbnailLoader.peek(item.displayUri, 256, mediaId = item.remoteMediaId, userId = ownerId)
         )
     }
+    // Diagnostic state for the LOCAL_ORIGINAL_COMPARISON trace: whether the
+    // thumbnail placeholder attempt succeeded for this item.
+    var thumbnailResult by remember(item.id, ownerId) { mutableStateOf<String?>(null) }
 
     LaunchedEffect(item.id, placeholderPx, ownerId) {
         if (item.displayUri.isBlank() && item.remoteMediaId.isNullOrBlank()) {
+            thumbnailResult = "FAILURE"
+            MediaDiagnosticLogger.unavailableUi(
+                mediaId = item.remoteMediaId,
+                localMediaId = item.id,
+                variant = MediaDiagnosticLogger.Variant.THUMBNAIL,
+                reason = "NO_URI_AND_NO_MEDIA_ID",
+                availabilityState = "NO_IDENTITY",
+                resolverState = "NOT_ATTEMPTED",
+                lastResolverSource = "NONE",
+                lastResolverError = "item has neither a display URI nor a remote media id"
+            )
             loadFailed = true
             latestOnUnavailable()
             return@LaunchedEffect
@@ -129,7 +144,12 @@ fun ZoomablePhoto(
             )
             if (loaded != null) {
                 bitmap = loaded
+                thumbnailResult = "SUCCESS"
+            } else {
+                thumbnailResult = "FAILURE"
             }
+        } else {
+            thumbnailResult = "SUCCESS"
         }
     }
 
@@ -145,9 +165,30 @@ fun ZoomablePhoto(
             sessionProvider = app?.sessionProvider,
             userId = ownerId
         )
+        val originalResult = if (full != null) "SUCCESS" else "FAILURE"
+        // The comparison the task asks for: when a local thumbnail fails but the
+        // original loads (or vice versa), make the asymmetry explicit in logs.
+        if (thumbnailResult != null && item.originLocal) {
+            MediaDiagnosticLogger.localOriginalComparison(
+                mediaId = item.remoteMediaId,
+                localMediaId = item.id,
+                thumbnailResult = thumbnailResult!!,
+                originalResult = originalResult
+            )
+        }
         if (full != null) {
             bitmap = full
         } else if (bitmap == null) {
+            MediaDiagnosticLogger.unavailableUi(
+                mediaId = item.remoteMediaId,
+                localMediaId = item.id,
+                variant = MediaDiagnosticLogger.Variant.ORIGINAL,
+                reason = "ORIGINAL_RESOLVER_RETURNED_NULL",
+                availabilityState = "RESOLVED_UNAVAILABLE",
+                resolverState = "FAILURE",
+                lastResolverSource = "NONE",
+                lastResolverError = MediaDiagnosticLogger.lastFailure(item.remoteMediaId ?: item.id)
+            )
             loadFailed = true
             latestOnUnavailable()
         }

@@ -25,7 +25,12 @@ import com.mydrive.app.data.model.MediaType
 import com.mydrive.app.BuildConfig
 import com.mydrive.app.MyDriveApp
 import com.mydrive.app.data.session.AccountSession
+import com.mydrive.app.debug.MediaDiagnosticLogger
 import com.mydrive.app.ui.util.thumbnailBrush
+
+private fun remoteCandidate(primaryUri: String, previewUri: String?): Boolean {
+    return primaryUri.startsWith("http") || !previewUri.isNullOrBlank()
+}
 
 @Composable
 fun MediaImage(
@@ -65,6 +70,16 @@ fun MediaImage(
 
     LaunchedEffect(primaryUri, cloudFallback, fallbackMediaId, sizePx, ownerId) {
         if (primaryUri.isBlank() && fallbackMediaId.isNullOrBlank()) {
+            MediaDiagnosticLogger.unavailableUi(
+                mediaId = fallbackMediaId,
+                localMediaId = null,
+                variant = MediaDiagnosticLogger.Variant.THUMBNAIL,
+                reason = "NO_URI_AND_NO_MEDIA_ID",
+                availabilityState = "NO_IDENTITY",
+                resolverState = "NOT_ATTEMPTED",
+                lastResolverSource = "NONE",
+                lastResolverError = "item has neither a URI nor a remote media id"
+            )
             bitmap = null
             failed = true
             onUnavailable?.invoke()
@@ -88,6 +103,17 @@ fun MediaImage(
             bitmap = loaded
         } else if (bitmap == null) {
             failed = true
+            val lastFailure = fallbackMediaId?.let { MediaDiagnosticLogger.lastFailure(it) }
+            MediaDiagnosticLogger.unavailableUi(
+                mediaId = fallbackMediaId,
+                localMediaId = null,
+                variant = MediaDiagnosticLogger.Variant.THUMBNAIL,
+                reason = lastFailure ?: "THUMBNAIL_RESOLVER_RETURNED_NULL",
+                availabilityState = "RESOLVED_UNAVAILABLE",
+                resolverState = if (loaded == null) "FAILURE" else "SUCCESS",
+                lastResolverSource = if (remoteCandidate(primaryUri, cloudFallback)) "CLOUD" else "LOCAL",
+                lastResolverError = null
+            )
             if (BuildConfig.DEBUG) {
                 Log.d(
                     "MyDriveMediaImage",

@@ -298,6 +298,19 @@ object DeveloperLogger {
                         event.category == LogCategory.CLOUDINARY_AUTH ||
                         event.category == LogCategory.FINALIZE
                     QuickLogFilter.WORKMANAGER -> event.category == LogCategory.WORKMANAGER
+                    QuickLogFilter.MEDIA -> event.category == LogCategory.MEDIA ||
+                        event.event.startsWith("MEDIA_") ||
+                        event.event == "MEDIA_LOAD_SUMMARY" ||
+                        event.event == "MEDIA_AVAILABILITY_START" ||
+                        event.event == "MEDIA_AVAILABILITY_RESULT" ||
+                        event.event == "MEDIA_UNAVAILABLE_UI" ||
+                        event.event == "CLOUD_MEDIA_METADATA" ||
+                        event.event == "LOCAL_ORIGINAL_COMPARISON"
+                    QuickLogFilter.THUMBNAIL -> event.event.startsWith("THUMB_") ||
+                        event.event.startsWith("LOCAL_THUMB") ||
+                        event.category == LogCategory.THUMBNAIL
+                    QuickLogFilter.ORIGINAL -> event.event.startsWith("ORIGINAL_") ||
+                        event.category == LogCategory.ORIGINAL
                 } && matchesQuery(event, query)
             }
             .toList()
