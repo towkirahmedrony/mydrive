@@ -33,32 +33,41 @@ fun MediaImage(
     seed: Int,
     type: MediaType,
     fallbackMediaId: String? = null,
+    previewUri: String? = null,
     modifier: Modifier = Modifier,
     contentScale: ContentScale = ContentScale.Crop,
-    sizePx: Int = 256,
+    sizePx: Int = ThumbnailLoader.PREVIEW_SIZE_PX,
     contentDescription: String? = null,
     placeholderBitmap: Bitmap? = null,
     onUnavailable: (() -> Unit)? = null
 ) {
     val context = LocalContext.current
     val ownerId = AccountSession.userId
-    var bitmap by remember(uri, fallbackMediaId, sizePx, ownerId) {
+    // A device URI stays the primary candidate; the cloud preview is only
+    // consulted when it does not resolve. When there is no device URI at all the
+    // preview becomes the primary, so the cache key stays URL-derived-or-media-id
+    // based instead of collapsing onto an empty URI.
+    val primaryUri = uri.ifBlank { previewUri.orEmpty() }
+    val cloudFallback = previewUri?.takeIf { uri.isNotBlank() }
+    var bitmap by remember(primaryUri, cloudFallback, fallbackMediaId, sizePx, ownerId) {
         mutableStateOf(
             placeholderBitmap
-                ?: ThumbnailLoader.peek(uri, sizePx, mediaId = fallbackMediaId, userId = ownerId)
-                ?: ThumbnailLoader.peek(uri, 256, mediaId = fallbackMediaId, userId = ownerId)
+                ?: ThumbnailLoader.peek(primaryUri, sizePx, mediaId = fallbackMediaId, userId = ownerId)
+                ?: ThumbnailLoader.peek(primaryUri, 256, mediaId = fallbackMediaId, userId = ownerId)
         )
     }
-    var failed by remember(uri, fallbackMediaId, sizePx, ownerId) { mutableStateOf(false) }
+    var failed by remember(primaryUri, cloudFallback, fallbackMediaId, sizePx, ownerId) {
+        mutableStateOf(false)
+    }
 
-    LaunchedEffect(uri, fallbackMediaId, sizePx, ownerId) {
-        if (uri.isBlank() && fallbackMediaId.isNullOrBlank()) {
+    LaunchedEffect(primaryUri, cloudFallback, fallbackMediaId, sizePx, ownerId) {
+        if (primaryUri.isBlank() && fallbackMediaId.isNullOrBlank()) {
             bitmap = null
             failed = true
             onUnavailable?.invoke()
             return@LaunchedEffect
         }
-        val cached = ThumbnailLoader.peek(uri, sizePx, mediaId = fallbackMediaId, userId = ownerId)
+        val cached = ThumbnailLoader.peek(primaryUri, sizePx, mediaId = fallbackMediaId, userId = ownerId)
         if (cached != null) {
             bitmap = cached
             return@LaunchedEffect
@@ -69,6 +78,7 @@ fun MediaImage(
             uriString = uri,
             sizePx = sizePx,
             fallbackMediaId = fallbackMediaId,
+            previewUri = cloudFallback,
             sessionProvider = app?.sessionProvider,
             userId = ownerId
         )
@@ -79,7 +89,7 @@ fun MediaImage(
             if (BuildConfig.DEBUG) {
                 Log.d(
                     "MyDriveMediaImage",
-                    "thumbnail_load_failed host=${runCatching { Uri.parse(uri).host }.getOrNull()} size=$sizePx"
+                    "thumbnail_load_failed host=${runCatching { Uri.parse(primaryUri).host }.getOrNull()} size=$sizePx"
                 )
             }
             onUnavailable?.invoke()

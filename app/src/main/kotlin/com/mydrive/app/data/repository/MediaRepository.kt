@@ -31,6 +31,7 @@ import com.mydrive.app.data.media.MediaStoreDataSource
 import com.mydrive.app.data.remote.dto.MediaAssetRow
 import com.mydrive.app.data.mock.MockMediaData
 import com.mydrive.app.data.model.ActivityEvent
+import com.mydrive.app.data.media.AlbumCoverResolver
 import com.mydrive.app.data.model.AlbumFolder
 import com.mydrive.app.data.model.BackupOverview
 import com.mydrive.app.data.model.BackupPreferences
@@ -561,7 +562,12 @@ class MediaRepository(
         cloudStats: MediaAlbumStats = cloudAlbumStats
     ): List<AlbumFolder> {
         val grouped = items.groupBy { it.albumId }.map { (albumId, albumItems) ->
-            val cover = albumItems.maxByOrNull { it.capturedAtMillis }
+            val newest = albumItems.maxByOrNull { it.capturedAtMillis }
+            // The cover keeps its cloud fallback so a device URI whose MediaStore
+            // row disappeared does not blank out the album; the stored delivery
+            // URL is also what the resolver rewrites to a small Cloudinary
+            // derivative instead of downloading a full-size original.
+            val cover = AlbumCoverResolver.select(albumItems)
             val count = if (albumId == "mydrive") {
                 maxOf(albumItems.size, cloudStats.cloudOnlyCount)
             } else {
@@ -569,17 +575,19 @@ class MediaRepository(
             }
             AlbumFolder(
                 id = albumId,
-                name = cover?.albumName?.ifBlank { "Other" } ?: "Other",
-                coverSeed = cover?.thumbnailSeed ?: 0,
+                name = newest?.albumName?.ifBlank { "Other" } ?: "Other",
+                coverSeed = cover?.seed ?: 0,
                 coverType = cover?.type ?: MediaType.PHOTO,
                 mediaCount = count,
-                coverUri = cover?.displayUri.orEmpty(),
+                coverUri = cover?.uri.orEmpty(),
+                coverPreviewUri = cover?.previewUri,
                 coverRemoteMediaId = cover?.remoteMediaId
             )
         }.toMutableList()
         if (cloudStats.cloudOnlyCount > 0 && grouped.none { it.id == "mydrive" }) {
             val cover = cloudStats.cover
-            val preview = cover?.thumbnailUrl ?: cover?.storageUrl.orEmpty()
+            val preview = cover?.thumbnailUrl?.takeIf { it.isNotBlank() }
+                ?: cover?.storageUrl.orEmpty()
             grouped += AlbumFolder(
                 id = "mydrive",
                 name = "My Drive",

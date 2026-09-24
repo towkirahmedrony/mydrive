@@ -84,8 +84,11 @@ fun ZoomablePhoto(
     var loadFailed by remember(item.id) { mutableStateOf(false) }
 
     val ownerId = AccountSession.userId
+    // Only the page the user is actually looking at may pull full resolution.
+    // A neighbour composes with a plain preview (the variant the viewer prefetch
+    // already warmed), so an adjacent Drive-only original is never downloaded.
     val fullTargetPx = if (isCurrent) viewerFullResTargetPx(context) else 0
-    val placeholderPx = 720
+    val placeholderPx = if (isCurrent) 720 else ThumbnailLoader.PREVIEW_SIZE_PX
 
     LaunchedEffect(item.id) {
         scale.snapTo(1f)
@@ -120,6 +123,7 @@ fun ZoomablePhoto(
                 uriString = item.displayUri,
                 sizePx = placeholderPx,
                 fallbackMediaId = item.remoteMediaId,
+                previewUri = item.thumbnailUrl,
                 sessionProvider = app?.sessionProvider,
                 userId = ownerId
             )

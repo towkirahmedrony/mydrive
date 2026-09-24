@@ -100,6 +100,8 @@ data class AlbumFolder(
     val coverType: MediaType = MediaType.PHOTO,
     val mediaCount: Int = 0,
     val coverUri: String = "",
+    /** Lightweight cloud candidate used when [coverUri] is a stale device URI. */
+    val coverPreviewUri: String? = null,
     val coverRemoteMediaId: String? = null
 )
 

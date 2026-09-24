@@ -20,6 +20,9 @@ import java.net.HttpURLConnection
 
 object ThumbnailLoader {
 
+    /** The preview size album covers, grid cells and viewer neighbours ask for. */
+    const val PREVIEW_SIZE_PX = 256
+
     private val cache: LruCache<String, Bitmap> = object : LruCache<String, Bitmap>(cacheKb()) {
         override fun sizeOf(key: String, value: Bitmap): Int = value.byteCount / 1024
     }
@@ -51,18 +54,28 @@ object ThumbnailLoader {
         uriString: String,
         sizePx: Int,
         fallbackMediaId: String? = null,
+        previewUri: String? = null,
         sessionProvider: AuthenticatedSessionProvider? = null,
         userId: String? = AccountSession.userId
     ): Bitmap? = withContext(Dispatchers.IO) {
-        if (uriString.isBlank() && fallbackMediaId.isNullOrBlank()) return@withContext null
+        if (uriString.isBlank() && previewUri.isNullOrBlank() && fallbackMediaId.isNullOrBlank()) {
+            return@withContext null
+        }
         val session = AccountSession.snapshot()
         val ownerId = userId ?: session.userId
+        val preview = previewUri?.trim().orEmpty()
         val remote = MediaCacheKeys.isRemoteUri(uriString)
-        if (remote && ownerId.isNullOrBlank()) return@withContext null
+        // A cloud candidate must never be fetched for an unauthenticated (or
+        // previous-account) session, whichever URL carries it.
+        if ((remote || MediaCacheKeys.isRemoteUri(preview)) && ownerId.isNullOrBlank()) {
+            return@withContext null
+        }
+        // The cache identity stays {user, media id, variant, size}: a rotating or
+        // re-derived URL never splits an entry for the same media.
         val key = MediaCacheKeys.memoryKey(
             userId = ownerId,
             mediaId = fallbackMediaId,
-            uri = uriString,
+            uri = uriString.ifBlank { preview },
             variant = MediaCacheKeys.VARIANT_THUMBNAIL,
             sizePx = sizePx
         )
@@ -71,8 +84,13 @@ object ThumbnailLoader {
         if (!stillCurrent(session, ownerId)) return@withContext null
         val appContext = context.applicationContext
         var fromDisk = false
+        val cloudCandidate = if (remote) uriString else preview
         val bitmap = run {
-            for (step in MediaFetchOrder.steps(uriString, hasStableMediaId = !fallbackMediaId.isNullOrBlank())) {
+            for (step in MediaFetchOrder.steps(
+                uriString,
+                hasStableMediaId = !fallbackMediaId.isNullOrBlank(),
+                previewUri = preview
+            )) {
                 if (!stillCurrent(session, ownerId)) return@withContext null
                 val decoded = when (step) {
                     MediaFetchSource.DISK -> {
@@ -86,7 +104,11 @@ object ThumbnailLoader {
                         runCatching { Uri.parse(uriString) }.getOrNull()?.let { decode(appContext, it, sizePx) }
                     }
                     MediaFetchSource.CLOUDINARY -> {
-                        runCatching { Uri.parse(uriString) }.getOrNull()?.let { decodeHttp(it, sizePx) }
+                        // A stored delivery URL is the full-size original; ask
+                        // Cloudinary for a thumbnail-sized derivative instead of
+                        // downloading the original to show a preview.
+                        CloudinaryPreview.previewUrl(cloudCandidate, sizePx)
+                            ?.let { decodeHttp(Uri.parse(it), sizePx) }
                     }
                     MediaFetchSource.DRIVE -> {
                         fallbackMediaId?.let { mediaId ->

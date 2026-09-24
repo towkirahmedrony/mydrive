@@ -230,22 +230,32 @@ fun MediaViewerScreen(
         }
     }
 
+    // Neighbour warm-up is intentionally thumbnail-only and exactly one page out.
+    // The pager composes one page beyond the viewport, so both neighbours render a
+    // PREVIEW_SIZE_PX thumbnail; warming that same variant means the page that
+    // scrolls in is already resolved. Full resolution is requested by
+    // ZoomablePhoto for the *current* page only, so a Drive-only original (or a
+    // full-size Cloudinary delivery URL) is never fetched for a neighbour, and a
+    // whole page of large originals is never pulled in behind the user.
     LaunchedEffect(current.id, state.items, context) {
         val index = state.items.indexOfFirst { it.id == current.id }
         if (index < 0) return@LaunchedEffect
+        val sessionProvider = (context.applicationContext as? MyDriveApp)?.sessionProvider
         listOfNotNull(
             state.items.getOrNull(index + 1),
             state.items.getOrNull(index - 1)
         )
+            .filter { it.type == MediaType.PHOTO }
             .filter { it.displayUri.isNotBlank() || !it.remoteMediaId.isNullOrBlank() }
             .forEach { neighbor ->
                 prefetchScope.launch {
                     ThumbnailLoader.load(
                         context = context,
                         uriString = neighbor.displayUri,
-                        sizePx = 256,
+                        sizePx = ThumbnailLoader.PREVIEW_SIZE_PX,
                         fallbackMediaId = neighbor.remoteMediaId,
-                        sessionProvider = (context.applicationContext as? MyDriveApp)?.sessionProvider,
+                        previewUri = neighbor.thumbnailUrl,
+                        sessionProvider = sessionProvider,
                         userId = AccountSession.userId
                     )
                 }

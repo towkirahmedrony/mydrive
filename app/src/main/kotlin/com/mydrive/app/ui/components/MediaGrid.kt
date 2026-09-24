@@ -34,6 +34,7 @@ import androidx.compose.ui.unit.dp
 import com.mydrive.app.ui.theme.Copper
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filter
+import com.mydrive.app.data.media.ThumbnailLoader
 import com.mydrive.app.data.model.AlbumFolder
 import com.mydrive.app.data.model.BackupState
 import com.mydrive.app.data.model.MediaItem
@@ -196,13 +197,18 @@ fun AlbumCard(
                 .clip(CardShape)
                 .background(colors.surfaceVariant)
         ) {
+            // Album cards ask for the same thumbnail-sized variant as the grid;
+            // a cover never pulls a full-resolution original (a Cloudinary
+            // delivery URL is requested as a small derivative and Drive media
+            // through `variant=thumb`).
             MediaImage(
                 uri = album.coverUri,
                 seed = album.coverSeed,
                 type = album.coverType,
                 fallbackMediaId = album.coverRemoteMediaId,
+                previewUri = album.coverPreviewUri,
                 modifier = Modifier.fillMaxSize(),
-                sizePx = 256,
+                sizePx = ThumbnailLoader.PREVIEW_SIZE_PX,
                 contentDescription = album.name
             )
         }
