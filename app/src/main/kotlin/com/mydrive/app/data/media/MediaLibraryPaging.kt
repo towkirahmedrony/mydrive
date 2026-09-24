@@ -107,7 +107,7 @@ object MediaLibraryPaging {
     // `updated_at` is part of the listing because it is the synchronization
     // cursor's source: the initial load seeds the cursor from the rows it read,
     // and an incremental page carries the position it ended at.
-    const val LISTING_COLUMNS = "id,owner_id,local_media_id,file_name,mime_type,file_size,width,height,duration_ms,storage_url,thumbnail_url,client_upload_id,status,user_hidden_at,deleted_at,uploaded_at,created_at,updated_at,drive_archived_at"
+    const val LISTING_COLUMNS = "id,owner_id,local_media_id,file_name,mime_type,file_size,width,height,duration_ms,storage_url,thumbnail_url,storage_asset_id,client_upload_id,status,user_hidden_at,deleted_at,uploaded_at,created_at,updated_at,drive_archived_at,primary_cleanup_status,primary_deleted_at"
 
     fun cursorOf(row: MediaAssetRow): MediaPageCursor? {
         val createdAt = row.createdAt?.takeIf { it.isNotBlank() }

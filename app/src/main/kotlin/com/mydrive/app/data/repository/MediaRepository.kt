@@ -919,8 +919,7 @@ class MediaRepository(
         }.toMutableList()
         if (cloudStats.cloudOnlyCount > 0 && grouped.none { it.id == "mydrive" }) {
             val cover = cloudStats.cover
-            val preview = cover?.thumbnailUrl?.takeIf { it.isNotBlank() }
-                ?: cover?.storageUrl.orEmpty()
+            val preview = cover?.cloudinarySourceUrl.orEmpty()
             grouped += AlbumFolder(
                 id = "mydrive",
                 name = "My Drive",
@@ -1027,7 +1026,8 @@ class MediaRepository(
             val row = matchRow(item, record)
             library += item.copy(
                 remoteMediaId = row?.id ?: record?.remoteMediaId,
-                thumbnailUrl = row?.thumbnailUrl ?: row?.storageUrl ?: record?.cloudinarySecureUrl,
+                thumbnailUrl = row?.cloudinarySourceUrl
+                    ?: record?.cloudinarySecureUrl?.takeUnless { row?.isPrimaryCleaned == true },
                 originLocal = true,
                 hiddenFromLibrary = false
             )
@@ -1052,7 +1052,9 @@ class MediaRepository(
         }
 
         for ((localId, entry) in cloudCache) {
-            if (localId in hidden || localId in present || localId in deviceIds) continue
+            if (localId in hidden || localId in present || localId in deviceIds ||
+                entry.remoteMediaId in byRemoteId
+            ) continue
             library += entry.toMediaItem(favoriteIds, records[localId])
             presentRemoteIds += entry.remoteMediaId
         }
@@ -1063,8 +1065,7 @@ class MediaRepository(
             if (!row.isCloudAvailable || row.id in presentRemoteIds) continue
             val cached = cachedByRemoteId[row.id]
             val cloudId = cached?.localId ?: "cloud-${row.id}"
-            library += cached?.toMediaItem(favoriteIds, records[cloudId])
-                ?: row.toCloudOnlyMediaItem(cloudId, favoriteIds)
+            library += row.toCloudOnlyMediaItem(cloudId, favoriteIds)
             rememberCloudFromRow(row, cloudId)
             presentRemoteIds += row.id
         }
@@ -1097,7 +1098,7 @@ class MediaRepository(
         favoriteIds: Set<String>
     ): MediaItem {
         val mediaType = if (mimeType?.startsWith("video/") == true) MediaType.VIDEO else MediaType.PHOTO
-        val preview = thumbnailUrl ?: storageUrl.orEmpty()
+        val preview = cloudinarySourceUrl.orEmpty()
         val captured = runCatching { java.time.Instant.parse(createdAt ?: "").toEpochMilli() }.getOrDefault(0L)
             .takeIf { it > 0L }
             ?: runCatching { java.time.Instant.parse(uploadedAt ?: "").toEpochMilli() }.getOrDefault(0L)
@@ -1162,7 +1163,9 @@ class MediaRepository(
         record: SyncRecord?
     ) {
         if (!row.isCloudAvailable) return
-        val preview = row.thumbnailUrl ?: row.storageUrl ?: record?.cloudinarySecureUrl ?: ""
+        val preview = row.cloudinarySourceUrl
+            ?: record?.cloudinarySecureUrl?.takeUnless { row.isPrimaryCleaned }
+            ?: ""
         visibilityStore.putCloud(
             CloudLibraryEntry(
                 localId = item.id,
@@ -1188,7 +1191,7 @@ class MediaRepository(
         stableId: String
     ) {
         if (!row.isCloudAvailable) return
-        val preview = row.thumbnailUrl ?: row.storageUrl ?: ""
+        val preview = row.cloudinarySourceUrl.orEmpty()
         val mediaType = if (row.mimeType?.startsWith("video/") == true) MediaType.VIDEO else MediaType.PHOTO
         val captured = runCatching { java.time.Instant.parse(row.createdAt ?: "").toEpochMilli() }.getOrDefault(0L)
             .takeIf { it > 0L }
@@ -1219,7 +1222,9 @@ class MediaRepository(
         record: SyncRecord?,
         favoriteIds: Set<String>
     ): MediaItem {
-        val preview = row.thumbnailUrl ?: row.storageUrl ?: record?.cloudinarySecureUrl ?: item.uri
+        val preview = row.cloudinarySourceUrl
+            ?: record?.cloudinarySecureUrl?.takeUnless { row.isPrimaryCleaned }
+            ?: item.uri
         return item.copy(
             uri = preview,
             thumbnailUrl = preview,

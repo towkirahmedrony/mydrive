@@ -27,6 +27,23 @@ class MediaAssetRowTest {
     }
 
     @Test
+    fun cleanedCloudinaryUrlIsNotOfferedAsLiveSourceWhenDriveArchiveExists() {
+        val row = MediaAssetRow(
+            id = "media-archived",
+            status = "READY",
+            storageUrl = "https://res.cloudinary.com/example/dead.jpg",
+            storageAssetId = "asset-1",
+            driveArchivedAt = "2026-09-20T23:40:05Z",
+            primaryCleanupStatus = "cleanup_success",
+            primaryDeletedAt = "2026-09-20T23:40:06Z"
+        )
+
+        assertTrue(row.isCloudAvailable)
+        assertTrue(row.isPrimaryCleaned)
+        assertTrue(row.cloudinarySourceUrl == null)
+    }
+
+    @Test
     fun nonReadyRowIsNotCloudAvailableWithoutPrimaryStorage() {
         val row = MediaAssetRow(
             id = "media-3",

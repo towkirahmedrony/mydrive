@@ -17,6 +17,7 @@ data class MediaAssetRow(
     @SerialName("duration_ms") val durationMs: Long? = null,
     @SerialName("storage_url") val storageUrl: String? = null,
     @SerialName("thumbnail_url") val thumbnailUrl: String? = null,
+    @SerialName("storage_asset_id") val storageAssetId: String? = null,
     @SerialName("client_upload_id") val clientUploadId: String? = null,
     val status: String? = null,
     @SerialName("user_hidden_at") val userHiddenAt: String? = null,
@@ -33,6 +34,8 @@ data class MediaAssetRow(
      */
     @SerialName("updated_at") val updatedAt: String? = null,
     @SerialName("drive_archived_at") val driveArchivedAt: String? = null,
+    @SerialName("primary_cleanup_status") val primaryCleanupStatus: String? = null,
+    @SerialName("primary_deleted_at") val primaryDeletedAt: String? = null,
     @Transient val hasCompletedDriveArchive: Boolean = false
 ) {
     val isHiddenFromLibrary: Boolean
@@ -41,8 +44,20 @@ data class MediaAssetRow(
     val isCloudAvailable: Boolean
         get() {
             if (status == "DELETED") return false
-            if (!storageUrl.isNullOrBlank() || !thumbnailUrl.isNullOrBlank()) return true
+            if (!cloudinarySourceUrl.isNullOrBlank()) return true
             if (status != "READY") return false
             return hasCompletedDriveArchive || !driveArchivedAt.isNullOrBlank()
         }
+
+    /** The Cloudinary source is no longer live after verified primary cleanup. */
+    val cloudinarySourceUrl: String?
+        get() {
+            if (isPrimaryCleaned) return null
+            return thumbnailUrl?.takeIf { it.isNotBlank() }
+                ?: storageUrl?.takeIf { it.isNotBlank() }
+        }
+
+    val isPrimaryCleaned: Boolean
+        get() = !primaryDeletedAt.isNullOrBlank() ||
+            primaryCleanupStatus.equals("cleanup_success", ignoreCase = true)
 }
