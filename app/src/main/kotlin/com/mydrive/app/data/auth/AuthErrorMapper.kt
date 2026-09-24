@@ -3,10 +3,10 @@ package com.mydrive.app.data.auth
 import io.github.jan.supabase.auth.exception.AuthErrorCode
 import io.github.jan.supabase.auth.exception.AuthRestException
 import io.github.jan.supabase.auth.exception.AuthWeakPasswordException
-import io.github.jan.supabase.exceptions.HttpRequestException
 import io.github.jan.supabase.exceptions.RestException
 import io.ktor.client.network.sockets.ConnectTimeoutException
 import io.ktor.client.network.sockets.SocketTimeoutException
+import kotlinx.coroutines.CancellationException
 import java.io.IOException
 import java.net.UnknownHostException
 import java.nio.channels.UnresolvedAddressException
@@ -14,6 +14,7 @@ import java.nio.channels.UnresolvedAddressException
 object AuthErrorMapper {
 
     fun message(error: Throwable): String {
+        if (error is CancellationException) throw error
         if (error is AuthWeakPasswordException) return "Choose a stronger password."
         if (error is AuthRestException) {
             mappedAuthCode(error.errorCode)?.let { return it }
@@ -37,7 +38,9 @@ object AuthErrorMapper {
         }.lowercase()
 
         mappedRaw(raw)?.let { return it }
-        if (isNetwork(error, raw)) return "No internet connection. Check your network and try again."
+        if (isOffline(error, raw)) return "No internet connection. Check your network and try again."
+        if (isTimeout(error, raw)) return "The request timed out. Please try again."
+        if (isDnsFailure(error, raw)) return "Couldn't reach the server. Check your network and try again."
 
         val fallback = error.message?.trim().orEmpty()
         if (isUserFacing(fallback)) return clean(fallback)
@@ -71,7 +74,9 @@ object AuthErrorMapper {
             }
         }
         return when {
-            isNetwork(error, raw) -> "No internet connection. Check your network and try again."
+            isOffline(error, raw) -> "No internet connection. Check your network and try again."
+            isTimeout(error, raw) -> "The request timed out. Please try again."
+            isDnsFailure(error, raw) -> "Couldn't reach the server. Check your network and try again."
             isOtpExpired(raw) -> "This code has expired. Request a new one."
             isOtpInvalid(raw) || isInvalidCredentials(raw) -> "That code is incorrect. Please try again."
             isRateLimited(raw) -> "Too many attempts. Please wait and try again."
@@ -127,24 +132,35 @@ object AuthErrorMapper {
         else -> null
     }
 
-    private fun isNetwork(error: Throwable, raw: String): Boolean {
+    private fun isOffline(error: Throwable, raw: String): Boolean {
         var current: Throwable? = error
         while (current != null) {
-            if (current is UnknownHostException ||
-                current is UnresolvedAddressException ||
-                current is ConnectTimeoutException ||
-                current is SocketTimeoutException ||
-                current is HttpRequestException
-            ) {
+            if (current is IOException && raw.contains("network is unreachable")) {
                 return true
             }
-            if (current is IOException && raw.contains("unable to resolve")) return true
+            current = current.cause
+        }
+        return raw.contains("network is unreachable") || raw.contains("no network")
+    }
+
+    private fun isTimeout(error: Throwable, raw: String): Boolean {
+        var current: Throwable? = error
+        while (current != null) {
+            if (current is ConnectTimeoutException || current is SocketTimeoutException) return true
+            current = current.cause
+        }
+        return raw.contains("timeout") || raw.contains("timed out")
+    }
+
+    private fun isDnsFailure(error: Throwable, raw: String): Boolean {
+        var current: Throwable? = error
+        while (current != null) {
+            if (current is UnknownHostException || current is UnresolvedAddressException) return true
             current = current.cause
         }
         return raw.contains("unable to resolve host") ||
-            raw.contains("failed to connect") ||
-            raw.contains("network is unreachable") ||
-            raw.contains("timeout")
+            raw.contains("unable to resolve") ||
+            raw.contains("failed to connect")
     }
 
     private fun isUnavailable(raw: String): Boolean {

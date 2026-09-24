@@ -25,6 +25,7 @@ import io.github.jan.supabase.auth.status.RefreshFailureCause
 import io.github.jan.supabase.auth.status.SessionStatus
 import io.github.jan.supabase.postgrest.from
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -111,7 +112,7 @@ class AuthRepository(
 
     suspend fun login(email: String, password: String): Result<Unit> {
         val supabase = client ?: return Result.failure(IllegalStateException(notConfiguredMessage()))
-        if (!network.isOnline()) {
+        if (network.isDefinitelyOffline()) {
             return Result.failure(IllegalStateException(AuthErrorMapper.message(UnknownNetwork())))
         }
         return runAuth {
@@ -309,7 +310,27 @@ class AuthRepository(
             }
             val already = previousUserId == userId
             if (already) return
-            val profile = loadProfile(userId, pendingFullName)
+            val profile = try {
+                loadProfile(userId, pendingFullName)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                if (AuthErrorMapper.isSessionExpired(error)) throw error
+                DeveloperLogger.warn(
+                    category = LogCategory.AUTH,
+                    event = "PROFILE_LOAD_DEFERRED",
+                    message = "Authenticated session established but profile initialization was deferred",
+                    throwable = error,
+                    metadata = mapOf("user_id" to SecretRedactor.maskUserId(userId).orEmpty())
+                )
+                AuthUserProfile(
+                    id = userId,
+                    email = supabase.auth.currentUserOrNull()?.email.orEmpty(),
+                    fullName = pendingFullName.orEmpty(),
+                    role = "",
+                    status = "active"
+                )
+            }
             onAuthenticated(userId)
             if (profile.isSuspended) {
                 _state.value = AuthState.Suspended(profile)
@@ -436,6 +457,8 @@ class AuthRepository(
         return try {
             block()
             Result.success(Unit)
+        } catch (error: CancellationException) {
+            throw error
         } catch (error: EmailConfirmationRequired) {
             Result.failure(error)
         } catch (error: ProfileNotFound) {

@@ -14,4 +14,7 @@ class NetworkMonitor(context: Context) {
         val capabilities = connectivity.getNetworkCapabilities(network) ?: return false
         return capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
     }
+
+    /** Do not block a request unless Android has no active network at all. */
+    fun isDefinitelyOffline(): Boolean = connectivity.activeNetwork == null
 }
