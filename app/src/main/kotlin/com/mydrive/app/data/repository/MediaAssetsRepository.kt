@@ -6,6 +6,10 @@ import com.mydrive.app.data.media.MediaAlbumStats
 import com.mydrive.app.data.media.MediaAssetsPage
 import com.mydrive.app.data.media.MediaLibraryPaging
 import com.mydrive.app.data.media.MediaPageCursor
+import com.mydrive.app.data.media.RemoteFailureClassifier
+import com.mydrive.app.data.media.RemoteMediaException
+import com.mydrive.app.data.media.RemoteMediaFailure
+import com.mydrive.app.data.remote.NetworkMonitor
 import com.mydrive.app.data.remote.dto.DriveArchiveJobRow
 import com.mydrive.app.data.remote.dto.MediaAssetRow
 import com.mydrive.app.debug.DeveloperLogger
@@ -19,8 +23,11 @@ import io.github.jan.supabase.postgrest.query.Order
 import io.github.jan.supabase.postgrest.query.filter.FilterOperator
 import io.github.jan.supabase.exceptions.RestException
 import io.github.jan.supabase.postgrest.query.filter.PostgrestFilterBuilder
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonPrimitive
@@ -36,81 +43,186 @@ sealed class HideMediaResult {
 
 class MediaAssetsRepository(
     private val client: SupabaseClient?,
-    private val sessionProvider: AuthenticatedSessionProvider
+    private val sessionProvider: AuthenticatedSessionProvider,
+    private val network: NetworkMonitor
 ) {
 
+    /**
+     * One page of the authoritative cloud catalog.
+     *
+     * Throws [RemoteMediaException] when the catalog could not be read — offline,
+     * timed out, unauthenticated or a backend error. An empty page is returned
+     * *only* for a genuinely successful empty answer, because a caller may treat
+     * an empty page as "these media_assets rows are gone".
+     */
     suspend fun loadOwnerAssetsPage(
         cursor: MediaPageCursor? = null,
         pageSize: Int = MediaLibraryPaging.PAGE_SIZE
     ): MediaAssetsPage = withContext(Dispatchers.IO) {
-        val supabase = client ?: return@withContext MediaAssetsPage(emptyList(), null, false)
-        val userId = currentUserId() ?: return@withContext MediaAssetsPage(emptyList(), null, false)
+        val supabase = client
+        if (supabase == null) {
+            // No backend configured (local build): there is no cloud catalog to
+            // reconcile against, so an empty page is the truthful answer.
+            return@withContext MediaAssetsPage(emptyList(), null, false)
+        }
+        val userId = currentUserId()
+        if (userId.isNullOrBlank()) {
+            // The session is absent or no longer usable. That is not proof that
+            // the account owns no media, and must never blank the cloud catalog.
+            DeveloperLogger.warn(
+                category = LogCategory.DATABASE,
+                event = "MEDIA_ASSETS_LOAD_SKIPPED",
+                message = "Skipped media_assets load: no authenticated user id",
+                metadata = mapOf("failure" to RemoteMediaFailure.UNAUTHORIZED.name)
+            )
+            throw RemoteMediaException(RemoteMediaFailure.UNAUTHORIZED)
+        }
         try {
-            val rows = supabase.from(TABLE)
-                .select(columns = Columns.raw(MediaLibraryPaging.LISTING_COLUMNS)) {
-                    filter {
-                        applyLibraryVisibility(userId)
-                        applyKeyset(cursor)
+            val rows = remote {
+                supabase.from(TABLE)
+                    .select(columns = Columns.raw(MediaLibraryPaging.LISTING_COLUMNS)) {
+                        filter {
+                            applyLibraryVisibility(userId)
+                            applyKeyset(cursor)
+                        }
+                        order(column = "created_at", order = Order.DESCENDING)
+                        order(column = "id", order = Order.DESCENDING)
+                        limit(pageSize.toLong())
                     }
-                    order(column = "created_at", order = Order.DESCENDING)
-                    order(column = "id", order = Order.DESCENDING)
-                    limit(pageSize.toLong())
-                }
-                .decodeList<MediaAssetRow>()
+                    .decodeList<MediaAssetRow>()
+            }
             val annotated = annotateDriveArchives(supabase, rows)
             MediaAssetsPage(
                 rows = annotated,
                 nextCursor = MediaLibraryPaging.nextCursor(annotated, pageSize),
                 hasNextPage = MediaLibraryPaging.hasNextPage(annotated.size, pageSize)
             )
+        } catch (cancelled: CancellationException) {
+            throw cancelled
         } catch (error: Exception) {
-            DeveloperLogger.error(
-                category = LogCategory.DATABASE,
-                event = "MEDIA_ASSETS_LOAD_FAILED",
-                message = "Failed to load paginated media_assets rows",
-                throwable = error
-            )
+            val failure = RemoteFailureClassifier.classify(error)
+            val message = "Failed to load paginated media_assets rows"
+            val metadata = mapOf("failure" to failure.name)
+            if (failure == RemoteMediaFailure.OFFLINE) {
+                // Expected while the device has no network: not an error, but it
+                // must still be visible that the catalog was left untouched.
+                DeveloperLogger.warn(
+                    category = LogCategory.DATABASE,
+                    event = "MEDIA_ASSETS_LOAD_SKIPPED",
+                    message = message,
+                    throwable = error,
+                    metadata = metadata
+                )
+            } else {
+                DeveloperLogger.error(
+                    category = LogCategory.DATABASE,
+                    event = "MEDIA_ASSETS_LOAD_FAILED",
+                    message = message,
+                    throwable = error,
+                    metadata = metadata
+                )
+            }
             throw error
         }
     }
 
-    suspend fun loadCloudAlbumStats(): MediaAlbumStats = withContext(Dispatchers.IO) {
-        val supabase = client ?: return@withContext MediaAlbumStats()
-        val userId = currentUserId() ?: return@withContext MediaAlbumStats()
+    /**
+     * Cloud-only aggregate for the "My Drive" album.
+     *
+     * `null` means "the aggregation could not be read", which is deliberately
+     * different from [MediaAlbumStats] with zero counts ("the account has no
+     * cloud-only media"): the caller keeps its last known aggregation on null, so
+     * a failed request cannot make Drive-only media disappear from Albums.
+     */
+    suspend fun loadCloudAlbumStats(): MediaAlbumStats? = withContext(Dispatchers.IO) {
+        val supabase = client ?: return@withContext null
+        val userId = currentUserId() ?: return@withContext null
         try {
-            val cloudOnly = supabase.from(TABLE)
-                .select(columns = Columns.list("id")) {
-                    filter {
-                        applyLibraryVisibility(userId)
-                        applyAvailability()
-                        exact("local_media_id", null)
+            val cloudOnly = remote {
+                supabase.from(TABLE)
+                    .select(columns = Columns.list("id")) {
+                        filter {
+                            applyLibraryVisibility(userId)
+                            applyAvailability()
+                            exact("local_media_id", null)
+                        }
+                        count(Count.EXACT)
+                        limit(1)
                     }
-                    count(Count.EXACT)
-                    limit(1)
-                }
-                .countOrNull()?.toInt() ?: 0
-            val cover = supabase.from(TABLE)
-                .select(columns = Columns.raw(MediaLibraryPaging.LISTING_COLUMNS)) {
-                    filter {
-                        applyLibraryVisibility(userId)
-                        applyAvailability()
-                        exact("local_media_id", null)
+                    .countOrNull()?.toInt() ?: 0
+            }
+            val cover = remote {
+                supabase.from(TABLE)
+                    .select(columns = Columns.raw(MediaLibraryPaging.LISTING_COLUMNS)) {
+                        filter {
+                            applyLibraryVisibility(userId)
+                            applyAvailability()
+                            exact("local_media_id", null)
+                        }
+                        order(column = "created_at", order = Order.DESCENDING)
+                        order(column = "id", order = Order.DESCENDING)
+                        limit(1)
                     }
-                    order(column = "created_at", order = Order.DESCENDING)
-                    order(column = "id", order = Order.DESCENDING)
-                    limit(1)
-                }
-                .decodeList<MediaAssetRow>()
-                .firstOrNull()
+                    .decodeList<MediaAssetRow>()
+                    .firstOrNull()
+            }
             MediaAlbumStats(cloudOnlyCount = cloudOnly, cover = cover)
+        } catch (cancelled: CancellationException) {
+            // Cancellation is not a failure of the backend and must never be
+            // converted into a state update.
+            throw cancelled
         } catch (error: Exception) {
-            DeveloperLogger.error(
+            DeveloperLogger.warn(
                 category = LogCategory.DATABASE,
                 event = "MEDIA_ASSETS_ALBUM_STATS_FAILED",
-                message = "Failed to load media_assets album aggregation",
-                throwable = error
+                message = "Failed to load media_assets album aggregation; keeping the last known stats",
+                throwable = error,
+                metadata = mapOf("failure" to RemoteFailureClassifier.classify(error).name)
             )
-            MediaAlbumStats()
+            null
+        }
+    }
+
+    /**
+     * Runs one remote reconciliation call with an explicit budget.
+     *
+     * - offline: no request is attempted at all;
+     * - timeout: surfaced as [RemoteMediaFailure.TIMEOUT], never as an empty
+     *   result and never as caller cancellation;
+     * - cancellation by the caller: rethrown untouched;
+     * - anything else: wrapped with its classification so the caller can keep the
+     *   last known catalog and report the right reason.
+     */
+    private suspend fun <T> remote(block: suspend () -> T): T {
+        if (!network.isOnline()) {
+            DeveloperLogger.warn(
+                category = LogCategory.DATABASE,
+                event = "MEDIA_ASSETS_OFFLINE_SKIPPED",
+                message = "Skipped a remote catalog request while offline",
+                metadata = mapOf("failure" to RemoteMediaFailure.OFFLINE.name)
+            )
+            throw RemoteMediaException(RemoteMediaFailure.OFFLINE)
+        }
+        return try {
+            withTimeout(REQUEST_TIMEOUT_MS) { block() }
+        } catch (timedOut: TimeoutCancellationException) {
+            DeveloperLogger.warn(
+                category = LogCategory.DATABASE,
+                event = "MEDIA_ASSETS_REQUEST_TIMEOUT",
+                message = "Remote catalog request exceeded its budget",
+                throwable = timedOut,
+                metadata = mapOf(
+                    "failure" to RemoteMediaFailure.TIMEOUT.name,
+                    "timeout_ms" to REQUEST_TIMEOUT_MS.toString()
+                )
+            )
+            throw RemoteMediaException(RemoteMediaFailure.TIMEOUT, timedOut)
+        } catch (cancelled: CancellationException) {
+            // Caller cancellation (screen left, refresh superseded) is not a
+            // request failure and must propagate as cancellation.
+            throw cancelled
+        } catch (error: Exception) {
+            throw RemoteMediaException(RemoteFailureClassifier.classify(error), error)
         }
     }
 
@@ -179,21 +291,27 @@ class MediaAssetsRepository(
         }
         if (candidates.isEmpty()) return rows
         return try {
-            val completed = supabase.from(TABLE_REPLICATION_JOBS)
-                .select(columns = Columns.list("media_id")) {
-                    filter {
-                        eq("destination_type", "google_drive")
-                        eq("status", "COMPLETED")
-                        isIn("media_id", candidates)
+            val completed = remote {
+                supabase.from(TABLE_REPLICATION_JOBS)
+                    .select(columns = Columns.list("media_id")) {
+                        filter {
+                            eq("destination_type", "google_drive")
+                            eq("status", "COMPLETED")
+                            isIn("media_id", candidates)
+                        }
                     }
-                }
-                .decodeList<DriveArchiveJobRow>()
-                .mapNotNull { it.mediaId.takeIf(String::isNotBlank) }
-                .toSet()
+                    .decodeList<DriveArchiveJobRow>()
+                    .mapNotNull { it.mediaId.takeIf(String::isNotBlank) }
+                    .toSet()
+            }
             if (completed.isEmpty()) rows else rows.map { row ->
                 if (row.id in completed) row.copy(hasCompletedDriveArchive = true) else row
             }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
         } catch (error: Exception) {
+            // Drive-archive annotations are an enhancement on top of a page that
+            // already loaded, so a failure only drops the annotation.
             DeveloperLogger.error(
                 category = LogCategory.DATABASE,
                 event = "DRIVE_ARCHIVE_LOAD_FAILED",
@@ -366,6 +484,12 @@ class MediaAssetsRepository(
     }
 
     companion object {
+        /**
+         * Budget for one remote catalog call. A hung backend must never hold the
+         * refresh mutex — and therefore the gallery — for an unbounded time.
+         */
+        private const val REQUEST_TIMEOUT_MS = 20_000L
+
         private const val TABLE = "media_assets"
         private const val TABLE_REPLICATION_JOBS = "replication_jobs"
         private const val RPC_SET_LIBRARY_VISIBILITY = "set_media_library_visibility"

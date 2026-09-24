@@ -48,7 +48,9 @@ class MyDriveApp : Application() {
     private val networkMonitor: NetworkMonitor by lazy { NetworkMonitor(this) }
 
     val mediaAssetsRepository: MediaAssetsRepository by lazy {
-        MediaAssetsRepository(supabaseClient, sessionProvider)
+        // The connectivity check lets catalog reconciliation skip remote requests
+        // while the device is clearly offline instead of failing them.
+        MediaAssetsRepository(supabaseClient, sessionProvider, networkMonitor)
     }
 
     val mediaRepository: MediaRepository by lazy {

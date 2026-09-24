@@ -20,7 +20,22 @@ class MediaStoreDataSource(context: Context) {
 
     private val appContext = context.applicationContext
 
-    suspend fun loadMedia(): List<MediaItem> = withContext(Dispatchers.IO) {
+    /**
+     * Result of one MediaStore scan.
+     *
+     * [complete] is false when at least one collection query failed, which means
+     * the answer describes *part* of the device rather than the whole of it. A
+     * partial answer may still be displayed, but it must never be used to decide
+     * that something on the device (or in the cloud) no longer exists.
+     */
+    data class MediaScanResult(
+        val items: List<MediaItem>,
+        val complete: Boolean
+    )
+
+    suspend fun loadMedia(): List<MediaItem> = loadMediaScan().items
+
+    suspend fun loadMediaScan(): MediaScanResult = withContext(Dispatchers.IO) {
         var failures = 0
         val photos = try {
             queryCollection(imageCollection(), MediaType.PHOTO, "img")
@@ -62,25 +77,30 @@ class MediaStoreDataSource(context: Context) {
         DeveloperLogger.info(
             category = LogCategory.MEDIASTORE,
             event = "MEDIASTORE_SCAN",
-            message = "MediaStore scan completed",
+            message = if (failures == 0) "MediaStore scan completed" else "MediaStore scan partially failed",
             metadata = mapOf(
                 "photos" to photos.size.toString(),
                 "videos" to videos.size.toString(),
-                "total" to items.size.toString()
+                "total" to items.size.toString(),
+                "complete" to (failures == 0).toString()
             )
         )
-        items
+        MediaScanResult(items = items, complete = failures == 0)
     }
 
-    suspend fun loadTrashedMedia(): List<MediaItem> = withContext(Dispatchers.IO) {
+    suspend fun loadTrashedMedia(): List<MediaItem> = loadTrashedMediaScan().items
+
+    suspend fun loadTrashedMediaScan(): MediaScanResult = withContext(Dispatchers.IO) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
-            return@withContext emptyList()
+            return@withContext MediaScanResult(emptyList(), complete = true)
         }
+        var failures = 0
         val photos = try {
             queryTrashedCollection(imageCollection(), MediaType.PHOTO, "img")
         } catch (error: SecurityException) {
             throw error
         } catch (_: MediaQueryException) {
+            failures += 1
             emptyList()
         }
         val videos = try {
@@ -88,11 +108,13 @@ class MediaStoreDataSource(context: Context) {
         } catch (error: SecurityException) {
             throw error
         } catch (_: MediaQueryException) {
+            failures += 1
             emptyList()
         }
-        (photos + videos).sortedByDescending { item ->
+        val items = (photos + videos).sortedByDescending { item ->
             item.dateExpiresMillis.takeIf { it > 0L } ?: item.dateModifiedMillis
         }
+        MediaScanResult(items = items, complete = failures == 0)
     }
 
     /**

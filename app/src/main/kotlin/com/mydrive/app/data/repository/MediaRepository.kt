@@ -28,6 +28,8 @@ import com.mydrive.app.data.media.MediaAccess
 import com.mydrive.app.data.media.MediaPermissions
 import com.mydrive.app.data.media.MediaQueryException
 import com.mydrive.app.data.media.MediaStoreDataSource
+import com.mydrive.app.data.media.RemoteFailureClassifier
+import com.mydrive.app.data.media.RemoteRefreshGate
 import com.mydrive.app.data.remote.dto.MediaAssetRow
 import com.mydrive.app.data.mock.MockMediaData
 import com.mydrive.app.data.model.ActivityEvent
@@ -158,6 +160,8 @@ class MediaRepository(
     val syncSummary: StateFlow<SyncSummary> = _syncSummary.asStateFlow()
 
     private val refreshMutex = Mutex()
+    /** Collapses equivalent refresh bursts into one remote pass plus one trailing pass. */
+    private val remoteRefreshGate = RemoteRefreshGate()
     private val sessionLock = Any()
     private var lastRefreshAt = 0L
     private val locallyHiddenIds = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
@@ -319,6 +323,25 @@ class MediaRepository(
     suspend fun appendNextPage() = loadNextPage()
 
     suspend fun refresh(force: Boolean = false, localOverlayOnly: Boolean = false) {
+        // A remote pass is already running for this account: fold this request into
+        // it (it runs once more afterwards) instead of queueing a duplicate remote
+        // reconciliation behind the mutex. Local-overlay refreshes are never folded:
+        // they do no network work and must reflect a MediaStore change immediately.
+        val remoteRequested = !localOverlayOnly
+        if (remoteRequested && !remoteRefreshGate.begin()) {
+            applyAccessState()
+            return
+        }
+        try {
+            refreshInternal(force = force, localOverlayOnly = localOverlayOnly)
+        } finally {
+            if (remoteRequested && remoteRefreshGate.end()) {
+                scope.launch { refresh(force = true) }
+            }
+        }
+    }
+
+    private suspend fun refreshInternal(force: Boolean, localOverlayOnly: Boolean) {
         refreshMutex.withLock {
             val session = AccountSession.snapshot()
             val ownerId = boundUserId ?: session.userId
@@ -335,8 +358,9 @@ class MediaRepository(
             applyAccessState()
             val canReadLocal = permissions.canReadMedia()
             if (!localOverlayOnly) {
+                // Only the epoch is bumped: the last known page cursor and rows are
+                // kept so a failed refresh leaves pagination exactly as it was.
                 catalogEpoch += 1
-                nextPageCursor = null
             }
             val showSpinner = !localOverlayOnly && _media.value.isEmpty()
             _loadState.update {
@@ -348,10 +372,28 @@ class MediaRepository(
                     errorMessage = null
                 )
             }
+            // Identifies this pass so a cancellation can only clean up after
+            // itself, never after a newer refresh that already took over.
+            val epoch = catalogEpoch
             try {
                 val favoriteIds = favorites.ids.value
-                val scanned = if (canReadLocal) mediaStore.loadMedia() else emptyList()
-                val trashed = if (canReadLocal) mediaStore.loadTrashedMedia() else emptyList()
+                // A MediaStore query that failed only proves that the scan is
+                // incomplete. `localScanComplete` therefore gates every retention
+                // step below: cloud rows, favorites and backup records survive a
+                // partial or permission-limited scan.
+                val scan = if (canReadLocal) {
+                    mediaStore.loadMediaScan()
+                } else {
+                    MediaStoreDataSource.MediaScanResult(emptyList(), complete = false)
+                }
+                val trashScan = if (canReadLocal) {
+                    mediaStore.loadTrashedMediaScan()
+                } else {
+                    MediaStoreDataSource.MediaScanResult(emptyList(), complete = false)
+                }
+                val scanned = scan.items
+                val trashed = trashScan.items
+                val localScanComplete = scan.complete
                 if (!sessionStillCurrent(session, ownerId)) return
                 val scannedIds = scanned.mapTo(HashSet(scanned.size)) { it.id }
                 val trashedIds = trashed.mapTo(HashSet(trashed.size)) { it.id }
@@ -371,7 +413,7 @@ class MediaRepository(
                     syncRepository.reconcileMedia(deviceItems, expectedOwner = ownerId)
                 }
                 if (!sessionStillCurrent(session, ownerId)) return
-                if (canReadLocal && permissions.access() == MediaAccess.GRANTED) {
+                if (canReadLocal && localScanComplete && permissions.access() == MediaAccess.GRANTED) {
                     val presentIds = withContext(Dispatchers.Default) { deviceItems.mapTo(HashSet(deviceItems.size)) { it.id } }
                     synchronized(sessionLock) {
                         if (!sessionStillCurrent(session, ownerId)) return
@@ -395,7 +437,9 @@ class MediaRepository(
                     }
                     if (canReadLocal) {
                         _deviceMedia.value = deviceItems
-                        publishTrash(trashed)
+                        // An incomplete trash scan keeps the last known Trash list
+                        // instead of showing an empty Trash that never happened.
+                        if (trashScan.complete) publishTrash(trashed)
                     }
                     if (localOverlayOnly) {
                         val cachedLibrary = composeLibrary(
@@ -414,6 +458,24 @@ class MediaRepository(
                 }
                 if (localOverlayOnly) return
                 loadFirstPageLocked(session, ownerId, deviceItems, trashed, favoriteIds, records, now)
+            } catch (cancelled: CancellationException) {
+                // The caller went away (screen left, refresh superseded). Nothing
+                // partial was committed, and the transient loading flags are only
+                // cleared while this pass still owns the catalog epoch, so a newer
+                // refresh is never clobbered.
+                synchronized(sessionLock) {
+                    if (sessionStillCurrent(session, ownerId) && epoch == catalogEpoch) {
+                        _loadState.update {
+                            it.copy(
+                                isLoading = false,
+                                isRefreshing = false,
+                                isLoadingMore = false,
+                                hasNextPage = nextPageCursor != null
+                            )
+                        }
+                    }
+                }
+                throw cancelled
             } catch (_: MediaQueryException) {
                 synchronized(sessionLock) {
                     if (!sessionStillCurrent(session, ownerId)) return
@@ -424,6 +486,10 @@ class MediaRepository(
                             isLoading = false,
                             isRefreshing = false,
                             isLoadingMore = false,
+                            // A local query failure is not an empty device and not
+                            // an empty cloud catalog: keep whatever is loaded, and
+                            // keep paging available while a cursor still exists.
+                            hasNextPage = nextPageCursor != null,
                             errorMessage = if (keepExisting) null else "Couldn't load your photos and videos."
                         )
                     }
@@ -432,7 +498,15 @@ class MediaRepository(
                 synchronized(sessionLock) {
                     if (!sessionStillCurrent(session, ownerId)) return
                     applyAccessState()
-                    _loadState.update { it.copy(isLoading = false, isRefreshing = false, isLoadingMore = false, errorMessage = null) }
+                    _loadState.update {
+                        it.copy(
+                            isLoading = false,
+                            isRefreshing = false,
+                            isLoadingMore = false,
+                            hasNextPage = nextPageCursor != null,
+                            errorMessage = null
+                        )
+                    }
                 }
             }
         }
@@ -450,13 +524,22 @@ class MediaRepository(
             val epoch = catalogEpoch
             try {
                 val page = mediaAssetsRepository.loadOwnerAssetsPage(cursor)
-                if (!sessionStillCurrent(session, ownerId) || epoch != catalogEpoch) return
+                if (!sessionStillCurrent(session, ownerId) || epoch != catalogEpoch) {
+                    // The page belongs to a superseded session/epoch: drop it, but
+                    // always release the append guard, otherwise paging would stay
+                    // blocked behind isLoadingMore forever.
+                    _loadState.update { it.copy(isLoadingMore = false) }
+                    return
+                }
                 val favoriteIds = favorites.ids.value
                 val records = syncRepository.records.value
                 val deviceItems = _deviceMedia.value
                 val trashed = _trashedMedia.value
                 synchronized(sessionLock) {
-                    if (!sessionStillCurrent(session, ownerId) || epoch != catalogEpoch) return
+                    if (!sessionStillCurrent(session, ownerId) || epoch != catalogEpoch) {
+                        _loadState.update { it.copy(isLoadingMore = false) }
+                        return
+                    }
                     loadedRemoteRows = MediaLibraryPaging.mergeRows(loadedRemoteRows, page.rows)
                     nextPageCursor = page.nextCursor
                     val libraryItems = composeLibrary(deviceItems, trashed, favoriteIds, records, loadedRemoteRows)
@@ -474,8 +557,17 @@ class MediaRepository(
             } catch (cancelled: CancellationException) {
                 _loadState.update { it.copy(isLoadingMore = false) }
                 throw cancelled
-            } catch (_: Exception) {
+            } catch (error: Exception) {
                 if (!sessionStillCurrent(session, ownerId) || epoch != catalogEpoch) return
+                // Page N+1 could not be read. The rows already loaded stay, the
+                // cursor stays, and the user can simply scroll again.
+                DeveloperLogger.warn(
+                    category = LogCategory.DATABASE,
+                    event = "CATALOG_PAGE_FAILED",
+                    message = "Failed to append the next catalog page; keeping the loaded rows",
+                    throwable = error,
+                    metadata = mapOf("failure" to RemoteFailureClassifier.classify(error).name)
+                )
                 _loadState.update { it.copy(isLoadingMore = false) }
             }
         }
@@ -502,15 +594,24 @@ class MediaRepository(
         val epoch = catalogEpoch
         try {
             val page = mediaAssetsRepository.loadOwnerAssetsPage()
-            val albumStats = runCatching { mediaAssetsRepository.loadCloudAlbumStats() }.getOrDefault(MediaAlbumStats())
+            // null means the aggregation could not be read; an actual empty
+            // result is MediaAlbumStats() with zero counts. Only the latter may
+            // replace the known cloud-only stats.
+            val albumStats = try {
+                mediaAssetsRepository.loadCloudAlbumStats()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                null
+            }
             synchronized(sessionLock) {
                 if (!sessionStillCurrent(session, ownerId) || epoch != catalogEpoch) return
                 loadedRemoteRows = page.rows
                 nextPageCursor = page.nextCursor
-                cloudAlbumStats = albumStats
+                if (albumStats != null) cloudAlbumStats = albumStats
                 val libraryItems = composeLibrary(deviceItems, trashed, favoriteIds, records, page.rows)
                 _media.value = libraryItems
-                _albums.value = buildAlbums(libraryItems, albumStats)
+                _albums.value = buildAlbums(libraryItems, cloudAlbumStats)
                 lastRefreshAt = now
                 updateStorage(libraryItems)
                 _loadState.update {
@@ -525,7 +626,23 @@ class MediaRepository(
             }
         } catch (cancelled: CancellationException) {
             throw cancelled
-        } catch (_: Exception) {
+        } catch (error: Exception) {
+            // The request did not establish anything about the catalog, so the
+            // last known rows, cursor, statistics and media list all stay exactly
+            // as they were: only the loading flags and, when there is nothing to
+            // show, the message change.
+            val failure = RemoteFailureClassifier.classify(error)
+            DeveloperLogger.warn(
+                category = LogCategory.DATABASE,
+                event = "CATALOG_REFRESH_FAILED",
+                message = "Remote catalog refresh failed; keeping the last known catalog",
+                throwable = error,
+                metadata = mapOf(
+                    "failure" to failure.name,
+                    "kept_media" to _media.value.size.toString(),
+                    "kept_cloud_rows" to loadedRemoteRows.size.toString()
+                )
+            )
             synchronized(sessionLock) {
                 if (!sessionStillCurrent(session, ownerId) || epoch != catalogEpoch) return
                 val keepExisting = _media.value.isNotEmpty()
@@ -534,7 +651,9 @@ class MediaRepository(
                         isLoading = false,
                         isRefreshing = false,
                         isLoadingMore = false,
-                        errorMessage = if (keepExisting) null else "Couldn't load your photos and videos."
+                        // Paging continues to work against what is already loaded.
+                        hasNextPage = nextPageCursor != null,
+                        errorMessage = if (keepExisting) null else RemoteFailureClassifier.message(failure)
                     )
                 }
             }

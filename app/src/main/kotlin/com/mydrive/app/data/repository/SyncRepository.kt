@@ -14,6 +14,7 @@ import com.mydrive.app.debug.LogCategory
 import com.mydrive.app.debug.OperationTrace
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -246,22 +247,28 @@ class SyncRepository(
         val owner = ownerUserId ?: return
         if (!expectedOwner.isNullOrBlank() && expectedOwner != owner) return
         val now = System.currentTimeMillis()
-        items.forEach { item ->
-            val record = _records.value[item.id]
-            upsertOwned(
-                UploadQueueEntity(
-                    mediaId = item.id, localMediaId = item.mediaStoreId, contentUri = item.uri,
-                    fileName = item.filename, mimeType = item.mimeType, fileSize = item.fileSizeBytes,
-                    createdAt = record?.queuedAtMillis?.takeIf { it > 0 } ?: now,
-                    uploadState = queueState(record?.state?.toBackupState() ?: BackupState.NOT_STARTED),
-                    retryCount = 0, lastError = record?.errorMessage,
-                    clientUploadId = record?.clientUploadId ?: UUID.randomUUID().toString(),
-                    cloudinaryAssetId = record?.cloudinaryAssetId, cloudinaryPublicId = record?.cloudinaryPublicId,
-                    cloudinarySecureUrl = record?.cloudinarySecureUrl, finalizedMediaId = record?.remoteMediaId,
-                    ownerUserId = record?.ownerUserId ?: owner,
-                    updatedAt = record?.updatedAtMillis ?: now
+        // A MediaStore scan can describe thousands of items, so the queue upserts
+        // run on the IO dispatcher: this is called from a screen-scoped refresh
+        // and must never block the main thread (or be uncancellable) while it
+        // walks the device library.
+        withContext(Dispatchers.IO) {
+            items.forEach { item ->
+                val record = _records.value[item.id]
+                upsertOwned(
+                    UploadQueueEntity(
+                        mediaId = item.id, localMediaId = item.mediaStoreId, contentUri = item.uri,
+                        fileName = item.filename, mimeType = item.mimeType, fileSize = item.fileSizeBytes,
+                        createdAt = record?.queuedAtMillis?.takeIf { it > 0 } ?: now,
+                        uploadState = queueState(record?.state?.toBackupState() ?: BackupState.NOT_STARTED),
+                        retryCount = 0, lastError = record?.errorMessage,
+                        clientUploadId = record?.clientUploadId ?: UUID.randomUUID().toString(),
+                        cloudinaryAssetId = record?.cloudinaryAssetId, cloudinaryPublicId = record?.cloudinaryPublicId,
+                        cloudinarySecureUrl = record?.cloudinarySecureUrl, finalizedMediaId = record?.remoteMediaId,
+                        ownerUserId = record?.ownerUserId ?: owner,
+                        updatedAt = record?.updatedAtMillis ?: now
+                    )
                 )
-            )
+            }
         }
     }
 
