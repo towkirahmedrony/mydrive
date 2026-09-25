@@ -9,17 +9,7 @@
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
     <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
     <uses-permission android:name="android.permission.READ_MEDIA_VISUAL_USER_SELECTED" />
-    <!--
-      android.permission.MANAGE_MEDIA is deliberately NOT declared.
-      Its protection level is signature|appop|preinstalled, so a normally
-      installed app can never hold it: MediaStore.canManageMedia() returns false
-      with or without the declaration. Nothing in the app branches on it - it is
-      only written to a diagnostic log - and the direct IS_TRASHED write already
-      falls back to the system confirmation dialog
-      (MediaStore.createTrashRequest) when it raises SecurityException, which is
-      the supported flow. Declaring it only widened the capability surface
-      without granting any access.
-    -->
+    <uses-permission android:name="android.permission.MANAGE_MEDIA" />
     <uses-permission
         android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.INTERNET" />
