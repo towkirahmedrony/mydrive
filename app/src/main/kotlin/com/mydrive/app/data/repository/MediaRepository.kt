@@ -1779,6 +1779,15 @@ class MediaRepository(
             clientUploadId = record?.clientUploadId
         )
         if (result == HideMediaResult.Success) {
+            // Trash is reversible, so the persistent thumbnail is deliberately KEPT:
+            // only the permanent-delete lifecycle may purge it. Moving media to
+            // Trash must never make the thumbnail eligible for deletion.
+            logThumbnailLifecycle(
+                operation = "move_to_trash",
+                mediaId = item?.remoteMediaId ?: record?.remoteMediaId.orEmpty(),
+                result = "KEPT",
+                reason = "RESTORABLE"
+            )
             refresh(force = true)
             val trashedItem = item?.copy(isTrashed = true, hiddenFromLibrary = true)
             if (trashedItem != null && _trashedMedia.value.none { it.id == id }) {
@@ -1791,6 +1800,187 @@ class MediaRepository(
             HideMediaResult.Failed -> RemoveFromLibraryResult.Failed
         }
     }
+
+    /**
+     * Permanently deletes media that exists only in My Drive, through the
+     * server-side lifecycle.
+     *
+     * This is the ONLY Android path that makes a persistent thumbnail eligible
+     * for deletion. Moving media to Trash (`moveCloudToTrash` / `hideMatchingAsset`)
+     * and restoring it never call it, so:
+     *
+     *   Move to Trash -> thumbnail kept (item is restorable)
+     *   Restore       -> thumbnail kept, and never re-created
+     *   Permanent delete -> server purge, thumbnail removed, record tombstoned
+     *
+     * Failure safety: the server operation IS the deletion, so a media item is
+     * only reported as deleted when the server confirmed the purge. Nothing is
+     * removed from the local trash list (or the catalog) on a failure, and a
+     * partial purge reconciles exactly the records the server did purge.
+     */
+    private suspend fun permanentlyDeleteCloudMedia(items: List<MediaItem>): TrashMutationResult {
+        val remoteIds = items
+            .mapNotNull { item -> resolveRemoteMediaId(item) }
+            .distinct()
+        if (remoteIds.isEmpty()) {
+            // Cloud-only media with no server identity cannot be deleted anywhere.
+            DeveloperLogger.error(
+                category = LogCategory.THUMBNAIL,
+                event = "PERMANENT_DELETE",
+                message = permanentDeleteLog(
+                    mediaId = items.firstOrNull()?.id.orEmpty(),
+                    requested = false,
+                    result = "NO_REMOTE_IDENTITY"
+                ),
+                metadata = mapOf(
+                    "operation" to "permanent_delete",
+                    "result" to "FAILED",
+                    "reason" to "NO_REMOTE_IDENTITY"
+                )
+            )
+            return TrashMutationResult.Failed
+        }
+
+        DeveloperLogger.info(
+            category = LogCategory.THUMBNAIL,
+            event = "THUMBNAIL_LIFECYCLE",
+            message = buildString {
+                append("[THUMBNAIL_LIFECYCLE]\n")
+                append("operation=permanent_delete\n")
+                append("mediaId=").append(remoteIds.first()).append('\n')
+                append("result=REQUESTED\n")
+                append("reason=USER_PERMANENT_DELETE")
+            },
+            metadata = mapOf(
+                "operation" to "permanent_delete",
+                "media_count" to remoteIds.size.toString(),
+                "result" to "REQUESTED",
+                "reason" to "USER_PERMANENT_DELETE"
+            )
+        )
+
+        val purgedIds = when (val result = mediaAssetsRepository.purgeMediaAssets(remoteIds)) {
+            is PurgeMediaResult.Success -> result.purgedIds
+            is PurgeMediaResult.Partial -> {
+                // The server purged some records: drop exactly those locally so the
+                // catalog and trash list match the server, then report the failure.
+                if (result.purgedIds.isNotEmpty()) {
+                    finalizePermanentTrashDelete(remoteIdsForIds(items, result.purgedIds))
+                }
+                logPermanentDeleteOutcome(
+                    remoteIds.first(),
+                    requested = true,
+                    result = "PARTIAL_PURGE",
+                    reason = "SERVER_PURGE_INCOMPLETE",
+                    detail = "purged=${result.purgedIds.size}/${result.requested}"
+                )
+                return TrashMutationResult.Failed
+            }
+            PurgeMediaResult.NotFound -> {
+                logPermanentDeleteOutcome(
+                    remoteIds.first(), requested = false, result = "NOT_FOUND",
+                    reason = "NO_REMOTE_RECORD"
+                )
+                return TrashMutationResult.NotFound
+            }
+            PurgeMediaResult.Unauthorized -> {
+                logPermanentDeleteOutcome(
+                    remoteIds.first(), requested = true, result = "UNAUTHORIZED",
+                    reason = "SESSION_EXPIRED"
+                )
+                return TrashMutationResult.Failed
+            }
+            PurgeMediaResult.Failed -> {
+                logPermanentDeleteOutcome(
+                    remoteIds.first(), requested = true, result = "FAILED",
+                    reason = "SERVER_PURGE_FAILED"
+                )
+                return TrashMutationResult.Failed
+            }
+        }
+
+        logPermanentDeleteOutcome(
+            remoteIds.first(),
+            requested = true,
+            result = "PURGED",
+            reason = "PERMANENT_DELETE"
+        )
+        logThumbnailLifecycle(
+            operation = "permanent_delete",
+            mediaId = remoteIds.first(),
+            result = "PURGED",
+            reason = "PERMANENT_DELETE"
+        )
+        // The caller (Trash UI) finalizes local state on Success.
+        if (purgedIds.isEmpty()) return TrashMutationResult.Failed
+        return TrashMutationResult.Success
+    }
+
+    /** Maps server-purged remote ids back onto the local trash item ids. */
+    private fun remoteIdsForIds(items: List<MediaItem>, purgedRemoteIds: List<String>): List<String> {
+        val purged = purgedRemoteIds.toSet()
+        return items.filter { item -> resolveRemoteMediaId(item) in purged }.map { it.id }
+    }
+
+    private fun resolveRemoteMediaId(item: MediaItem): String? {
+        val record = syncRepository.records.value[item.id]
+        return (item.remoteMediaId ?: record?.remoteMediaId)?.takeIf { it.isNotBlank() }
+    }
+
+    private fun logPermanentDeleteOutcome(
+        mediaId: String,
+        requested: Boolean,
+        result: String,
+        reason: String,
+        detail: String? = null
+    ) {
+        DeveloperLogger.info(
+            category = LogCategory.THUMBNAIL,
+            event = "PERMANENT_DELETE",
+            message = permanentDeleteLog(mediaId, requested, result),
+            metadata = mapOf(
+                "operation" to "permanent_delete",
+                "media_id" to mediaId,
+                "server_purge_requested" to requested.toString(),
+                "server_purge_result" to result,
+                "reason" to reason,
+                "detail" to detail
+            )
+        )
+    }
+
+    private fun logThumbnailLifecycle(
+        operation: String,
+        mediaId: String,
+        result: String,
+        reason: String
+    ) {
+        DeveloperLogger.info(
+            category = LogCategory.THUMBNAIL,
+            event = "THUMBNAIL_LIFECYCLE",
+            message = buildString {
+                append("[THUMBNAIL_LIFECYCLE]\n")
+                append("operation=").append(operation).append('\n')
+                append("mediaId=").append(mediaId).append('\n')
+                append("result=").append(result).append('\n')
+                append("reason=").append(reason)
+            },
+            metadata = mapOf(
+                "operation" to operation,
+                "media_id" to mediaId,
+                "result" to result,
+                "reason" to reason
+            )
+        )
+    }
+
+    private fun permanentDeleteLog(mediaId: String, requested: Boolean, result: String): String =
+        buildString {
+            append("[PERMANENT_DELETE]\n")
+            append("mediaId=").append(mediaId).append('\n')
+            append("serverPurgeRequested=").append(requested).append('\n')
+            append("serverPurgeResult=").append(result)
+        }
 
     private suspend fun restoreCloudTrash(id: String) {
         val item = lookupAnyItem(id)
@@ -1810,10 +2000,19 @@ class MediaRepository(
         )
     }
 
-    private fun mutateTrashedMedia(context: Context, id: String, restore: Boolean): TrashMutationResult {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return TrashMutationResult.Unsupported
+    private suspend fun mutateTrashedMedia(context: Context, id: String, restore: Boolean): TrashMutationResult {
         val item = _trashedMedia.value.firstOrNull { it.id == id }
-        if (item == null) return TrashMutationResult.NotFound
+            ?: return TrashMutationResult.NotFound
+
+        // A media item with no local MediaStore copy lives only in My Drive. Its
+        // permanent deletion is the SERVER-side lifecycle (persistent thumbnail
+        // purge + tombstone), so it runs before the device-trash capability and
+        // permission checks: no MediaStore API is involved.
+        if (!restore && parseContentUri(item.uri) == null) {
+            return permanentlyDeleteCloudMedia(listOf(item))
+        }
+
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return TrashMutationResult.Unsupported
         val uri = parseContentUri(item.uri) ?: return TrashMutationResult.Failed
         if (!permissions.canReadMedia()) return TrashMutationResult.PermissionDenied
         val action = if (restore) "RESTORE" else "PERMANENT_DELETE"
@@ -1842,23 +2041,48 @@ class MediaRepository(
         }
     }
 
-    private fun mutateTrashedMediaBatch(
+    private suspend fun mutateTrashedMediaBatch(
         context: Context,
         ids: Collection<String>,
         restore: Boolean
     ): TrashMutationResult {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return TrashMutationResult.Unsupported
         val uniqueIds = ids.distinct()
         if (uniqueIds.isEmpty()) return TrashMutationResult.Success
-        if (!permissions.canReadMedia()) return TrashMutationResult.PermissionDenied
         val items = uniqueIds.mapNotNull { id -> _trashedMedia.value.firstOrNull { it.id == id } }
         if (items.isEmpty()) return TrashMutationResult.NotFound
-        val uris = items.mapNotNull { parseContentUri(it.uri) }
+
+        // Items with no local MediaStore copy live only in My Drive. Their permanent
+        // deletion is the server-side lifecycle, which needs neither the device
+        // trash API nor media permission — so resolve it before those checks.
+        val localItems = items.filter { parseContentUri(it.uri) != null }
+        if (!restore && localItems.size != items.size) {
+            val cloudOnly = items.filterNot { parseContentUri(it.uri) != null }
+            when (val purged = permanentlyDeleteCloudMedia(cloudOnly)) {
+                // Nothing is deleted locally unless the server deletion succeeded,
+                // so a failed purge can never leave a half-deleted selection.
+                is TrashMutationResult.Success -> Unit
+                else -> return purged
+            }
+        }
+        if (localItems.isEmpty()) {
+            // Restore keeps its existing behaviour: a cloud-only item is restored
+            // through the cloud trash path, not here.
+            return if (restore) TrashMutationResult.Failed else TrashMutationResult.Success
+        }
+
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return TrashMutationResult.Unsupported
+        if (!permissions.canReadMedia()) return TrashMutationResult.PermissionDenied
+        val uris = localItems.mapNotNull { parseContentUri(it.uri) }
         if (uris.isEmpty()) return TrashMutationResult.Failed
         val action = if (restore) "RESTORE" else "PERMANENT_DELETE"
-        val sample = items.first()
-        val baseMeta = mediaActionMetadata(action, sample) + mapOf("item_count" to items.size.toString())
-        _trashProgress.value = TrashOperationProgress(inProgress = true, processed = 0, total = items.size)
+        val sample = localItems.first()
+        val baseMeta = mediaActionMetadata(action, sample) +
+            mapOf("item_count" to localItems.size.toString())
+        _trashProgress.value = TrashOperationProgress(
+            inProgress = true,
+            processed = 0,
+            total = localItems.size
+        )
         return try {
             if (restore) {
                 val remaining = mutableListOf<Uri>()

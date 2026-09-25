@@ -12,6 +12,7 @@ import com.mydrive.app.data.media.MediaPermissions
 import com.mydrive.app.data.media.MediaStoreDataSource
 import com.mydrive.app.data.auth.AuthenticatedSessionProvider
 import com.mydrive.app.data.remote.CloudinaryUploadService
+import com.mydrive.app.data.remote.DurableMediaLifecycleClient
 import com.mydrive.app.data.remote.MediaFinalizeService
 import com.mydrive.app.data.remote.NetworkMonitor
 import com.mydrive.app.data.remote.SupabaseConfig
@@ -48,10 +49,23 @@ class MyDriveApp : Application() {
 
     private val networkMonitor: NetworkMonitor by lazy { NetworkMonitor(this) }
 
+    /**
+     * Server-side media lifecycle. Owns the one Android-reachable permanent
+     * deletion path (persistent thumbnail purge); Trash and Restore never call it.
+     */
+    private val mediaLifecycleClient by lazy {
+        DurableMediaLifecycleClient(supabaseClient, sessionProvider, networkMonitor)
+    }
+
     val mediaAssetsRepository: MediaAssetsRepository by lazy {
         // The connectivity check lets catalog reconciliation skip remote requests
         // while the device is clearly offline instead of failing them.
-        MediaAssetsRepository(supabaseClient, sessionProvider, networkMonitor)
+        MediaAssetsRepository(
+            client = supabaseClient,
+            sessionProvider = sessionProvider,
+            network = networkMonitor,
+            mediaLifecycleClient = mediaLifecycleClient
+        )
     }
 
     val mediaRepository: MediaRepository by lazy {

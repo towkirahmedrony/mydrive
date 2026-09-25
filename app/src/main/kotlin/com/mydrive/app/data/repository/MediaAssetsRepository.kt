@@ -11,6 +11,8 @@ import com.mydrive.app.data.media.MediaSyncPage
 import com.mydrive.app.data.media.RemoteFailureClassifier
 import com.mydrive.app.data.media.RemoteMediaException
 import com.mydrive.app.data.media.RemoteMediaFailure
+import com.mydrive.app.data.remote.DurableMediaLifecycleClient
+import com.mydrive.app.data.remote.MediaPurgeResult
 import com.mydrive.app.data.remote.NetworkMonitor
 import com.mydrive.app.data.remote.dto.DriveArchiveJobRow
 import com.mydrive.app.data.remote.dto.MediaAssetRow
@@ -43,10 +45,29 @@ sealed class HideMediaResult {
     data object Failed : HideMediaResult()
 }
 
+/**
+ * Outcome of the server-side permanent deletion of media.
+ *
+ * [Partial] is not a success: some media were not purged, so the caller must not
+ * report the deletion as complete.
+ */
+sealed class PurgeMediaResult {
+    data class Success(val purgedIds: List<String>) : PurgeMediaResult()
+    data class Partial(val purgedIds: List<String>, val requested: Int) : PurgeMediaResult()
+    data object NotFound : PurgeMediaResult()
+    data object Unauthorized : PurgeMediaResult()
+    data object Failed : PurgeMediaResult()
+}
+
 class MediaAssetsRepository(
     private val client: SupabaseClient?,
     private val sessionProvider: AuthenticatedSessionProvider,
-    private val network: NetworkMonitor
+    private val network: NetworkMonitor,
+    /**
+     * Server-side media lifecycle (permanent deletion). Defaulted so the
+     * repository still constructs in a build without a configured backend.
+     */
+    private val mediaLifecycleClient: DurableMediaLifecycleClient? = null
 ) {
 
     /**
@@ -438,6 +459,50 @@ class MediaAssetsRepository(
         val resolvedId = resolveRemoteId(remoteMediaId, localMediaId, clientUploadId)
             ?: return HideMediaResult.NotFound
         return unhideFromLibrary(resolvedId)
+    }
+
+    /**
+     * Permanently deletes the given media through the server-side lifecycle.
+     *
+     * This is the ONLY Android-reachable path that makes a persistent thumbnail
+     * eligible for deletion; moving media to Trash or restoring it never does.
+     * The server authorizes the request against `media_assets.owner_id`, removes
+     * the thumbnail, deletes the Cloudinary original only behind a verified Drive
+     * archive, and tombstones the record.
+     */
+    suspend fun purgeMediaAssets(remoteMediaIds: Collection<String>): PurgeMediaResult {
+        val ids = remoteMediaIds
+            .asSequence()
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+            .distinct()
+            .toList()
+        if (ids.isEmpty()) return PurgeMediaResult.NotFound
+        val lifecycle = mediaLifecycleClient
+        if (lifecycle == null) {
+            DeveloperLogger.error(
+                category = LogCategory.THUMBNAIL,
+                event = "PERMANENT_DELETE",
+                message = "Permanent delete requested without a configured media lifecycle client",
+                metadata = mapOf(
+                    "media_count" to ids.size.toString(),
+                    "server_purge_requested" to "false",
+                    "server_purge_result" to "MISCONFIGURED"
+                )
+            )
+            return PurgeMediaResult.Failed
+        }
+        return when (val result = lifecycle.purge(ids)) {
+            is MediaPurgeResult.Success -> PurgeMediaResult.Success(result.purgedIds)
+            is MediaPurgeResult.Partial ->
+                PurgeMediaResult.Partial(result.purgedIds, result.requested)
+            MediaPurgeResult.Unauthorized -> PurgeMediaResult.Unauthorized
+            MediaPurgeResult.NetworkUnavailable,
+            MediaPurgeResult.Timeout,
+            MediaPurgeResult.Misconfigured,
+            is MediaPurgeResult.Rejected,
+            is MediaPurgeResult.Error -> PurgeMediaResult.Failed
+        }
     }
 
     private suspend fun resolveRemoteId(
