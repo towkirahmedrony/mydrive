@@ -16,11 +16,9 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Photo
 import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material.icons.outlined.Photo
 import androidx.compose.material.icons.outlined.PhotoLibrary
 import androidx.compose.material.icons.outlined.Settings
-import androidx.compose.material.icons.outlined.Sync
 import androidx.compose.material.icons.outlined.BugReport
 import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.Icon
@@ -96,7 +94,6 @@ private data class TabItem(
 private val tabs = listOf(
     TabItem(AppDestination.Photos, "Photos", Icons.Filled.Photo, Icons.Outlined.Photo),
     TabItem(AppDestination.Albums, "Albums", Icons.Filled.PhotoLibrary, Icons.Outlined.PhotoLibrary),
-    TabItem(AppDestination.Sync, "Sync", Icons.Filled.Sync, Icons.Outlined.Sync),
     TabItem(AppDestination.Settings, "Settings", Icons.Filled.Settings, Icons.Outlined.Settings)
 )
 
@@ -224,7 +221,8 @@ fun AppNavHost(
                     },
                     onOpenTelegramSettings = {
                         navController.navigate(AppDestination.TelegramSettings.route)
-                    }
+                    },
+                    onBack = { navController.popBackStack() }
                 )
             }
             composable(AppDestination.Settings.route) {
@@ -234,6 +232,7 @@ fun AppNavHost(
                 )
                 SettingsScreen(
                     viewModel = vm,
+                    onOpenSync = { navController.navigate(AppDestination.Sync.route) },
                     onOpenTelegram = { navController.navigate(AppDestination.TelegramSettings.route) },
                     onOpenDeveloperConsole = { navController.navigate(AppDestination.DeveloperConsole.route) }
                 )

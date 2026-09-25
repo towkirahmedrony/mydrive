@@ -32,7 +32,6 @@ sealed class AppDestination(val route: String) {
 val bottomDestinations = listOf(
     AppDestination.Photos,
     AppDestination.Albums,
-    AppDestination.Sync,
     AppDestination.Settings
 )
 

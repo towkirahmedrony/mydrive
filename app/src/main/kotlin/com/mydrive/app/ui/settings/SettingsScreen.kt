@@ -23,6 +23,7 @@ import androidx.compose.material.icons.outlined.Description
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.NotificationsNone
 import androidx.compose.material.icons.outlined.Policy
+import androidx.compose.material.icons.outlined.Sync
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -45,6 +46,7 @@ import com.mydrive.app.ui.theme.Spacing
 @Composable
 fun SettingsScreen(
     viewModel: SettingsViewModel,
+    onOpenSync: () -> Unit,
     onOpenTelegram: () -> Unit,
     onOpenDeveloperConsole: () -> Unit = {}
 ) {
@@ -105,6 +107,24 @@ fun SettingsScreen(
                     title = "Logout",
                     leading = Icons.AutoMirrored.Outlined.Logout,
                     onClick = viewModel::logout
+                )
+            }
+        }
+
+        item {
+            SettingsGroup(title = "Sync") {
+                SettingsRow(
+                    title = "Sync",
+                    subtitle = "Backup progress and upload queue",
+                    leading = Icons.Outlined.Sync,
+                    onClick = onOpenSync,
+                    trailing = {
+                        Icon(
+                            Icons.AutoMirrored.Outlined.KeyboardArrowRight,
+                            contentDescription = null,
+                            tint = colors.onSurfaceVariant
+                        )
+                    }
                 )
             }
         }

@@ -1,6 +1,7 @@
 package com.mydrive.app.ui.sync
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -16,8 +17,10 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.Cancel
 import androidx.compose.material.icons.outlined.CloudDone
 import androidx.compose.material.icons.outlined.CloudQueue
@@ -72,7 +75,8 @@ import com.mydrive.app.ui.util.formatTimeAgo
 fun SyncScreen(
     viewModel: SyncViewModel,
     onMediaClick: (String) -> Unit,
-    onOpenTelegramSettings: () -> Unit
+    onOpenTelegramSettings: () -> Unit,
+    onBack: (() -> Unit)? = null
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -101,7 +105,27 @@ fun SyncScreen(
         verticalArrangement = Arrangement.spacedBy(Spacing.sm)
     ) {
         item(key = "header") {
-            Text("Sync", style = MaterialTheme.typography.headlineMedium, color = colors.onBackground)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                if (onBack != null) {
+                    Box(
+                        modifier = Modifier
+                            .size(40.dp)
+                            .clip(CircleShape)
+                            .background(colors.surfaceVariant)
+                            .border(1.dp, colors.outlineVariant, CircleShape)
+                            .clickable(onClick = onBack),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            Icons.AutoMirrored.Outlined.ArrowBack,
+                            contentDescription = "Back",
+                            tint = colors.onSurface
+                        )
+                    }
+                    Spacer(Modifier.width(Spacing.md))
+                }
+                Text("Sync", style = MaterialTheme.typography.headlineMedium, color = colors.onBackground)
+            }
         }
 
         item(key = "status") {
