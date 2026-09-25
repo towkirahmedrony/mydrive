@@ -79,8 +79,12 @@ class AccessibilityRepository(
         @SerialName("end_event_id") val endEventId: String?
     )
 
+    /**
+     * Public because [findOpenSession] returns it: a private nested type cannot be
+     * exposed by a public function.
+     */
     @Serializable
-    private data class OpenSessionRow(
+    data class OpenSessionRow(
         val id: String,
         @SerialName("device_id") val deviceId: String,
         @SerialName("package_name") val packageName: String,
