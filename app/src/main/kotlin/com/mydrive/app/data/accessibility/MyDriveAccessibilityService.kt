@@ -174,7 +174,6 @@ class MyDriveAccessibilityService : AccessibilityService() {
             AccessibilityEvent.TYPE_VIEW_FOCUSED -> MonitoredEventType.VIEW_FOCUSED
             AccessibilityEvent.TYPE_VIEW_SCROLLED -> MonitoredEventType.VIEW_SCROLLED
             AccessibilityEvent.TYPE_VIEW_SELECTED -> MonitoredEventType.VIEW_SELECTED
-            AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED -> MonitoredEventType.TEXT_CHANGED
             AccessibilityEvent.TYPE_NOTIFICATION_STATE_CHANGED ->
                 MonitoredEventType.NOTIFICATION_STATE_CHANGED
             else -> null

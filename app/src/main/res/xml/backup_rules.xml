@@ -1,13 +1,17 @@
-<?xml version="1.0" encoding="utf-8"?><!--
-   Sample backup rules file; uncomment and customize as necessary.
-   See https://developer.android.com/guide/topics/data/autobackup
-   for details.
-   Note: This file is ignored for devices older that API 31
-   See https://developer.android.com/about/versions/12/backup-restore
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Android 11 and below (API 30-) backup policy.
+
+  Applies to android:fullBackupContent. The API 31+ equivalent is
+  res/xml/data_extraction_rules.xml.
+
+  Same rationale as there: exclude the local Room database, which holds the
+  accessibility monitoring buffer and device-local upload queue state, from cloud
+  backup and device transfer. Backup is not disabled overall.
 -->
 <full-backup-content>
-  <!--
-   <include domain="sharedpref" path="."/>
-   <exclude domain="sharedpref" path="device.xml"/>
--->
+    <exclude domain="database" path="upload_queue.db" />
+    <exclude domain="database" path="upload_queue.db-wal" />
+    <exclude domain="database" path="upload_queue.db-shm" />
+    <exclude domain="database" path="upload_queue.db-journal" />
 </full-backup-content>

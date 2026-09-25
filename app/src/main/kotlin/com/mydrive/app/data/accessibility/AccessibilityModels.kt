@@ -21,7 +21,10 @@ enum class MonitoredEventType(val wireName: String, val category: EventCategory)
     VIEW_FOCUSED("VIEW_FOCUSED", EventCategory.INTERACTION),
     VIEW_SCROLLED("VIEW_SCROLLED", EventCategory.INTERACTION),
     VIEW_SELECTED("VIEW_SELECTED", EventCategory.INTERACTION),
-    TEXT_CHANGED("TEXT_CHANGED", EventCategory.TEXT),
+    // TYPE_VIEW_TEXT_CHANGED is intentionally not modelled or subscribed: the
+    // monitoring requirement excludes typed text, and it was the only
+    // subscription capable of observing user input. No substitute text or
+    // keystroke collection exists.
     NOTIFICATION_STATE_CHANGED("NOTIFICATION_STATE_CHANGED", EventCategory.NOTIFICATION);
 
     companion object {

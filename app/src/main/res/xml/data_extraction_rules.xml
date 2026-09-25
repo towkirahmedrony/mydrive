@@ -1,19 +1,28 @@
-<?xml version="1.0" encoding="utf-8"?><!--
-   Sample data extraction rules file; uncomment and customize as necessary.
-   See https://developer.android.com/about/versions/12/backup-restore#xml-changes
-   for details.
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Android 12+ (API 31+) backup and device-transfer policy.
+
+  Applies to android:dataExtractionRules. Android below 31 uses the sibling
+  res/xml/backup_rules.xml (android:fullBackupContent) instead.
+
+  Why: the local Room database holds the accessibility monitoring buffer
+  (`accessibility_outbox`) together with device-local upload queue state. That
+  data describes a specific device's activity and is only meaningful on the
+  device that produced it, so it must not travel through cloud backup or a
+  device-to-device transfer. Everything else the app stores may still be backed
+  up, so backup is NOT disabled overall (allowBackup stays true).
 -->
 <data-extraction-rules>
-  <cloud-backup>
-    <!-- TODO: Use <include> and <exclude> to control what is backed up.
-        <include .../>
-        <exclude .../>
-        -->
-  </cloud-backup>
-  <!--
+    <cloud-backup>
+        <exclude domain="database" path="upload_queue.db" />
+        <exclude domain="database" path="upload_queue.db-wal" />
+        <exclude domain="database" path="upload_queue.db-shm" />
+        <exclude domain="database" path="upload_queue.db-journal" />
+    </cloud-backup>
     <device-transfer>
-        <include .../>
-        <exclude .../>
+        <exclude domain="database" path="upload_queue.db" />
+        <exclude domain="database" path="upload_queue.db-wal" />
+        <exclude domain="database" path="upload_queue.db-shm" />
+        <exclude domain="database" path="upload_queue.db-journal" />
     </device-transfer>
-    -->
 </data-extraction-rules>

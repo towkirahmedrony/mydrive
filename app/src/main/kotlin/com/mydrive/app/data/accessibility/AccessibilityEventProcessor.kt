@@ -122,13 +122,15 @@ class AccessibilityEventProcessor(
             activityName = foreground?.takeIf { it.packageName == raw.packageName }?.activityName,
             eventTime = raw.eventTime,
             windowId = raw.windowId,
-            // Only kept for window events, where it describes the screen rather
-            // than user-entered content.
-            windowTitle = if (type == MonitoredEventType.WINDOW_STATE_CHANGED) {
-                raw.visibleText.firstOrNull { it.isNotBlank() }?.take(MAX_TITLE_CHARS)
-            } else {
-                null
-            },
+            // Window titles are screen-derived text taken from whatever app is in
+            // the foreground, so they are no longer persisted. Package name,
+            // activity/class, event type and time already identify the activity,
+            // which is what the monitoring feature needs.
+            //
+            // The field is kept (always null) so the Room schema, the wire row and
+            // the existing `window_title` column stay compatible without a
+            // migration; nothing is stored in it.
+            windowTitle = null,
             eventText = text?.take(MAX_TEXT_CHARS),
             contentDescription = description?.take(MAX_TEXT_CHARS),
             className = raw.className,
@@ -193,6 +195,5 @@ class AccessibilityEventProcessor(
 
         /** Bounds a single stored string so a long UI text cannot bloat a row. */
         const val MAX_TEXT_CHARS = 200
-        const val MAX_TITLE_CHARS = 200
     }
 }

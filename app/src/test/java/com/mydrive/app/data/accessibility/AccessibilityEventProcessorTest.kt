@@ -125,7 +125,7 @@ class AccessibilityEventProcessorTest {
             processor,
             windowEvent(
                 at = 1_000L,
-                type = MonitoredEventType.TEXT_CHANGED,
+                type = MonitoredEventType.VIEW_FOCUSED,
                 text = listOf("hunter2"),
                 password = true
             )
@@ -142,10 +142,10 @@ class AccessibilityEventProcessorTest {
     fun `non-password text is stored`() {
         val outcome = emit(
             processor(),
-            windowEvent(at = 1_000L, type = MonitoredEventType.TEXT_CHANGED, text = listOf("invoice.pdf"))
+            windowEvent(at = 1_000L, type = MonitoredEventType.VIEW_CLICKED, text = listOf("Delete"))
         )
         outcome as AccessibilityEventProcessor.Outcome.Emit
-        assertEquals("invoice.pdf", outcome.event.eventText)
+        assertEquals("Delete", outcome.event.eventText)
         assertFalse(outcome.event.isPasswordField)
     }
 
@@ -221,10 +221,43 @@ class AccessibilityEventProcessorTest {
         val long = "x".repeat(1_000)
         val outcome = emit(
             processor(),
-            windowEvent(at = 1_000L, type = MonitoredEventType.TEXT_CHANGED, text = listOf(long))
+            windowEvent(at = 1_000L, type = MonitoredEventType.VIEW_CLICKED, text = listOf(long))
         )
         outcome as AccessibilityEventProcessor.Outcome.Emit
         assertEquals(AccessibilityEventProcessor.MAX_TEXT_CHARS, outcome.event.eventText?.length)
+    }
+
+    // ── text-change events are no longer subscribed at all ───────────────────
+
+    @Test
+    fun `no text-change event type is monitored`() {
+        // The monitoring requirement excludes typed text, so there must be no
+        // subscription (and no enum entry) that can observe user input.
+        assertTrue(
+            MonitoredEventType.entries.none { it.wireName == "TEXT_CHANGED" }
+        )
+    }
+
+    @Test
+    fun `unsubscribed text-change type maps to nothing`() {
+        // Guards the service mapping too: even if Android delivered the event, the
+        // service would have no mapping for it and would drop it.
+        assertEquals(null, MonitoredEventType.fromWireName("TEXT_CHANGED"))
+    }
+
+    // ── window titles are no longer persisted ────────────────────────────────
+
+    @Test
+    fun `window title is never persisted`() {
+        val outcome = emit(
+            processor(),
+            windowEvent(at = 1_000L, text = listOf("Inbox - confidential subject"))
+        )
+        outcome as AccessibilityEventProcessor.Outcome.Emit
+        assertNull(
+            "screen-derived window text must not be stored",
+            outcome.event.windowTitle
+        )
     }
 
     @Test
