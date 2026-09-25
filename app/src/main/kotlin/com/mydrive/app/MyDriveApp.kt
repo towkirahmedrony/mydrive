@@ -7,10 +7,14 @@ import com.mydrive.app.data.local.GalleryTabStore
 import com.mydrive.app.data.local.SyncStateStore
 import com.mydrive.app.data.local.TelegramSettingsStore
 import com.mydrive.app.data.local.UploadQueueDatabase
+import com.mydrive.app.data.local.VaultDao
 import com.mydrive.app.data.media.MediaDiskCache
 import com.mydrive.app.data.media.MediaPermissions
 import com.mydrive.app.data.media.MediaStoreDataSource
 import com.mydrive.app.data.auth.AuthenticatedSessionProvider
+import com.mydrive.app.data.vault.VaultCrypto
+import com.mydrive.app.data.vault.VaultPinManager
+import com.mydrive.app.data.vault.VaultSession
 import com.mydrive.app.data.remote.CloudinaryUploadService
 import com.mydrive.app.data.remote.DurableMediaLifecycleClient
 import com.mydrive.app.data.remote.MediaFinalizeService
@@ -90,6 +94,18 @@ class MyDriveApp : Application() {
     }
 
     val developerModeStore: DeveloperModeStore by lazy { DeveloperModeStore(this) }
+
+    /** Private Vault: local state, at-rest encryption and the PIN verifier. */
+    val vaultDao: VaultDao by lazy { UploadQueueDatabase.get(this).vaultDao() }
+    val vaultCrypto: VaultCrypto by lazy { VaultCrypto(this) }
+    val vaultPinManager: VaultPinManager by lazy { VaultPinManager(this) }
+
+    /**
+     * App-scoped on purpose: the unlocked state must survive navigation between the
+     * vault screen and the viewer, and be shared by every vault screen. It holds a
+     * boolean and a timestamp only — never decrypted content or key material.
+     */
+    val vaultSession: VaultSession by lazy { VaultSession() }
 
     val supabaseClient by lazy {
         if (SupabaseConfig.isConfigured) SupabaseModule.create() else null

@@ -27,6 +27,13 @@ sealed class AppDestination(val route: String) {
     }
     data object TelegramSettings : AppDestination("settings/telegram")
     data object DeveloperConsole : AppDestination("settings/developer-console")
+
+    /**
+     * Private Vault entry point, reached from Settings. It is deliberately NOT in
+     * [bottomDestinations] or [galleryDestinations]: hidden media must not be
+     * discoverable from the normal Photos/Albums navigation.
+     */
+    data object HiddenPhotos : AppDestination("settings/hidden-photos")
 }
 
 val bottomDestinations = listOf(

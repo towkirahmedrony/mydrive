@@ -74,6 +74,9 @@ import com.mydrive.app.ui.permission.MediaAccessRequest
 import com.mydrive.app.ui.settings.SettingsScreen
 import com.mydrive.app.ui.settings.SettingsViewModel
 import com.mydrive.app.ui.settings.TelegramSettingsScreen
+import com.mydrive.app.data.vault.VaultBiometricGate
+import com.mydrive.app.ui.vault.VaultScreen
+import com.mydrive.app.ui.vault.VaultViewModel
 import com.mydrive.app.ui.sync.SyncScreen
 import com.mydrive.app.ui.sync.SyncViewModel
 import com.mydrive.app.ui.theme.Copper
@@ -247,7 +250,8 @@ fun AppNavHost(
                     viewModel = vm,
                     onOpenSync = { navController.navigate(AppDestination.Sync.route) },
                     onOpenTelegram = { navController.navigate(AppDestination.TelegramSettings.route) },
-                    onOpenDeveloperConsole = { navController.navigate(AppDestination.DeveloperConsole.route) }
+                    onOpenDeveloperConsole = { navController.navigate(AppDestination.DeveloperConsole.route) },
+                    onOpenHiddenPhotos = { navController.navigate(AppDestination.HiddenPhotos.route) }
                 )
             }
             composable(
@@ -321,6 +325,20 @@ fun AppNavHost(
                     factory = SettingsViewModel.factory(repository, authRepository)
                 )
                 TelegramSettingsScreen(viewModel = vm, onBack = { navController.popBackStack() })
+            }
+            composable(AppDestination.HiddenPhotos.route) {
+                val app = LocalContext.current.applicationContext as MyDriveApp
+                val vm: VaultViewModel = viewModel(
+                    factory = VaultViewModel.factory(
+                        vaultDao = app.vaultDao,
+                        pinManager = app.vaultPinManager,
+                        session = app.vaultSession,
+                        biometricAvailable = { VaultBiometricGate.canOfferBiometric(app) }
+                    )
+                )
+                // Reuses the existing vault authentication/session layer: this route
+                // adds navigation only, no second auth implementation.
+                VaultScreen(viewModel = vm, onBack = { navController.popBackStack() })
             }
                 composable(AppDestination.DeveloperConsole.route) {
                 val app = LocalContext.current.applicationContext as MyDriveApp

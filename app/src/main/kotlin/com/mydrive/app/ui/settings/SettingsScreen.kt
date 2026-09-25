@@ -23,6 +23,7 @@ import androidx.compose.material.icons.outlined.Description
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.NotificationsNone
 import androidx.compose.material.icons.outlined.Policy
+import androidx.compose.material.icons.outlined.Lock
 import androidx.compose.material.icons.outlined.Sync
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -48,7 +49,8 @@ fun SettingsScreen(
     viewModel: SettingsViewModel,
     onOpenSync: () -> Unit,
     onOpenTelegram: () -> Unit,
-    onOpenDeveloperConsole: () -> Unit = {}
+    onOpenDeveloperConsole: () -> Unit = {},
+    onOpenHiddenPhotos: () -> Unit = {}
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val colors = MaterialTheme.colorScheme
@@ -161,6 +163,24 @@ fun SettingsScreen(
                     title = "Upload while charging",
                     checked = state.preferences.uploadWhileCharging,
                     onCheckedChange = viewModel::setUploadWhileCharging
+                )
+            }
+        }
+
+        item {
+            SettingsGroup(title = "Privacy") {
+                SettingsRow(
+                    title = "Hidden Photos",
+                    subtitle = "Encrypted on this device, unlocked with your vault PIN",
+                    leading = Icons.Outlined.Lock,
+                    onClick = onOpenHiddenPhotos,
+                    trailing = {
+                        Icon(
+                            Icons.AutoMirrored.Outlined.KeyboardArrowRight,
+                            contentDescription = null,
+                            tint = colors.onSurfaceVariant
+                        )
+                    }
                 )
             }
         }
