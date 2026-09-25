@@ -26,7 +26,7 @@ import {
   getDriveAccessToken,
   GoogleDriveRestClient,
 } from "./google-drive.ts";
-import type { DriveAccount } from "./drive-router.ts";
+import { markDriveAccountResult, type DriveAccount } from "./drive-router.ts";
 
 type AdminClient = ReturnType<typeof getSupabaseAdmin>;
 
@@ -246,10 +246,58 @@ export async function accessTokenForAccount(
     throw new Error("Could not retrieve Drive refresh token from secret store");
   }
 
-  const { accessToken } = await getDriveAccessToken({
-    refreshToken: refreshToken as string,
-  });
+  const { accessToken } = await exchangeOrRecordFailure(
+    admin,
+    driveAccountId,
+    refreshToken as string,
+  );
   return accessToken;
+}
+
+/**
+ * Exchanges the refresh token, recording an unusable credential on the account
+ * before rethrowing.
+ *
+ * A refresh token can stop working at any time: Google expires the refresh
+ * tokens of an OAuth app whose publishing status is still "Testing" after 7
+ * days, and a user can revoke access at any moment. That failure has to be
+ * durably visible, because without it the account keeps advertising itself as
+ * healthy while every Drive read fails — the gallery then renders such media as
+ * "unavailable" and nothing in the system points at the real cause.
+ *
+ * `reauth_required` is the state the schema already defines for this, and
+ * re-authorization already clears it: `google-oauth-callback` resets a
+ * `reauth_required` account back to `active`. This closes that loop.
+ *
+ * Recording is best-effort — the credential error is always the one thrown.
+ */
+async function exchangeOrRecordFailure(
+  admin: AdminClient,
+  driveAccountId: string,
+  refreshToken: string,
+): Promise<{ accessToken: string }> {
+  try {
+    return await getDriveAccessToken({ refreshToken });
+  } catch (err) {
+    const message = (err as Error)?.message ?? "Drive credential exchange failed";
+    try {
+      await markDriveAccountResult(admin, driveAccountId, {
+        status: "reauth_required",
+        healthStatus: "unhealthy",
+        // Already sanitized by getDriveAccessToken: it keeps Google's stable
+        // error code (`invalid_grant`, `invalid_client`, …) and redacts token
+        // material.
+        lastError: message.slice(0, 500),
+      });
+    } catch (recordError) {
+      console.error(
+        `[DRIVE_CREDENTIAL] action=RECORD_FAILED reason=${
+          (recordError as Error)?.message ?? "unknown"
+        }`,
+      );
+    }
+    throw err;
+  }
 }
 
 /** Human-friendly, Drive-safe folder name for a user (falls back to user id). */
