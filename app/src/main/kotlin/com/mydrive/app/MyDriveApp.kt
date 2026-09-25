@@ -11,8 +11,6 @@ import com.mydrive.app.data.media.MediaDiskCache
 import com.mydrive.app.data.media.MediaPermissions
 import com.mydrive.app.data.media.MediaStoreDataSource
 import com.mydrive.app.data.auth.AuthenticatedSessionProvider
-import com.mydrive.app.data.accessibility.AccessibilityMonitoringCoordinator
-import com.mydrive.app.data.accessibility.AccessibilityRepository
 import com.mydrive.app.data.remote.CloudinaryUploadService
 import com.mydrive.app.data.remote.DurableMediaLifecycleClient
 import com.mydrive.app.data.remote.MediaFinalizeService
@@ -54,27 +52,6 @@ class MyDriveApp : Application() {
 
     private val networkMonitor: NetworkMonitor by lazy { NetworkMonitor(this) }
 
-    /** Supabase access for the accessibility monitoring tables. */
-    private val accessibilityRepository by lazy {
-        AccessibilityRepository(supabaseClient, sessionProvider, networkMonitor)
-    }
-
-    /**
-     * Accessibility monitoring foundation for company-owned devices.
-     *
-     * Buffers processed accessibility events in the existing Room outbox and
-     * uploads them through the existing WorkManager infrastructure, so the
-     * AccessibilityService itself performs no database or network I/O. Read by
-     * [com.mydrive.app.data.accessibility.MyDriveAccessibilityService].
-     */
-    val accessibilityMonitoringCoordinator by lazy {
-        AccessibilityMonitoringCoordinator(
-            context = this,
-            outboxDao = UploadQueueDatabase.get(this).accessibilityOutboxDao(),
-            repository = accessibilityRepository,
-            deviceIdProvider = { authRepository.ensureDeviceRegistered() }
-        )
-    }
 
     /**
      * Server-side media lifecycle. Owns the one Android-reachable permanent

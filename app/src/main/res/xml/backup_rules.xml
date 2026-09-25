@@ -5,9 +5,9 @@
   Applies to android:fullBackupContent. The API 31+ equivalent is
   res/xml/data_extraction_rules.xml.
 
-  Same rationale as there: exclude the local Room database, which holds the
-  accessibility monitoring buffer and device-local upload queue state, from cloud
-  backup and device transfer. Backup is not disabled overall.
+  Same rationale as there: exclude the local Room database (a device-local upload
+  queue keyed to this install's device registration) from cloud backup and device
+  transfer. Backup is not disabled overall.
 -->
 <full-backup-content>
     <exclude domain="database" path="upload_queue.db" />

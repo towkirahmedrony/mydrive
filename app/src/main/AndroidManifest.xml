@@ -45,23 +45,5 @@
             </intent-filter>
         </activity>
 
-        <!--
-          Company-owned device activity monitoring. The service is only bound by
-          Android after an authorised user enables it in Accessibility settings,
-          and it must be declared with BIND_ACCESSIBILITY_SERVICE.
-        -->
-        <service
-            android:name=".data.accessibility.MyDriveAccessibilityService"
-            android:exported="true"
-            android:label="@string/accessibility_monitoring_service_summary"
-            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
-            <intent-filter>
-                <action android:name="android.accessibilityservice.AccessibilityService" />
-            </intent-filter>
-            <meta-data
-                android:name="android.accessibilityservice"
-                android:resource="@xml/accessibility_monitoring_config" />
-        </service>
-
     </application>
 </manifest>

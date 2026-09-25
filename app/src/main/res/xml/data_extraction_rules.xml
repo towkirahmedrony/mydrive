@@ -5,12 +5,12 @@
   Applies to android:dataExtractionRules. Android below 31 uses the sibling
   res/xml/backup_rules.xml (android:fullBackupContent) instead.
 
-  Why: the local Room database holds the accessibility monitoring buffer
-  (`accessibility_outbox`) together with device-local upload queue state. That
-  data describes a specific device's activity and is only meaningful on the
-  device that produced it, so it must not travel through cloud backup or a
-  device-to-device transfer. Everything else the app stores may still be backed
-  up, so backup is NOT disabled overall (allowBackup stays true).
+  Why: the local Room database is a device-local upload queue whose records are
+  only meaningful on the device that produced them (they are keyed to that
+  install's device registration). Restoring it onto another device could make the
+  app treat un-uploaded media as already backed up, so it must not travel through
+  cloud backup or device-to-device transfer. Everything else the app stores may
+  still be backed up, so backup is NOT disabled overall (allowBackup stays true).
 -->
 <data-extraction-rules>
     <cloud-backup>

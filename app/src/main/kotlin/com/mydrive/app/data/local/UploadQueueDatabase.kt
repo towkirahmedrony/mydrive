@@ -59,19 +59,15 @@ interface UploadQueueDao {
 }
 
 /**
- * The app's single Room database. Accessibility monitoring buffers its events in
- * `accessibility_outbox` here rather than in a second database, so there is one
- * local queue and one WorkManager setup shared with the media upload pipeline.
+ * The app's single Room database, holding the media upload queue.
  */
 @Database(
-    entities = [UploadQueueEntity::class, AccessibilityOutboxEntity::class],
-    version = 3,
+    entities = [UploadQueueEntity::class],
+    version = 4,
     exportSchema = false
 )
 abstract class UploadQueueDatabase : RoomDatabase() {
     abstract fun uploadQueueDao(): UploadQueueDao
-
-    abstract fun accessibilityOutboxDao(): AccessibilityOutboxDao
 
     companion object {
         @Volatile private var instance: UploadQueueDatabase? = null
@@ -83,9 +79,9 @@ abstract class UploadQueueDatabase : RoomDatabase() {
         }
 
         /**
-         * Adds the accessibility event buffer. Column names and affinities must
-         * match [AccessibilityOutboxEntity] exactly: Room validates the schema when
-         * the database is opened.
+         * Historical step retained on purpose: it created the accessibility event
+         * buffer that MIGRATION_3_4 now removes, so a device still on schema v2 can
+         * upgrade along 2 -> 3 -> 4 without a destructive fallback.
          */
         private val MIGRATION_2_3 = object : Migration(2, 3) {
             override fun migrate(database: SupportSQLiteDatabase) {
@@ -114,12 +110,24 @@ abstract class UploadQueueDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * The accessibility monitoring feature was removed from the app, so its
+         * local event buffer is dropped. This deletes only device-local queued
+         * monitoring events; nothing server-side is touched, and the media upload
+         * queue in the same database is untouched.
+         */
+        private val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL("DROP TABLE IF EXISTS `accessibility_outbox`")
+            }
+        }
+
         fun get(context: Context): UploadQueueDatabase = instance ?: synchronized(this) {
             instance ?: Room.databaseBuilder(
                 context.applicationContext,
                 UploadQueueDatabase::class.java,
                 "upload_queue.db"
-            ).addMigrations(MIGRATION_1_2, MIGRATION_2_3).build().also { instance = it }
+            ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4).build().also { instance = it }
         }
     }
 }

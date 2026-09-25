@@ -1,27 +1,4 @@
 <resources>
     <string name="app_name">My Drive</string>
 
-    <!--
-      Accessibility monitoring (company-owned devices).
-      The wording states plainly what is collected and why. It must never imply a
-      narrower or broader purpose than the Accessibility service actually has.
-    -->
-    <string name="accessibility_monitoring_service_summary">Company device activity monitoring</string>
-    <string name="accessibility_monitoring_service_description">This company-owned device reports basic app and screen activity (which app is in the foreground, window changes and simple interaction flags) to your organisation\'s My Drive admin console. It does not record your screen, microphone, camera, location or keystrokes, and it never stores what you type into password fields.</string>
-
-    <string name="accessibility_monitoring_title">Device activity monitoring</string>
-    <string name="accessibility_monitoring_company_notice">This is a company-owned device. Accessibility monitoring is enabled by your organisation and is disclosed here before you turn it on.</string>
-    <string name="accessibility_monitoring_enabled">Monitoring is on</string>
-    <string name="accessibility_monitoring_disabled">Monitoring is off</string>
-    <string name="accessibility_monitoring_service_connected">Service connected</string>
-    <string name="accessibility_monitoring_service_disconnected">Service not connected</string>
-    <string name="accessibility_monitoring_status_unknown">Status not available yet</string>
-    <string name="accessibility_monitoring_why_title">Why this permission is needed</string>
-    <string name="accessibility_monitoring_why_body">Android only exposes app and window activity through the Accessibility service. The permission is used solely to record the activity categories listed below for your organisation\'s admin console.</string>
-    <string name="accessibility_monitoring_collected_title">What is collected</string>
-    <string name="accessibility_monitoring_collected_body">Foreground app and screen changes, simple interaction flags (tap, focus, scroll) and, only when your organisation enables it, window text and notification events. Values typed into password fields are never collected or stored.</string>
-    <string name="accessibility_monitoring_not_collected_title">What is never collected</string>
-    <string name="accessibility_monitoring_not_collected_body">Your screen contents, microphone, camera, location, keystrokes or password values are not captured.</string>
-    <string name="accessibility_monitoring_open_settings">Open Android Accessibility settings</string>
-    <string name="accessibility_monitoring_open_settings_hint">Android requires you to enable this yourself in Settings. My Drive cannot and will not enable it for you.</string>
 </resources>
