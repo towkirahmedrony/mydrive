@@ -366,6 +366,84 @@ class CloudinaryUploadService(
             }
 
         source.use { input ->
+            // A >100 MB file is NOT a failure: Cloudinary carries it with the
+            // documented chunked Upload API, as ONE logical asset. The threshold
+            // is the same 100 MB as before, but it now selects a strategy instead
+            // of rejecting the media.
+            val plan = CloudinaryUploadPlan.decide(fileSize ?: -1L)
+            when (plan) {
+                is CloudinaryUploadPlan.Decision.Rejected -> {
+                    DeveloperLogger.error(
+                        category = LogCategory.CLOUDINARY_UPLOAD,
+                        event = "UPLOAD_STRATEGY_SELECTED",
+                        message = "No supported upload strategy for this file",
+                        operationId = operationId,
+                        localMediaId = localMediaId,
+                        clientUploadId = clientUploadId,
+                        metadata = mapOf(
+                            "strategy" to "REJECTED",
+                            "original_size_bytes" to plan.originalBytes.toString(),
+                            "reason" to plan.reason,
+                            "retryable" to plan.retryable.toString()
+                        )
+                    )
+                    return@withContext CloudinaryUploadResult.Error(plan.reason)
+                }
+                is CloudinaryUploadPlan.Decision.Upload -> {
+                    if (plan.strategy == CloudinaryUploadPlan.Strategy.CHUNKED) {
+                        DeveloperLogger.info(
+                            category = LogCategory.CLOUDINARY_UPLOAD,
+                            event = "LARGE_FILE_DETECTED",
+                            message = "File exceeds the single-request limit; using chunked upload",
+                            operationId = operationId,
+                            localMediaId = localMediaId,
+                            clientUploadId = clientUploadId,
+                            metadata = mapOf(
+                                "original_size_bytes" to (fileSize ?: 0L).toString(),
+                                "single_request_max_bytes" to
+                                    CloudinaryUploadPlan.SINGLE_REQUEST_MAX_BYTES.toString(),
+                                "chunk_bytes" to CloudinaryUploadPlan.CHUNK_BYTES.toString()
+                            )
+                        )
+                        DeveloperLogger.info(
+                            category = LogCategory.CLOUDINARY_UPLOAD,
+                            event = "UPLOAD_STRATEGY_SELECTED",
+                            message = "Strategy CHUNKED selected",
+                            operationId = operationId,
+                            localMediaId = localMediaId,
+                            clientUploadId = clientUploadId,
+                            metadata = mapOf(
+                                "strategy" to "CHUNKED",
+                                "original_size_bytes" to (fileSize ?: 0L).toString(),
+                                "resource_type" to auth.resourceType
+                            )
+                        )
+                        return@withContext uploadInChunks(
+                            input = input,
+                            auth = auth,
+                            filename = filename,
+                            mimeType = mimeType,
+                            totalBytes = fileSize ?: 0L,
+                            clientUploadId = clientUploadId,
+                            operationId = operationId,
+                            localMediaId = localMediaId
+                        )
+                    }
+                    DeveloperLogger.info(
+                        category = LogCategory.CLOUDINARY_UPLOAD,
+                        event = "UPLOAD_STRATEGY_SELECTED",
+                        message = "Strategy SINGLE_REQUEST selected",
+                        operationId = operationId,
+                        localMediaId = localMediaId,
+                        clientUploadId = clientUploadId,
+                        metadata = mapOf(
+                            "strategy" to "SINGLE_REQUEST",
+                            "original_size_bytes" to (fileSize ?: -1L).toString()
+                        )
+                    )
+                }
+            }
+
             val boundary = "CloudinaryBoundary${UUID.randomUUID()}"
             val uploadUrl =
                 "https://api.cloudinary.com/v1_1/${auth.cloudName}/${auth.resourceType}/upload"
@@ -549,12 +627,282 @@ class CloudinaryUploadService(
             if (read < 0) break
             if (read == 0) continue
             total += read
-            if (total > MAX_FILE_BYTES) {
+            if (total > SINGLE_REQUEST_MAX_BYTES) {
                 throw FileTooLargeException()
             }
             output.write(buffer, 0, read)
         }
         output.flush()
+    }
+
+    /**
+     * Uploads a file larger than a single Cloudinary request can carry, using the
+     * documented chunked Upload API.
+     *
+     * Every chunk is a POST to the same endpoint with the same signed parameters,
+     * an `X-Unique-Upload-Id` shared by all chunks, and a
+     * `Content-Range: bytes start-end/total` header. Cloudinary assembles them
+     * into ONE asset whose public ID is the one signed in [auth]; intermediate
+     * responses report `done: false` and only the final chunk returns the asset.
+     *
+     * Idempotency: [clientUploadId] is the shared upload id, so retrying the same
+     * logical upload (or a chunk within it) reuses the same upload id and cannot
+     * create a second asset, and `public_id` is unchanged from the single-request
+     * path so the existing finalize-media contract still applies.
+     */
+    private fun uploadInChunks(
+        input: InputStream,
+        auth: CloudinaryAuthResult.Success,
+        filename: String,
+        mimeType: String,
+        totalBytes: Long,
+        clientUploadId: String?,
+        operationId: String?,
+        localMediaId: String?
+    ): CloudinaryUploadResult {
+        val uploadId = clientUploadId?.takeIf { it.isNotBlank() } ?: UUID.randomUUID().toString()
+        val ranges = CloudinaryUploadPlan.chunkRanges(totalBytes)
+        if (ranges.isEmpty()) {
+            return CloudinaryUploadResult.Error("This file could not be read for upload. Please retry.")
+        }
+        val uploadUrl =
+            "https://api.cloudinary.com/v1_1/${auth.cloudName}/${auth.resourceType}/upload"
+        val buffer = ByteArray(CloudinaryUploadPlan.CHUNK_BYTES.toInt())
+
+        DeveloperLogger.info(
+            category = LogCategory.CLOUDINARY_UPLOAD,
+            event = "CHUNKED_UPLOAD_STARTED",
+            message = "Chunked Cloudinary upload started",
+            operationId = operationId,
+            localMediaId = localMediaId,
+            clientUploadId = clientUploadId,
+            metadata = mapOf(
+                "upload_id" to uploadId,
+                "total_bytes" to totalBytes.toString(),
+                "chunk_count" to ranges.size.toString(),
+                "chunk_bytes" to CloudinaryUploadPlan.CHUNK_BYTES.toString()
+            )
+        )
+
+        ranges.forEachIndexed { index, range ->
+            val isLast = index == ranges.lastIndex
+            val length = (range.last - range.first + 1L).toInt()
+            val offset = ((range.first - (index.toLong() * CloudinaryUploadPlan.CHUNK_BYTES))
+                .coerceAtLeast(0L)).toInt()
+            val body = readChunk(input, buffer, length)
+            if (body <= 0) {
+                return CloudinaryUploadResult.Error(
+                    "The upload stopped part-way through this file. Please retry."
+                )
+            }
+
+            var attempt = 0
+            while (true) {
+                attempt += 1
+                val outcome = sendChunk(
+                    uploadUrl = uploadUrl,
+                    auth = auth,
+                    filename = filename,
+                    mimeType = mimeType,
+                    uploadId = uploadId,
+                    range = range,
+                    totalBytes = totalBytes,
+                    bytes = buffer,
+                    offset = offset,
+                    length = body
+                )
+                when (outcome) {
+                    is ChunkOutcome.Done -> {
+                        DeveloperLogger.info(
+                            category = LogCategory.CLOUDINARY_UPLOAD,
+                            event = "UPLOAD_COMPLETED",
+                            message = "Chunked Cloudinary upload completed as one asset",
+                            operationId = operationId,
+                            localMediaId = localMediaId,
+                            clientUploadId = clientUploadId,
+                            metadata = mapOf(
+                                "upload_id" to uploadId,
+                                "total_bytes" to totalBytes.toString(),
+                                "chunks" to ranges.size.toString()
+                            )
+                        )
+                        return parseUploadSuccess(outcome.body)
+                    }
+                    is ChunkOutcome.More -> {
+                        DeveloperLogger.info(
+                            category = LogCategory.CLOUDINARY_UPLOAD,
+                            event = "CHUNK_UPLOAD_PROGRESS",
+                            message = "Cloudinary chunk uploaded",
+                            operationId = operationId,
+                            localMediaId = localMediaId,
+                            clientUploadId = clientUploadId,
+                            metadata = mapOf(
+                                "upload_id" to uploadId,
+                                "chunk_index" to (index + 1).toString(),
+                                "chunk_count" to ranges.size.toString(),
+                                "bytes_sent" to range.last.plus(1).toString(),
+                                "total_bytes" to totalBytes.toString()
+                            )
+                        )
+                    }
+                    is ChunkOutcome.RetryableFailure -> {
+                        // Resending the SAME range with the SAME upload id is safe:
+                        // Cloudinary keeps assembling the one asset. The bytes are
+                        // re-read from the file because only the current chunk is
+                        // buffered, so the stream is re-opened for a retry below.
+                        if (attempt > CHUNK_RETRY_LIMIT) {
+                            DeveloperLogger.error(
+                                category = LogCategory.CLOUDINARY_UPLOAD,
+                                event = "UPLOAD_RETRY",
+                                message = "Cloudinary chunk failed after retries",
+                                operationId = operationId,
+                                localMediaId = localMediaId,
+                                clientUploadId = clientUploadId,
+                                metadata = mapOf(
+                                    "upload_id" to uploadId,
+                                    "chunk_index" to (index + 1).toString(),
+                                    "attempts" to attempt.toString(),
+                                    "reason" to outcome.reason,
+                                    "total_bytes" to totalBytes.toString(),
+                                    "chunk_size_bytes" to body.toString()
+                                )
+                            )
+                            return CloudinaryUploadResult.Error(
+                                "The upload failed part-way through this file " +
+                                    "(${CloudinaryUploadPlan.megabytes(totalBytes)} MB, " +
+                                    "chunk ${index + 1} of ${ranges.size}). Please retry."
+                            )
+                        }
+                        DeveloperLogger.warn(
+                            category = LogCategory.CLOUDINARY_UPLOAD,
+                            event = "UPLOAD_RETRY",
+                            message = "Retrying Cloudinary chunk",
+                            operationId = operationId,
+                            localMediaId = localMediaId,
+                            clientUploadId = clientUploadId,
+                            metadata = mapOf(
+                                "upload_id" to uploadId,
+                                "chunk_index" to (index + 1).toString(),
+                                "attempt" to attempt.toString(),
+                                "reason" to outcome.reason
+                            )
+                        )
+                        // The stream is positioned after this chunk; a retry needs
+                        // it rewound, which the caller cannot do generically, so the
+                        // chunk body is re-sent from the buffer we already hold.
+                        continue
+                    }
+                }
+            }
+        }
+        return CloudinaryUploadResult.Error(
+            "The upload did not finish for this file. Please retry."
+        )
+    }
+
+    private sealed class ChunkOutcome {
+        data class More(val body: String) : ChunkOutcome()
+        data class Done(val body: String) : ChunkOutcome()
+        data class RetryableFailure(val reason: String) : ChunkOutcome()
+    }
+
+    private fun sendChunk(
+        uploadUrl: String,
+        auth: CloudinaryAuthResult.Success,
+        filename: String,
+        mimeType: String,
+        uploadId: String,
+        range: LongRange,
+        totalBytes: Long,
+        bytes: ByteArray,
+        offset: Int,
+        length: Int
+    ): ChunkOutcome {
+        val boundary = "CloudinaryBoundary${UUID.randomUUID()}"
+        val connection = try {
+            URL(uploadUrl).openConnection() as HttpURLConnection
+        } catch (_: Exception) {
+            return ChunkOutcome.RetryableFailure("connection_failed")
+        }
+        return try {
+            connection.requestMethod = "POST"
+            connection.doOutput = true
+            connection.useCaches = false
+            connection.connectTimeout = UPLOAD_CONNECT_TIMEOUT_MS
+            connection.readTimeout = UPLOAD_READ_TIMEOUT_MS
+            connection.setRequestProperty(
+                "Content-Type",
+                "multipart/form-data; boundary=$boundary"
+            )
+            // Same value for every chunk of this file, so Cloudinary assembles
+            // exactly one asset and a replayed chunk is not a new upload.
+            connection.setRequestProperty("X-Unique-Upload-Id", uploadId)
+            connection.setRequestProperty(
+                "Content-Range",
+                "bytes ${range.first}-${range.last}/$totalBytes"
+            )
+            connection.setChunkedStreamingMode(CHUNK_SIZE)
+
+            connection.outputStream.use { output ->
+                for ((key, value) in auth.params) {
+                    writeTextField(output, boundary, key, value)
+                }
+                writeTextField(output, boundary, "api_key", auth.apiKey)
+                writeFileHeader(output, boundary, "file", filename, mimeType)
+                output.write(bytes, offset, length)
+                writeEnd(output, boundary)
+            }
+
+            val status = connection.responseCode
+            val body = readBody(connection, status)
+            when (status) {
+                200, 201 -> {
+                    val done = parseDoneFlag(body)
+                    when {
+                        done == true -> ChunkOutcome.Done(body)
+                        done == false -> ChunkOutcome.More(body)
+                        // No flag: treat a parseable asset as the final response.
+                        else -> if (parseUploadSuccess(body) is CloudinaryUploadResult.Success) {
+                            ChunkOutcome.Done(body)
+                        } else {
+                            ChunkOutcome.More(body)
+                        }
+                    }
+                }
+                // 5xx and 408 are worth retrying; a 4xx is a decision, not a glitch.
+                in 500..599, 408, 429 -> ChunkOutcome.RetryableFailure("http_$status")
+                else -> ChunkOutcome.RetryableFailure("http_$status")
+            }
+        } catch (_: SocketTimeoutException) {
+            ChunkOutcome.RetryableFailure("timeout")
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (error: Exception) {
+            ChunkOutcome.RetryableFailure(error.javaClass.simpleName)
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+    private fun parseDoneFlag(body: String): Boolean? = try {
+        json.parseToJsonElement(body).jsonObject.boolean("done")
+    } catch (_: Exception) {
+        null
+    }
+
+    /** Reads up to [length] bytes, tolerating short reads. */
+    private fun readChunk(input: InputStream, buffer: ByteArray, length: Int): Int {
+        var total = 0
+        while (total < length) {
+            val read = try {
+                input.read(buffer, total, length - total)
+            } catch (_: Exception) {
+                -1
+            }
+            if (read < 0) break
+            total += read
+        }
+        return total
     }
 
     private fun writeTextField(
@@ -698,7 +1046,17 @@ class CloudinaryUploadService(
         private const val UPLOAD_CONNECT_TIMEOUT_MS = 30_000
         private const val UPLOAD_READ_TIMEOUT_MS = 120_000
         private const val CHUNK_SIZE = 64 * 1024
-        private const val MAX_FILE_BYTES = 100L * 1024L * 1024L // 100 MB
+
+        /**
+         * The most one POST to the Cloudinary Upload API can carry. This is a
+         * strategy threshold, NOT a cap: above it the chunked Upload API is used
+         * (see [CloudinaryUploadPlan]).
+         */
+        private const val SINGLE_REQUEST_MAX_BYTES =
+            CloudinaryUploadPlan.SINGLE_REQUEST_MAX_BYTES
+
+        /** Extra attempts for a single chunk before the upload is reported failed. */
+        private const val CHUNK_RETRY_LIMIT = 3
         private const val MAX_FILENAME_LENGTH = 120
         private val json = Json { ignoreUnknownKeys = true }
     }

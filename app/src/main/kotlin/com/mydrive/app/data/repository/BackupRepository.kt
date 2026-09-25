@@ -9,6 +9,7 @@ import com.mydrive.app.data.model.MediaItem
 import com.mydrive.app.data.model.MediaType
 import com.mydrive.app.data.remote.CloudinaryAuthResult
 import com.mydrive.app.data.remote.CloudinaryUploadResult
+import com.mydrive.app.data.remote.CloudinaryUploadPlan
 import com.mydrive.app.data.remote.CloudinaryUploadService
 import com.mydrive.app.data.remote.FinalizeResult
 import com.mydrive.app.data.remote.MediaFinalizeRequest
@@ -456,11 +457,30 @@ class BackupRepository(
                 ItemOutcome.Failed
             }
             is CloudinaryUploadResult.FileTooLarge -> {
+                // Only reachable when the size was unknown up front and the stream
+                // turned out to pass the single-request limit: a KNOWN large file is
+                // carried by the chunked strategy instead of landing here.
                 UploadLog.uploadFailed(id, "file_too_large")
+                DeveloperLogger.error(
+                    category = LogCategory.CLOUDINARY_UPLOAD,
+                    event = "UPLOAD_FAILED",
+                    message = "File exceeded the single-request limit with unknown size",
+                    operationId = OperationTrace.idFor(id),
+                    localMediaId = id,
+                    metadata = mapOf(
+                        "strategy" to "SINGLE_REQUEST",
+                        "reported_size_bytes" to item.fileSizeBytes.toString(),
+                        "single_request_max_bytes" to
+                            CloudinaryUploadPlan.SINGLE_REQUEST_MAX_BYTES.toString(),
+                        "reason" to "size_unknown_at_plan_time",
+                        "retryable" to "true"
+                    )
+                )
                 syncRepository.updateState(
                     id = id,
                     state = BackupState.FAILED,
-                    errorMessage = "This file is too large for Cloudinary."
+                    errorMessage = "This file is larger than 100 MB but its size could not be " +
+                        "read beforehand, so a resumable upload could not be prepared. Retry."
                 )
                 ItemOutcome.Failed
             }
