@@ -62,12 +62,15 @@ interface UploadQueueDao {
  * The app's single Room database, holding the media upload queue.
  */
 @Database(
-    entities = [UploadQueueEntity::class],
-    version = 4,
+    entities = [UploadQueueEntity::class, VaultItemEntity::class],
+    version = 5,
     exportSchema = false
 )
 abstract class UploadQueueDatabase : RoomDatabase() {
     abstract fun uploadQueueDao(): UploadQueueDao
+
+    /** Local Private Vault state: authoritative for this device's vault files. */
+    abstract fun vaultDao(): VaultDao
 
     companion object {
         @Volatile private var instance: UploadQueueDatabase? = null
@@ -122,12 +125,47 @@ abstract class UploadQueueDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * Adds the local Private Vault state table. Column names and affinities must
+         * match [VaultItemEntity] exactly: Room validates the schema on open.
+         */
+        private val MIGRATION_4_5 = object : Migration(4, 5) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `media_vault_items` (" +
+                        "`vaultItemId` TEXT NOT NULL, " +
+                        "`remoteMediaId` TEXT, " +
+                        "`localMediaId` INTEGER NOT NULL, " +
+                        "`encryptedFileName` TEXT NOT NULL, " +
+                        "`encryptedFileSize` INTEGER NOT NULL, " +
+                        "`encryptedSha256` TEXT, " +
+                        "`originalMimeType` TEXT NOT NULL, " +
+                        "`originalFileName` TEXT NOT NULL, " +
+                        "`originalFileSize` INTEGER NOT NULL, " +
+                        "`vaultStatus` TEXT NOT NULL, " +
+                        "`vaultVersion` INTEGER NOT NULL, " +
+                        "`createdAt` INTEGER NOT NULL, " +
+                        "`updatedAt` INTEGER NOT NULL, " +
+                        "`hiddenAt` INTEGER, " +
+                        "`restoredAt` INTEGER, " +
+                        "`originalRemoved` INTEGER NOT NULL, " +
+                        "PRIMARY KEY(`vaultItemId`))"
+                )
+                database.execSQL(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS `index_media_vault_items_localMediaId` " +
+                        "ON `media_vault_items` (`localMediaId`)"
+                )
+            }
+        }
+
         fun get(context: Context): UploadQueueDatabase = instance ?: synchronized(this) {
             instance ?: Room.databaseBuilder(
                 context.applicationContext,
                 UploadQueueDatabase::class.java,
                 "upload_queue.db"
-            ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4).build().also { instance = it }
+            ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
+                .build()
+                .also { instance = it }
         }
     }
 }

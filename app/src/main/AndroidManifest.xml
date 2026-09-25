@@ -15,6 +15,14 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
+    <!--
+      Private Vault: biometric unlock. USE_BIOMETRIC is a NORMAL permission (no
+      runtime prompt, no access to biometric data). Android performs the
+      verification and the app only receives success/failure. The device
+      lock-screen PIN/password is never requested - the vault uses its own PIN.
+    -->
+    <uses-permission android:name="android.permission.USE_BIOMETRIC" />
     <application
         android:name=".MyDriveApp"
         android:allowBackup="true"
@@ -34,6 +42,20 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!--
+          Hosts the platform BiometricPrompt for the Private Vault. MainActivity is a
+          ComponentActivity, and android.hardware.biometrics.BiometricPrompt requires
+          a FragmentActivity, so the prompt lives in this dedicated, non-exported
+          activity instead of changing the app's existing entry point.
+        -->
+        <activity
+            android:name=".data.vault.VaultAuthActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:label="@string/vault_biometric_title"
+            android:noHistory="true"
+            android:theme="@style/AppTheme" />
 
     </application>
 </manifest>

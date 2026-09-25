@@ -1,4 +1,9 @@
 <resources>
     <string name="app_name">My Drive</string>
 
+
+    <!-- Private Vault biometric unlock (Android performs the verification). -->
+    <string name="vault_biometric_title">Unlock Private Vault</string>
+    <string name="vault_biometric_subtitle">Confirm your identity to view hidden media</string>
+    <string name="vault_biometric_cancel">Use Vault PIN</string>
 </resources>

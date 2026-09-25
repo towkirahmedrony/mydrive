@@ -360,6 +360,94 @@ Per-device collection switches with privacy-preserving defaults; `retention_days
 
 All four tables have RLS. Owners can access their own device rows and admins can manage/read across devices. `purge_expired_accessibility_data()` removes expired events and sessions using each device's retention setting and is executable only by `service_role`.
 
+> Note: the Android app no longer produces this data (the AccessibilityService was removed in `6838a5f`); the tables are retained with their data and RLS.
+
+### media_vault_items
+Private Vault: one row per media asset currently held in a device's vault. Stores the **metadata** of the transition only — never the encrypted bytes, the key, the PIN or a path outside the app sandbox. `media_id` references the **same** `media_assets` row the normal gallery uses, so hiding media never creates a second Cloudinary asset.
+
+| Column | Type | Constraints |
+|---|---|---|
+| id | uuid | PK, default gen_random_uuid() |
+| media_id | uuid | NOT NULL, FK → media_assets.id, cascade delete |
+| owner_id | uuid | NOT NULL, FK → profiles.id, cascade delete |
+| device_id | uuid | NOT NULL, FK → devices.id, cascade delete |
+| vault_status | text | NOT NULL, default `ENCRYPTING`, check in (`ENCRYPTING`,`READY`,`RESTORING`,`FAILED`,`DELETED`) |
+| vault_version | integer | NOT NULL, default 1, check ≥ 1 |
+| encrypted_storage_path | text | device-relative file name inside app-private storage |
+| encrypted_file_size | bigint | ciphertext size |
+| encrypted_sha256 | text | SHA-256 of the ciphertext, for integrity verification |
+| original_mime_type | text | NOT NULL |
+| original_file_name | text | NOT NULL |
+| original_file_size | bigint | NOT NULL |
+| created_at | timestamptz | default now() |
+| updated_at | timestamptz | default now(), maintained by `set_updated_at()` |
+| hidden_at | timestamptz | when the item entered the vault |
+| restored_at | timestamptz | when the item was returned to MediaStore |
+
+**Constraints / indexes:** `uq_media_vault_items_active_media` — partial unique index on `media_id` where `vault_status <> 'DELETED'`, so one asset cannot have two active vault records while re-hiding after a permanent delete stays possible. `media_vault_items_ciphertext_present` — a row in `ENCRYPTING`/`READY`/`RESTORING` must name its ciphertext file, so media can never be marked hidden without a stored vault copy. Indexes: `(owner_id, created_at DESC)`, `(device_id, created_at DESC)`, `(vault_status)`.
+
+### media_vault_settings
+Per-device vault configuration. Non-sensitive only: **the PIN verifier and its salt are never stored here** — they live on the device in Keystore-protected private preferences.
+
+| Column | Type | Constraints |
+|---|---|---|
+| id | uuid | PK, default gen_random_uuid() |
+| owner_id | uuid | NOT NULL, FK → profiles.id, cascade delete |
+| device_id | uuid | NOT NULL, unique, FK → devices.id, cascade delete |
+| biometric_enabled | boolean | NOT NULL, default false |
+| pin_enabled | boolean | NOT NULL, default false |
+| lock_timeout_seconds | integer | NOT NULL, default 60, check 0–3600 |
+| created_at / updated_at | timestamptz | default now(); `updated_at` maintained by `set_updated_at()` |
+
+### media_vault_events
+Append-only audit trail of high-level vault actions. Records **what** happened, never why an unlock failed: no PIN, no biometric result detail, no keys, no media content.
+
+| Column | Type | Constraints |
+|---|---|---|
+| id | uuid | PK, default gen_random_uuid() |
+| owner_id | uuid | NOT NULL, FK → profiles.id, cascade delete |
+| device_id | uuid | NOT NULL, FK → devices.id, cascade delete |
+| vault_item_id | uuid | nullable, FK → media_vault_items.id, `ON DELETE SET NULL` |
+| event_type | text | NOT NULL, check in (`HIDE`,`UNHIDE`,`VAULT_UNLOCK_SUCCESS`,`VAULT_UNLOCK_FAILURE`,`PERMANENT_DELETE`,`RESTORE`) |
+| event_at | timestamptz | NOT NULL, default now() |
+| metadata | jsonb | small, non-sensitive context only |
+| created_at | timestamptz | default now() |
+
+Indexes: `(owner_id, event_at DESC)`, `(device_id, event_at DESC)`, `(vault_item_id)`.
+
+**No `media_vault_devices` table exists on purpose** — `public.devices` already models the device and `media_vault_items.device_id` references it, so a second mapping table would be redundant.
+
+**RLS / access model** (all three tables, `TO authenticated`): `media_vault_items` — SELECT `(owner_id = auth.uid()) OR private.is_admin()`, INSERT/UPDATE owner-only, DELETE admin-only. `media_vault_settings` — SELECT/UPDATE owner or admin, INSERT owner-only. `media_vault_events` — SELECT `(owner_id = auth.uid()) OR private.is_admin()`, INSERT owner-only, no UPDATE policy (history cannot be rewritten), DELETE admin-only. Verified: the anon key returns zero rows on all three tables.
+
+## Private Vault architecture
+
+```
+Normal media (MediaStore)
+        ↓  user selects "Hide"  (+ vault authentication if the vault is locked)
+Encrypted vault copy written to app-private storage
+        ↓  ciphertext verified (existence + size + SHA-256)
+media_vault_items row persisted (vault_status = READY)
+        ↓  ONLY after verification succeeds
+Original MediaStore item removed / moved to the system trash
+        ↓
+Normal Photos / Albums / search exclude the item
+Cloud media_assets row: UNCHANGED (still READY, still backed up, single Cloudinary asset)
+```
+
+**Hide flow.** The encrypted copy is always created and verified *before* the original is touched. If encryption or storage fails the original is kept, nothing is marked hidden, and the row is left `FAILED` for retry. The `ENCRYPTING` status marks the in-between state, and the partial unique index plus the `ciphertext_present` check make a crash mid-hide recoverable instead of producing duplicate vault copies.
+
+**Unhide / restore flow.** Authenticate → decrypt the vault copy to a private temporary file → insert it back into MediaStore (filename, MIME type, size and timestamps preserved where Android allows) → verify the restored item exists → mark the row `RESTORING`→`DELETED`/remove it → only then delete the ciphertext. The vault copy is never deleted before the restored MediaStore item is verified.
+
+**Permanent delete flow.** Separate from Hide and from Unhide. Requires authentication plus a strong confirmation, deletes the ciphertext, marks the vault row `DELETED`, and follows the existing cloud-first deletion rules for the associated `media_assets` row (Trash semantics stay with `media_assets.deleted_at`/`user_hidden_at`). The operation is idempotent.
+
+**Authentication model.** Two factors are supported and neither is ever stored: biometric (Android `BiometricPrompt` — the app only learns success/failure; no biometric data is stored or transmitted) and a dedicated Vault PIN. The PIN is never stored in plaintext: a salted, iterated PBKDF2-HMAC-SHA256 verifier is kept in Keystore-protected private preferences, with a constant-time comparison and lockout/back-off after repeated failures. If biometric enrollment changes, the biometric binding is treated as invalid and the vault requires the PIN again rather than silently weakening. The device lock-screen PIN/password is never requested.
+
+**Key management.** Vault media is encrypted at rest with AES-256-GCM using a key held by the **Android Keystore** (the same pattern already used by `TelegramSettingsStore`): key material never leaves the Keystore and is never written to Room, Supabase or logs. Each file carries its own random IV; the Keystore key alias is versioned via `vault_version`.
+
+**Cloud-first behaviour.** Hiding is not deleting. The cloud `media_assets` row keeps its status, storage fields and Drive archival, and no second Cloudinary asset is created — the vault's encrypted copy and the cloud asset are separate concerns.
+
+**Backup / sync interaction.** After a hide, the local MediaStore item is gone, so the backup scan must not treat that as a user deletion of cloud media: the vault row is the record that the media still exists. Re-discovery, re-upload and duplicate `media_assets` rows are all prevented by the existing dedup path (`local_media_id`-based, independent of the vault).
+
 ## Views
 
 ### device_storage_usage

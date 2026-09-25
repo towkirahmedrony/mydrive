@@ -14,4 +14,7 @@
     <exclude domain="database" path="upload_queue.db-wal" />
     <exclude domain="database" path="upload_queue.db-shm" />
     <exclude domain="database" path="upload_queue.db-journal" />
+        <!-- The encrypted vault directory never leaves the device: not via
+             cloud backup, and not via device-to-device transfer. -->
+        <exclude domain="file" path="vault/" />
 </full-backup-content>
