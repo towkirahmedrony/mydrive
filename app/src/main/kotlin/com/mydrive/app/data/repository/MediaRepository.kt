@@ -957,6 +957,17 @@ class MediaRepository(
 
     private fun MediaItem.withRecord(record: SyncRecord?): MediaItem {
         if (record == null) {
+            // No local queue record. That is not evidence of "needs backup": if the
+            // cloud catalog still holds an available record for this media, it is
+            // already backed up, so it must not be queued again or shown as pending.
+            if (cloudBackedUp) {
+                return copy(
+                    backupState = BackupState.COMPLETED,
+                    backupCompleted = true,
+                    progress = 0f,
+                    errorMessage = null
+                )
+            }
             if (backupState == BackupState.NOT_STARTED) return this
             return copy(backupState = BackupState.NOT_STARTED, backupCompleted = false, progress = 0f, errorMessage = null, cloudinaryAssetId = null, cloudinaryPublicId = null)
         }
@@ -1043,6 +1054,12 @@ class MediaRepository(
                 // may use, and it disappears with the verified cleanup.
                 originalUrl = row?.originalCloudUrl
                     ?: record?.cloudinarySecureUrl?.takeUnless { row?.isPrimaryCleaned == true },
+                // Authoritative "already backed up" evidence, taken ONLY from a
+                // catalog-visible media_assets row that matched this local item.
+                // Independent of device_id and of the install-local upload queue,
+                // so a second install or a lost queue cannot re-upload media that
+                // the cloud already holds.
+                cloudBackedUp = row != null,
                 originLocal = true,
                 hiddenFromLibrary = false
             )

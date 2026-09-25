@@ -89,7 +89,13 @@ data class MediaItem(
      * be served by upscaling a thumbnail, so the two are never substituted for
      * each other.
      */
-    val originalUrl: String? = null
+    val originalUrl: String? = null,
+    /**
+     * True when an authoritative `media_assets` row still proves this media is
+     * backed up. Set from the cloud catalog, never from the local upload queue —
+     * see [backupStateFor] / [isEligibleForBackup].
+     */
+    val cloudBackedUp: Boolean = false
 ) {
     val displayUri: String
         get() = when {
@@ -108,6 +114,45 @@ data class MediaItem(
      */
     val originalUri: String
         get() = if (originLocal) uri else originalUrl.orEmpty()
+}
+
+/**
+ * Whether an authoritative, still-available cloud record already exists for this
+ * local media.
+ *
+ * Deliberately NOT derived from the device-local queue record: the queue is
+ * install-local state, so a reinstall, a cleared data directory or an owner
+ * re-bind loses it and every item looks un-backed-up again. Also deliberately
+ * NOT keyed by `device_id`, which is volatile: the same physical photo backed up
+ * from a second install must not be uploaded a second time.
+ *
+ * [cloudBackedUp] is set only from a catalog-visible `media_assets` row matched
+ * to the local item (by `local_media_id`, or an already-known cloud id), so it
+ * survives both losses.
+ */
+fun backupStateFor(item: MediaItem, recordState: BackupState?): BackupState = when {
+    recordState != null -> recordState
+    item.cloudBackedUp -> BackupState.COMPLETED
+    else -> item.backupState
+}
+
+/**
+ * The single eligibility rule for a backup run.
+ *
+ * An item needs backup only when it has never been backed up, or its previous
+ * attempt is retryable, AND no authoritative cloud record already proves a
+ * completed backup (`cloudBackedUp`).
+ */
+fun isEligibleForBackup(item: MediaItem, recordState: BackupState?): Boolean {
+    if (item.cloudBackedUp) return false
+    val state = backupStateFor(item, recordState)
+    return state == BackupState.NOT_STARTED ||
+        // Uploaded to Cloudinary but never recorded in Supabase: genuinely
+        // incomplete, so it is resumed. BackupRepository skips the Cloudinary
+        // upload when the record already holds an asset, and finalize-media is
+        // idempotent on client_upload_id, so resuming cannot duplicate anything.
+        state == BackupState.CLOUDINARY_COMPLETED ||
+        state.isRetryable
 }
 
 data class TrashSummary(

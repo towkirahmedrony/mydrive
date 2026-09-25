@@ -6,6 +6,8 @@ import androidx.lifecycle.viewModelScope
 import com.mydrive.app.data.local.SyncRecord
 import com.mydrive.app.data.model.BackupState
 import com.mydrive.app.data.model.MediaItem
+import com.mydrive.app.data.model.backupStateFor
+import com.mydrive.app.data.model.isEligibleForBackup
 import com.mydrive.app.data.model.MediaLoadState
 import com.mydrive.app.data.model.MediaType
 import com.mydrive.app.data.model.TelegramConnectionState
@@ -124,9 +126,14 @@ class SyncViewModel(
                 val records = syncRepository.records.value
                 repository.deviceMedia.value
                     .filter { item ->
-                        val state = records[item.id]?.state?.toBackupState()?.resumeLocally()
-                            ?: item.backupState
-                        state == BackupState.NOT_STARTED || state.isRetryable
+                        // Eligibility consults the authoritative cloud record
+                        // (`cloudBackedUp`), not just the install-local queue: a
+                        // media the cloud already holds must never be uploaded
+                        // again, even when the local queue was lost or re-keyed.
+                        isEligibleForBackup(
+                            item = item,
+                            recordState = records[item.id]?.state?.toBackupState()?.resumeLocally()
+                        )
                     }
                     .map { it.id }
             }
@@ -237,7 +244,13 @@ class SyncViewModel(
         val jobs = ArrayList<SyncJob>(media.size)
         for (item in media) {
             val record = records[item.id]
-            val state = record?.state?.toBackupState()?.resumeLocally() ?: item.backupState
+            // Same authoritative rule as the queue gate, so the screen can never
+            // show an item as pending while the run refuses to back it up (or the
+            // reverse) just because the local queue record is missing.
+            val state = backupStateFor(
+                item = item,
+                recordState = record?.state?.toBackupState()?.resumeLocally()
+            )
             jobs += SyncJob(
                 media = item,
                 state = state,
