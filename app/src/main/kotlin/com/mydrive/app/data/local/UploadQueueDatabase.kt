@@ -58,9 +58,20 @@ interface UploadQueueDao {
     suspend fun updateState(mediaId: String, state: String, retryCount: Int, lastError: String?, updatedAt: Long)
 }
 
-@Database(entities = [UploadQueueEntity::class], version = 2, exportSchema = false)
+/**
+ * The app's single Room database. Accessibility monitoring buffers its events in
+ * `accessibility_outbox` here rather than in a second database, so there is one
+ * local queue and one WorkManager setup shared with the media upload pipeline.
+ */
+@Database(
+    entities = [UploadQueueEntity::class, AccessibilityOutboxEntity::class],
+    version = 3,
+    exportSchema = false
+)
 abstract class UploadQueueDatabase : RoomDatabase() {
     abstract fun uploadQueueDao(): UploadQueueDao
+
+    abstract fun accessibilityOutboxDao(): AccessibilityOutboxDao
 
     companion object {
         @Volatile private var instance: UploadQueueDatabase? = null
@@ -71,12 +82,44 @@ abstract class UploadQueueDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * Adds the accessibility event buffer. Column names and affinities must
+         * match [AccessibilityOutboxEntity] exactly: Room validates the schema when
+         * the database is opened.
+         */
+        private val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `accessibility_outbox` (" +
+                        "`id` TEXT NOT NULL, " +
+                        "`userId` TEXT NOT NULL, " +
+                        "`deviceId` TEXT NOT NULL, " +
+                        "`eventType` TEXT NOT NULL, " +
+                        "`packageName` TEXT, " +
+                        "`activityName` TEXT, " +
+                        "`eventTime` INTEGER NOT NULL, " +
+                        "`windowId` INTEGER, " +
+                        "`windowTitle` TEXT, " +
+                        "`eventText` TEXT, " +
+                        "`contentDescription` TEXT, " +
+                        "`className` TEXT, " +
+                        "`isPasswordField` INTEGER NOT NULL, " +
+                        "`isEditable` INTEGER, " +
+                        "`isClickable` INTEGER, " +
+                        "`isScrollable` INTEGER, " +
+                        "`metadataJson` TEXT, " +
+                        "`createdAt` INTEGER NOT NULL, " +
+                        "PRIMARY KEY(`id`))"
+                )
+            }
+        }
+
         fun get(context: Context): UploadQueueDatabase = instance ?: synchronized(this) {
             instance ?: Room.databaseBuilder(
                 context.applicationContext,
                 UploadQueueDatabase::class.java,
                 "upload_queue.db"
-            ).addMigrations(MIGRATION_1_2).build().also { instance = it }
+            ).addMigrations(MIGRATION_1_2, MIGRATION_2_3).build().also { instance = it }
         }
     }
 }
