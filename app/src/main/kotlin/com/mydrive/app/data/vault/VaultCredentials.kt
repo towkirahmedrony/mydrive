@@ -51,8 +51,12 @@ object VaultPinCrypto {
         return MessageDigest.isEqual(a, b)
     }
 
+    fun isAcceptablePin(pin: CharArray): Boolean =
+        pin.size >= MIN_PIN_LENGTH && pin.size <= MAX_PIN_LENGTH && pin.all { it.isDigit() }
+
     /** Minimum PIN length enforced at enrolment. */
     const val MIN_PIN_LENGTH = 6
+    const val MAX_PIN_LENGTH = 12
     const val SALT_BYTES = 16
     const val DEFAULT_ITERATIONS = 120_000
     const val DEFAULT_KEY_BITS = 256

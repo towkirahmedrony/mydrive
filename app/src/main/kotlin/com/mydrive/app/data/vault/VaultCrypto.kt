@@ -7,7 +7,6 @@ import java.io.File
 import java.io.InputStream
 import java.security.KeyStore
 import java.security.MessageDigest
-import java.security.SecureRandom
 import javax.crypto.Cipher
 import javax.crypto.CipherInputStream
 import javax.crypto.CipherOutputStream
@@ -47,7 +46,6 @@ import javax.crypto.spec.GCMParameterSpec
 class VaultCrypto(context: Context) {
 
     private val vaultDir: File = File(context.filesDir, VAULT_DIR_NAME).apply { mkdirs() }
-    private val random = SecureRandom()
 
     /** The app-private directory holding ciphertext. Never a public/shared path. */
     fun vaultDirectory(): File = vaultDir
@@ -69,12 +67,13 @@ class VaultCrypto(context: Context) {
     ): VaultWriteResult {
         val target = ciphertextFile(vaultItemId)
         val part = File(vaultDir, "$vaultItemId$FILE_SUFFIX$PART_SUFFIX")
-        val iv = ByteArray(GCM_IV_BYTES).also { random.nextBytes(it) }
         var written = 0L
         try {
-            val cipher = Cipher.getInstance(TRANSFORMATION).apply {
-                init(Cipher.ENCRYPT_MODE, secretKey(), GCMParameterSpec(GCM_TAG_BITS, iv))
-            }
+            // Android Keystore AES-GCM forbids a caller-supplied IV when
+            // setRandomizedEncryptionRequired(true). Let the Keystore generate it.
+            val cipher = Cipher.getInstance(TRANSFORMATION)
+            cipher.init(Cipher.ENCRYPT_MODE, secretKey())
+            val iv = cipher.iv?.copyOf() ?: return VaultWriteResult.Failed("missing_iv")
             part.outputStream().use { rawOut ->
                 rawOut.write(HEADER_MAGIC)
                 rawOut.write(HEADER_VERSION)
@@ -191,12 +190,13 @@ class VaultCrypto(context: Context) {
      * by keeping it in this one place.
      */
     fun sealString(plaintext: String): String? = try {
-        val iv = ByteArray(GCM_IV_BYTES).also { random.nextBytes(it) }
-        val cipher = Cipher.getInstance(TRANSFORMATION).apply {
-            init(Cipher.ENCRYPT_MODE, secretKey(), GCMParameterSpec(GCM_TAG_BITS, iv))
+        val cipher = Cipher.getInstance(TRANSFORMATION)
+        cipher.init(Cipher.ENCRYPT_MODE, secretKey())
+        val cipherText = cipher.doFinal(plaintext.toByteArray(Charsets.UTF_8))
+        val iv = cipher.iv ?: return null
+        listOf(iv, cipherText).joinToString(SEAL_SEPARATOR) {
+            android.util.Base64.encodeToString(it, android.util.Base64.NO_WRAP)
         }
-        val sealed = cipher.doFinal(plaintext.toByteArray(Charsets.UTF_8))
-        android.util.Base64.encodeToString(iv + sealed, android.util.Base64.NO_WRAP)
     } catch (_: Exception) {
         null
     }
@@ -205,10 +205,7 @@ class VaultCrypto(context: Context) {
     fun openString(sealed: String?): String? {
         if (sealed.isNullOrBlank()) return null
         return try {
-            val bytes = android.util.Base64.decode(sealed, android.util.Base64.NO_WRAP)
-            if (bytes.size <= GCM_IV_BYTES) return null
-            val iv = bytes.copyOfRange(0, GCM_IV_BYTES)
-            val body = bytes.copyOfRange(GCM_IV_BYTES, bytes.size)
+            val (iv, body) = splitSealed(sealed) ?: return null
             val cipher = Cipher.getInstance(TRANSFORMATION).apply {
                 init(Cipher.DECRYPT_MODE, secretKey(), GCMParameterSpec(GCM_TAG_BITS, iv))
             }
@@ -216,6 +213,19 @@ class VaultCrypto(context: Context) {
         } catch (_: Exception) {
             null
         }
+    }
+
+    private fun splitSealed(sealed: String): Pair<ByteArray, ByteArray>? {
+        val parts = sealed.split(SEAL_SEPARATOR)
+        if (parts.size == 2) {
+            val iv = android.util.Base64.decode(parts[0], android.util.Base64.NO_WRAP)
+            val body = android.util.Base64.decode(parts[1], android.util.Base64.NO_WRAP)
+            if (iv.isEmpty() || body.isEmpty()) return null
+            return iv to body
+        }
+        val bytes = android.util.Base64.decode(sealed, android.util.Base64.NO_WRAP)
+        if (bytes.size <= GCM_IV_BYTES) return null
+        return bytes.copyOfRange(0, GCM_IV_BYTES) to bytes.copyOfRange(GCM_IV_BYTES, bytes.size)
     }
 
     /** SHA-256 of a file, used to verify a vault copy against its stored hash. */
@@ -287,5 +297,6 @@ class VaultCrypto(context: Context) {
         private const val HEADER_VERSION_INT = 1
         private const val MAX_IV_BYTES = 32
         private const val HEADER_BYTES = 4 + 1 + 1 + 12
+        private const val SEAL_SEPARATOR = ":"
     }
 }

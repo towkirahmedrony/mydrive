@@ -3,41 +3,36 @@ package com.mydrive.app.data.vault
 import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
+import androidx.biometric.BiometricManager
+import androidx.biometric.BiometricPrompt
+import androidx.core.content.ContextCompat
+import androidx.fragment.app.FragmentActivity
 
 /**
- * Biometric capability check for the Private Vault.
+ * Biometric capability and prompt for the Private Vault.
  *
- * IMPORTANT — why the biometric *prompt* is not implemented here:
+ * Uses AndroidX [BiometricPrompt] so the OS performs verification. The app only
+ * learns success or failure — no biometric templates, images or samples are
+ * collected or stored. Facial recognition is never implemented in-app.
  *
- * The platform class `android.hardware.biometrics.BiometricPrompt` cannot be used by
- * a normal app. Its public-looking constructors are hidden in the SDK (the compiler
- * reports "Cannot access 'constructor(): BiometricPrompt': it is package-private"),
- * its nested `PromptInfo` is not resolvable, and constants such as
- * `BIOMETRIC_ERROR_NEGATIVE_BUTTON` are `@SystemApi`. Verified against compileSdk 36
- * in CI run #111, which failed on exactly those three errors.
- *
- * Calling BiometricPrompt from an app therefore requires the first-party
- * `androidx.biometric:biometric` artifact. That is a NEW dependency, and this project
- * pins dependencies deliberately, so it was NOT added: the decision is flagged for
- * review rather than taken silently. Until it is added, the vault authenticates with
- * its own PIN, which is fully implemented ([VaultPinManager]) and independent of any
- * biometric capability.
- *
- * The button order is unchanged: biometric first when available, vault PIN as the
- * fallback, and the device lock-screen PIN/password is never requested.
- *
- * What this object does provide today is the honest capability answer the UI needs to
- * decide whether to show a biometric option at all, so adding the dependency later is
- * a local change rather than a redesign.
+ * Device lock-screen PIN/password/pattern is never requested: authenticators are
+ * restricted to BIOMETRIC_STRONG, and setDeviceCredentialAllowed is not used.
  */
 object VaultBiometricGate {
 
     /**
-     * Whether an in-app biometric prompt can be offered once `androidx.biometric` is
-     * available. Returns false today because the platform API is unusable from an app
-     * (see the class comment) — [isHardwarePresent] reports on the device itself.
+     * True when the device has a strong biometric enrolled that the vault can
+     * actually prompt for. Weak sensors and unenrolled hardware return false so
+     * the UI never offers a misleading biometric option.
      */
-    fun canOfferBiometric(context: Context): Boolean = false
+    fun canOfferBiometric(context: Context): Boolean {
+        val manager = BiometricManager.from(context.applicationContext)
+        val authenticators = BiometricManager.Authenticators.BIOMETRIC_STRONG
+        return when (manager.canAuthenticate(authenticators)) {
+            BiometricManager.BIOMETRIC_SUCCESS -> true
+            else -> false
+        }
+    }
 
     /** Coarse hardware check: does the device have any biometric sensor at all? */
     fun isHardwarePresent(context: Context): Boolean {
@@ -52,8 +47,64 @@ object VaultBiometricGate {
     }
 
     /**
+     * Shows the system biometric prompt. [activity] must be a [FragmentActivity]
+     * (MainActivity is). Device credentials are not accepted as a substitute.
+     */
+    fun authenticate(
+        activity: FragmentActivity,
+        title: String = "Unlock Hidden Photos",
+        subtitle: String = "Use biometrics to open your Private Vault",
+        negativeButton: String = "Use vault PIN",
+        onResult: (Outcome) -> Unit
+    ) {
+        if (!canOfferBiometric(activity)) {
+            onResult(Outcome.UNAVAILABLE)
+            return
+        }
+        val promptInfo = BiometricPrompt.PromptInfo.Builder()
+            .setTitle(title)
+            .setSubtitle(subtitle)
+            .setNegativeButtonText(negativeButton)
+            .setAllowedAuthenticators(BiometricManager.Authenticators.BIOMETRIC_STRONG)
+            .setConfirmationRequired(false)
+            .build()
+        val prompt = BiometricPrompt(
+            activity,
+            ContextCompat.getMainExecutor(activity),
+            object : BiometricPrompt.AuthenticationCallback() {
+                override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
+                    onResult(Outcome.AUTHENTICATED)
+                }
+
+                override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
+                    onResult(
+                        when (errorCode) {
+                            BiometricPrompt.ERROR_NEGATIVE_BUTTON,
+                            BiometricPrompt.ERROR_USER_CANCELED,
+                            BiometricPrompt.ERROR_CANCELED -> Outcome.CANCELLED
+                            BiometricPrompt.ERROR_LOCKOUT,
+                            BiometricPrompt.ERROR_LOCKOUT_PERMANENT -> Outcome.LOCKED_OUT
+                            BiometricPrompt.ERROR_HW_UNAVAILABLE,
+                            BiometricPrompt.ERROR_HW_NOT_PRESENT,
+                            BiometricPrompt.ERROR_NO_BIOMETRICS,
+                            BiometricPrompt.ERROR_NO_DEVICE_CREDENTIAL -> Outcome.UNAVAILABLE
+                            else -> Outcome.ERROR
+                        }
+                    )
+                }
+
+                override fun onAuthenticationFailed() {
+                    // A failed attempt that did not end the prompt. Stay silent;
+                    // Android keeps the dialog open for another try.
+                }
+            }
+        )
+        prompt.authenticate(promptInfo)
+    }
+
+    /**
      * The outcome vocabulary the vault authentication UI uses. Kept here so the PIN
-     * path and the future biometric path share one contract: any non-[AUTHENTICATED]
+     * path and the biometric path share one contract: any non-[AUTHENTICATED]
      * value means the vault stays locked and the PIN remains available.
      *
      * No biometric data is ever read, stored or transmitted — Android performs the

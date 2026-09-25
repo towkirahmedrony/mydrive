@@ -171,7 +171,7 @@ fun SettingsScreen(
             SettingsGroup(title = "Privacy") {
                 SettingsRow(
                     title = "Hidden Photos",
-                    subtitle = "Encrypted on this device, unlocked with your vault PIN",
+                    subtitle = "Encrypted on this device, unlocked with biometrics or your vault PIN",
                     leading = Icons.Outlined.Lock,
                     onClick = onOpenHiddenPhotos,
                     trailing = {

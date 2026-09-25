@@ -1,12 +1,13 @@
 package com.mydrive.app.ui.vault
 
+import android.content.Context
+import android.content.ContextWrapper
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -14,12 +15,11 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.lazy.grid.GridCells
-import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
-import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.Lock
@@ -27,10 +27,12 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -38,13 +40,19 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
+import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.mydrive.app.data.vault.VaultBiometricGate
+import com.mydrive.app.data.vault.VaultPinCrypto
+import com.mydrive.app.ui.components.SettingsGroup
+import com.mydrive.app.ui.components.SettingsSwitchRow
 import com.mydrive.app.ui.theme.Spacing
 
 /**
@@ -69,11 +77,11 @@ fun VaultScreen(
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val colors = MaterialTheme.colorScheme
+    val context = LocalContext.current
+    val activity = remember(context) { context.findFragmentActivity() }
     var pin by remember { mutableStateOf("") }
     var confirmPin by remember { mutableStateOf("") }
 
-    // Lock as soon as the screen leaves the foreground: hidden media must never be
-    // visible in the system's task snapshot.
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
@@ -86,9 +94,32 @@ fun VaultScreen(
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose {
             lifecycleOwner.lifecycle.removeObserver(observer)
-            // Navigating away also ends the unlocked session.
             viewModel.onBackgrounded()
         }
+    }
+
+    LaunchedEffect(state.phase, state.biometricUnlockEnabled, state.biometricHardwareAvailable) {
+        if (state.phase != VaultViewModel.Phase.LOCKED) return@LaunchedEffect
+        if (!viewModel.shouldPromptBiometric()) return@LaunchedEffect
+        val host = activity
+        if (host == null) {
+            viewModel.onBiometricUnavailable()
+            return@LaunchedEffect
+        }
+        VaultBiometricGate.authenticate(
+            activity = host,
+            onResult = { outcome ->
+                viewModel.onBiometricPromptFinished()
+                when (outcome) {
+                    VaultBiometricGate.Outcome.AUTHENTICATED -> viewModel.onBiometricAuthenticated()
+                    VaultBiometricGate.Outcome.UNAVAILABLE,
+                    VaultBiometricGate.Outcome.UNSUPPORTED,
+                    VaultBiometricGate.Outcome.ERROR -> viewModel.onBiometricUnavailable()
+                    VaultBiometricGate.Outcome.LOCKED_OUT -> viewModel.onBiometricLockout()
+                    VaultBiometricGate.Outcome.CANCELLED -> viewModel.onBiometricCancelled()
+                }
+            }
+        )
     }
 
     Column(
@@ -115,12 +146,15 @@ fun VaultScreen(
             }
             Spacer(Modifier.size(Spacing.md))
             Text(
-                "Hidden Photos",
+                when (state.phase) {
+                    VaultViewModel.Phase.UNLOCKED -> "Private Vault"
+                    else -> "Hidden Photos"
+                },
                 style = MaterialTheme.typography.headlineMedium,
                 color = colors.onBackground
             )
             Spacer(Modifier.weight(1f))
-            if (state.unlocked) {
+            if (state.phase == VaultViewModel.Phase.UNLOCKED) {
                 IconButton(onClick = { viewModel.onLockRequested() }) {
                     Icon(
                         Icons.Outlined.Lock,
@@ -133,9 +167,8 @@ fun VaultScreen(
 
         Spacer(Modifier.height(Spacing.xl))
 
-        if (!state.unlocked) {
-            // ── Locked: authentication only. No vault content is composed. ──────
-            LockedContent(
+        when (state.phase) {
+            VaultViewModel.Phase.SETUP_PIN -> SetupPinContent(
                 state = state,
                 pin = pin,
                 confirmPin = confirmPin,
@@ -147,136 +180,248 @@ fun VaultScreen(
                     viewModel.setPin()
                     pin = ""
                     confirmPin = ""
+                }
+            )
+            VaultViewModel.Phase.SETUP_BIOMETRIC -> SetupBiometricContent(
+                onEnable = {
+                    val host = activity
+                    if (host == null) {
+                        viewModel.skipBiometricFromSetup()
+                        return@SetupBiometricContent
+                    }
+                    viewModel.onBiometricPromptActive()
+                    VaultBiometricGate.authenticate(
+                        activity = host,
+                        title = "Enable biometric unlock",
+                        subtitle = "Confirm your biometric to unlock Hidden Photos faster",
+                        negativeButton = "Not now",
+                        onResult = { outcome ->
+                            viewModel.onBiometricPromptFinished()
+                            when (outcome) {
+                                VaultBiometricGate.Outcome.AUTHENTICATED ->
+                                    viewModel.enableBiometricFromSetup()
+                                VaultBiometricGate.Outcome.UNAVAILABLE,
+                                VaultBiometricGate.Outcome.UNSUPPORTED ->
+                                    viewModel.skipBiometricFromSetup()
+                                else -> Unit
+                            }
+                        }
+                    )
                 },
+                onSkip = { viewModel.skipBiometricFromSetup() }
+            )
+            VaultViewModel.Phase.LOCKED -> UnlockContent(
+                state = state,
+                pin = pin,
+                onPinChange = { pin = it },
                 onUnlock = {
                     viewModel.clearPin()
                     pin.forEach(viewModel::appendPinDigit)
                     viewModel.submitPin()
                     pin = ""
+                },
+                onUsePinInstead = { viewModel.onBiometricCancelled() },
+                onRequestBiometric = {
+                    val host = activity ?: return@UnlockContent
+                    viewModel.onBiometricPromptActive()
+                    VaultBiometricGate.authenticate(
+                        activity = host,
+                        onResult = { outcome ->
+                            viewModel.onBiometricPromptFinished()
+                            when (outcome) {
+                                VaultBiometricGate.Outcome.AUTHENTICATED ->
+                                    viewModel.onBiometricAuthenticated()
+                                VaultBiometricGate.Outcome.LOCKED_OUT ->
+                                    viewModel.onBiometricLockout()
+                                VaultBiometricGate.Outcome.CANCELLED ->
+                                    viewModel.onBiometricCancelled()
+                                else -> viewModel.onBiometricUnavailable()
+                            }
+                        }
+                    )
                 }
             )
-        } else {
-            UnlockedContent(state = state)
+            VaultViewModel.Phase.UNLOCKED -> UnlockedContent(
+                state = state,
+                onBiometricToggle = viewModel::setBiometricUnlockEnabled,
+                modifier = Modifier.weight(1f)
+            )
         }
     }
 }
 
 @Composable
-private fun LockedContent(
+private fun SetupPinContent(
     state: VaultViewModel.VaultUiState,
     pin: String,
     confirmPin: String,
     onPinChange: (String) -> Unit,
     onConfirmPinChange: (String) -> Unit,
-    onSetPin: () -> Unit,
-    onUnlock: () -> Unit
+    onSetPin: () -> Unit
 ) {
     val colors = MaterialTheme.colorScheme
-    Column(Modifier.fillMaxWidth()) {
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .verticalScroll(rememberScrollState())
+    ) {
         Text(
-            if (state.pinConfigured) "Vault locked" else "Set up your vault PIN",
+            "Set up Vault PIN",
             style = MaterialTheme.typography.titleMedium,
             color = colors.onBackground
         )
         Spacer(Modifier.height(Spacing.xs))
         Text(
-            if (state.pinConfigured) {
-                "Authenticate to view hidden photos and videos."
+            "Hidden media is encrypted and protected by a vault PIN. " +
+                "This is separate from your device lock screen.",
+            style = MaterialTheme.typography.bodyMedium,
+            color = colors.onSurfaceVariant
+        )
+        Spacer(Modifier.height(Spacing.md))
+        OutlinedTextField(
+            value = pin,
+            onValueChange = { if (it.length <= 12 && it.all(Char::isDigit)) onPinChange(it) },
+            label = { Text("Vault PIN (min ${VaultPinCrypto.MIN_PIN_LENGTH} digits)") },
+            singleLine = true,
+            visualTransformation = PasswordVisualTransformation(),
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
+            modifier = Modifier.fillMaxWidth()
+        )
+        Spacer(Modifier.height(Spacing.sm))
+        OutlinedTextField(
+            value = confirmPin,
+            onValueChange = { if (it.length <= 12 && it.all(Char::isDigit)) onConfirmPinChange(it) },
+            label = { Text("Confirm vault PIN") },
+            singleLine = true,
+            visualTransformation = PasswordVisualTransformation(),
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
+            modifier = Modifier.fillMaxWidth()
+        )
+        if (state.error != null) {
+            Spacer(Modifier.height(Spacing.sm))
+            Text(state.error, style = MaterialTheme.typography.bodySmall, color = colors.error)
+        }
+        Spacer(Modifier.height(Spacing.md))
+        val matching = pin.length >= VaultPinCrypto.MIN_PIN_LENGTH && pin == confirmPin
+        Button(
+            onClick = onSetPin,
+            enabled = matching,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text("Set PIN")
+        }
+    }
+}
+
+@Composable
+private fun SetupBiometricContent(
+    onEnable: () -> Unit,
+    onSkip: () -> Unit
+) {
+    val colors = MaterialTheme.colorScheme
+    Column(Modifier.fillMaxWidth()) {
+        Text(
+            "Vault PIN created successfully",
+            style = MaterialTheme.typography.titleMedium,
+            color = colors.onBackground
+        )
+        Spacer(Modifier.height(Spacing.xs))
+        Text(
+            "Unlock Hidden Photos faster with biometrics. " +
+                "Your vault PIN remains available as a fallback. " +
+                "Biometric data stays on the device and is never stored by My Drive.",
+            style = MaterialTheme.typography.bodyMedium,
+            color = colors.onSurfaceVariant
+        )
+        Spacer(Modifier.height(Spacing.md))
+        Button(onClick = onEnable, modifier = Modifier.fillMaxWidth()) {
+            Text("Enable Biometric Unlock")
+        }
+        Spacer(Modifier.height(Spacing.sm))
+        OutlinedButton(onClick = onSkip, modifier = Modifier.fillMaxWidth()) {
+            Text("Not Now")
+        }
+    }
+}
+
+@Composable
+private fun UnlockContent(
+    state: VaultViewModel.VaultUiState,
+    pin: String,
+    onPinChange: (String) -> Unit,
+    onUnlock: () -> Unit,
+    onUsePinInstead: () -> Unit,
+    onRequestBiometric: () -> Unit
+) {
+    val colors = MaterialTheme.colorScheme
+    val showBiometricButton = state.biometricUnlockEnabled && state.biometricHardwareAvailable
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .verticalScroll(rememberScrollState())
+    ) {
+        Text(
+            "Unlock Private Vault",
+            style = MaterialTheme.typography.titleMedium,
+            color = colors.onBackground
+        )
+        Spacer(Modifier.height(Spacing.xs))
+        Text(
+            if (showBiometricButton) {
+                "Authenticate with biometrics, or enter your vault PIN."
             } else {
-                "Hidden media is encrypted and protected by a vault PIN. " +
-                    "This is separate from your device lock screen."
+                "Enter your vault PIN to view hidden photos and videos."
             },
             style = MaterialTheme.typography.bodyMedium,
             color = colors.onSurfaceVariant
         )
-
-        if (!state.pinConfigured) {
+        if (showBiometricButton) {
             Spacer(Modifier.height(Spacing.md))
-            OutlinedTextField(
-                value = pin,
-                onValueChange = { if (it.length <= 12 && it.all(Char::isDigit)) onPinChange(it) },
-                label = { Text("Vault PIN (min 6 digits)") },
-                singleLine = true,
-                visualTransformation = PasswordVisualTransformation(),
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
-                modifier = Modifier.fillMaxWidth()
-            )
+            Button(onClick = onRequestBiometric, modifier = Modifier.fillMaxWidth()) {
+                Text("Unlock with biometrics")
+            }
             Spacer(Modifier.height(Spacing.sm))
-            OutlinedTextField(
-                value = confirmPin,
-                onValueChange = { if (it.length <= 12 && it.all(Char::isDigit)) onConfirmPinChange(it) },
-                label = { Text("Confirm vault PIN") },
-                singleLine = true,
-                visualTransformation = PasswordVisualTransformation(),
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
-                modifier = Modifier.fillMaxWidth()
-            )
-        } else {
-            Spacer(Modifier.height(Spacing.md))
-            OutlinedTextField(
-                value = pin,
-                onValueChange = { if (it.length <= 12 && it.all(Char::isDigit)) onPinChange(it) },
-                label = { Text("Vault PIN") },
-                singleLine = true,
-                visualTransformation = PasswordVisualTransformation(),
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
-                modifier = Modifier.fillMaxWidth()
-            )
+            OutlinedButton(onClick = onUsePinInstead, modifier = Modifier.fillMaxWidth()) {
+                Text("Use vault PIN")
+            }
         }
-
+        Spacer(Modifier.height(Spacing.md))
+        OutlinedTextField(
+            value = pin,
+            onValueChange = { if (it.length <= 12 && it.all(Char::isDigit)) onPinChange(it) },
+            label = { Text("Vault PIN") },
+            singleLine = true,
+            visualTransformation = PasswordVisualTransformation(),
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
+            modifier = Modifier.fillMaxWidth()
+        )
         if (state.error != null) {
             Spacer(Modifier.height(Spacing.sm))
-            Text(
-                state.error,
-                style = MaterialTheme.typography.bodySmall,
-                color = colors.error
-            )
+            Text(state.error, style = MaterialTheme.typography.bodySmall, color = colors.error)
         }
-
         Spacer(Modifier.height(Spacing.md))
-        val ready = if (state.pinConfigured) {
-            pin.isNotEmpty()
-        } else {
-            pin.length >= 6 && pin == confirmPin
-        }
         Button(
-            onClick = { if (state.pinConfigured) onUnlock() else onSetPin() },
-            enabled = ready,
+            onClick = onUnlock,
+            enabled = pin.isNotEmpty(),
             modifier = Modifier.fillMaxWidth()
         ) {
-            Text(if (state.pinConfigured) "Unlock" else "Set PIN")
+            Text("Unlock")
         }
-
-        Spacer(Modifier.height(Spacing.md))
-        Text(
-            if (state.biometricOffered) {
-                "Biometric unlock is available on this device."
-            } else {
-                "Biometric unlock is not used; the vault PIN is the only unlock method."
-            },
-            style = MaterialTheme.typography.bodySmall,
-            color = colors.onSurfaceVariant
-        )
     }
 }
 
-/**
- * Unlocked: the hidden media list.
- *
- * Only reached after a successful unlock. Because no vault items can exist until the
- * hide flow is implemented, this renders the empty state today; it lists metadata
- * only (no thumbnail is generated into shared storage).
- */
 @Composable
-private fun UnlockedContent(state: VaultViewModel.VaultUiState) {
+private fun UnlockedContent(
+    state: VaultViewModel.VaultUiState,
+    onBiometricToggle: (Boolean) -> Unit,
+    modifier: Modifier = Modifier
+) {
     val colors = MaterialTheme.colorScheme
-    Column(Modifier.fillMaxWidth()) {
-        Text(
-            "${state.items.size} hidden item${if (state.items.size == 1) "" else "s"}",
-            style = MaterialTheme.typography.titleMedium,
-            color = colors.onBackground
-        )
-        Spacer(Modifier.height(Spacing.md))
+    Column(
+        modifier
+            .fillMaxWidth()
+            .verticalScroll(rememberScrollState())
+    ) {
         if (state.items.isEmpty()) {
             Box(
                 modifier = Modifier
@@ -285,37 +430,81 @@ private fun UnlockedContent(state: VaultViewModel.VaultUiState) {
                     .background(colors.surfaceVariant)
                     .padding(Spacing.md)
             ) {
-                Text(
-                    "Nothing is hidden yet. Media you hide will appear here, " +
-                        "encrypted on this device.",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = colors.onSurfaceVariant
-                )
-            }
-            return
-        }
-        LazyVerticalGrid(
-            columns = GridCells.Fixed(2),
-            contentPadding = PaddingValues(bottom = Spacing.md),
-            horizontalArrangement = Arrangement.spacedBy(Spacing.sm),
-            verticalArrangement = Arrangement.spacedBy(Spacing.sm)
-        ) {
-            items(state.items, key = { it.vaultItemId }) { item ->
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(12.dp))
-                        .background(colors.surfaceVariant)
-                        .padding(Spacing.sm)
-                ) {
+                Column {
                     Text(
-                        item.originalFileName,
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = colors.onSurface
+                        "No hidden photos yet",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = colors.onBackground
                     )
                     Spacer(Modifier.height(Spacing.xs))
                     Text(
-                        "${item.originalMimeType} · ${item.originalFileSize / 1024} KB",
+                        "Media you hide will appear here, encrypted on this device.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = colors.onSurfaceVariant
+                    )
+                }
+            }
+        } else {
+            Text(
+                "${state.items.size} hidden item${if (state.items.size == 1) "" else "s"}",
+                style = MaterialTheme.typography.titleMedium,
+                color = colors.onBackground
+            )
+            Spacer(Modifier.height(Spacing.md))
+            val rows = state.items.chunked(2)
+            rows.forEach { row ->
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(Spacing.sm)
+                ) {
+                    row.forEach { item ->
+                        Column(
+                            modifier = Modifier
+                                .weight(1f)
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(colors.surfaceVariant)
+                                .padding(Spacing.sm)
+                        ) {
+                            Text(
+                                item.originalFileName,
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = colors.onSurface
+                            )
+                            Spacer(Modifier.height(Spacing.xs))
+                            Text(
+                                "${item.originalMimeType} · ${item.originalFileSize / 1024} KB",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = colors.onSurfaceVariant
+                            )
+                        }
+                    }
+                    if (row.size == 1) {
+                        Spacer(Modifier.weight(1f))
+                    }
+                }
+                Spacer(Modifier.height(Spacing.sm))
+            }
+        }
+
+        Spacer(Modifier.height(Spacing.lg))
+        SettingsGroup(title = "Security") {
+            if (state.biometricHardwareAvailable) {
+                SettingsSwitchRow(
+                    title = "Biometric unlock",
+                    subtitle = "Use the device biometric prompt. Vault PIN remains the fallback.",
+                    checked = state.biometricUnlockEnabled,
+                    onCheckedChange = onBiometricToggle
+                )
+            } else {
+                Column(Modifier.padding(horizontal = Spacing.md, vertical = Spacing.sm)) {
+                    Text(
+                        "Biometric unlock",
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = colors.onBackground
+                    )
+                    Spacer(Modifier.height(2.dp))
+                    Text(
+                        "No supported biometric is enrolled on this device. Use your vault PIN.",
                         style = MaterialTheme.typography.bodySmall,
                         color = colors.onSurfaceVariant
                     )
@@ -323,4 +512,13 @@ private fun UnlockedContent(state: VaultViewModel.VaultUiState) {
             }
         }
     }
+}
+
+private fun Context.findFragmentActivity(): FragmentActivity? {
+    var current: Context? = this
+    while (current is ContextWrapper) {
+        if (current is FragmentActivity) return current
+        current = current.baseContext
+    }
+    return null
 }

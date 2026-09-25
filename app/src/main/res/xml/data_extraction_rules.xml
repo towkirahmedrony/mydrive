@@ -21,6 +21,7 @@
         <!-- The encrypted vault directory never leaves the device: not via
              cloud backup, and not via device-to-device transfer. -->
         <exclude domain="file" path="vault/" />
+        <exclude domain="sharedpref" path="mydrive_vault_credentials.xml" />
     </cloud-backup>
     <device-transfer>
         <exclude domain="database" path="upload_queue.db" />
@@ -30,5 +31,6 @@
         <!-- The encrypted vault directory never leaves the device: not via
              cloud backup, and not via device-to-device transfer. -->
         <exclude domain="file" path="vault/" />
+        <exclude domain="sharedpref" path="mydrive_vault_credentials.xml" />
     </device-transfer>
 </data-extraction-rules>

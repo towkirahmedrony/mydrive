@@ -33,7 +33,12 @@ object SecretRedactor {
         "servicerole",
         "private_key",
         "privatekey",
-        "jwt"
+        "jwt",
+        "pin",
+        "vault_pin",
+        "vaultpin",
+        "pin_verifier",
+        "pin_verifier_sealed"
     )
 
     private val patterns = listOf(
@@ -49,7 +54,9 @@ object SecretRedactor {
         Regex("(?i)(service[_-]?role[^\\s\"']*[:=]\\s*[\"']?)([^\\s,;\"']+)"),
         Regex("(?i)(bot[_-]?token\\s*[:=]\\s*[\"']?)([^\\s,;\"']+)"),
         Regex("\\b\\d{8,10}:[A-Za-z0-9_-]{30,}\\b"),
-        Regex("(?i)(password\\s*[:=]\\s*[\"']?)([^\\s,;\"']+)")
+        Regex("(?i)(password\\s*[:=]\\s*[\"']?)([^\\s,;\"']+)"),
+        Regex("(?i)(vault[_-]?pin\\s*[:=]\\s*[\"']?)([^\\s,;\"']+)"),
+        Regex("(?i)(pin_verifier[_a-z]*\\s*[:=]\\s*[\"']?)([^\\s,;\"']+)")
     )
 
     fun text(value: String?): String {

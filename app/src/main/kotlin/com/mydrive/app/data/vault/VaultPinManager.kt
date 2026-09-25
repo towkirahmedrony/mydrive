@@ -18,9 +18,10 @@ import android.util.Base64
  *  - nothing here is ever logged, and the device lock-screen PIN/password is never
  *    requested or stored.
  *
- * This class holds only the verifier and its attempt counter. It deliberately does
- * NOT hold the unlocked-session state — that is [VaultSession] — so authentication
- * and authorisation can be reasoned about separately.
+ * This class holds only the verifier, its attempt counter, and the non-secret
+ * biometric-unlock preference. It deliberately does NOT hold the unlocked-session
+ * state — that is [VaultSession] — so authentication and authorisation can be
+ * reasoned about separately.
  */
 class VaultPinManager(
     context: Context,
@@ -28,8 +29,9 @@ class VaultPinManager(
     private val policy: VaultLockPolicy = VaultLockPolicy()
 ) {
 
-    private val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-    private val crypto = VaultCrypto(context)
+    private val prefs = context.applicationContext
+        .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+    private val crypto = VaultCrypto(context.applicationContext)
 
     sealed class VerifyResult {
         data class Success(val verifiedAt: Long) : VerifyResult()
@@ -45,9 +47,22 @@ class VaultPinManager(
         data object InvalidInput : VerifyResult()
     }
 
-    fun isPinConfigured(): Boolean =
-        !prefs.getString(KEY_VERIFIER, null).isNullOrBlank() &&
+    fun isPinConfigured(): Boolean {
+        val hasVerifier = !prefs.getString(KEY_VERIFIER, null).isNullOrBlank() &&
             !prefs.getString(KEY_SALT, null).isNullOrBlank()
+        if (hasVerifier && !prefs.getBoolean(KEY_CONFIGURED, false)) {
+            prefs.edit().putBoolean(KEY_CONFIGURED, true).apply()
+        }
+        return hasVerifier
+    }
+
+    fun isBiometricUnlockEnabled(): Boolean =
+        isPinConfigured() && prefs.getBoolean(KEY_BIOMETRIC_ENABLED, false)
+
+    fun setBiometricUnlockEnabled(enabled: Boolean) {
+        if (!isPinConfigured()) return
+        prefs.edit().putBoolean(KEY_BIOMETRIC_ENABLED, enabled).apply()
+    }
 
     fun isLockedOut(): Boolean = policy.isLocked(clock())
 
@@ -56,18 +71,23 @@ class VaultPinManager(
     /**
      * Enrols (or replaces) the vault PIN. Replacing it clears the failure state,
      * because a deliberate change by an authenticated user is not an attack.
+     *
+     * The plaintext PIN never leaves this method: it is hashed, the buffer is
+     * wiped by the caller, and only the Keystore-sealed verifier is persisted.
      */
     fun setPin(pin: CharArray): Boolean {
-        if (pin.size < VaultPinCrypto.MIN_PIN_LENGTH) return false
+        if (!VaultPinCrypto.isAcceptablePin(pin)) return false
         val salt = VaultPinCrypto.newSalt()
         val verifier = VaultPinCrypto.deriveVerifier(pin, salt)
         val sealedVerifier = crypto.sealString(Base64.encodeToString(verifier, Base64.NO_WRAP))
             ?: return false
-        prefs.edit()
+        val written = prefs.edit()
             .putString(KEY_SALT, Base64.encodeToString(salt, Base64.NO_WRAP))
             .putString(KEY_VERIFIER, sealedVerifier)
             .putInt(KEY_ITERATIONS, VaultPinCrypto.DEFAULT_ITERATIONS)
-            .apply()
+            .putBoolean(KEY_CONFIGURED, true)
+            .commit()
+        if (!written) return false
         policy.recordSuccess()
         return true
     }
@@ -77,7 +97,9 @@ class VaultPinManager(
         val now = clock()
         if (policy.isLocked(now)) return VerifyResult.LockedOut(policy.remainingLockMillis(now))
         if (!isPinConfigured()) return VerifyResult.NotConfigured
-        if (pin.isEmpty()) return VerifyResult.InvalidInput
+        if (pin.isEmpty() || pin.size < VaultPinCrypto.MIN_PIN_LENGTH) {
+            return VerifyResult.InvalidInput
+        }
 
         val saltEncoded = prefs.getString(KEY_SALT, null) ?: return VerifyResult.NotConfigured
         val sealedVerifier = prefs.getString(KEY_VERIFIER, null) ?: return VerifyResult.NotConfigured
@@ -109,7 +131,13 @@ class VaultPinManager(
      * whether to keep the vault recoverable.
      */
     fun clearPin() {
-        prefs.edit().remove(KEY_SALT).remove(KEY_VERIFIER).remove(KEY_ITERATIONS).apply()
+        prefs.edit()
+            .remove(KEY_SALT)
+            .remove(KEY_VERIFIER)
+            .remove(KEY_ITERATIONS)
+            .remove(KEY_CONFIGURED)
+            .remove(KEY_BIOMETRIC_ENABLED)
+            .apply()
         policy.recordSuccess()
     }
 
@@ -118,5 +146,7 @@ class VaultPinManager(
         const val KEY_SALT = "pin_salt"
         const val KEY_VERIFIER = "pin_verifier_sealed"
         const val KEY_ITERATIONS = "pin_iterations"
+        const val KEY_CONFIGURED = "vault_configured"
+        const val KEY_BIOMETRIC_ENABLED = "biometric_unlock_enabled"
     }
 }

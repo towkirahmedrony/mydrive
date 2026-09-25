@@ -17,4 +17,5 @@
         <!-- The encrypted vault directory never leaves the device: not via
              cloud backup, and not via device-to-device transfer. -->
         <exclude domain="file" path="vault/" />
+        <exclude domain="sharedpref" path="mydrive_vault_credentials.xml" />
 </full-backup-content>

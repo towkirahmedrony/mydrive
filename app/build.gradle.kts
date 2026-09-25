@@ -157,6 +157,8 @@ dependencies {
     implementation(libs.androidx.room.ktx)
     add("kapt", libs.androidx.room.compiler)
     implementation(libs.androidx.work.runtime.ktx)
+    implementation(libs.androidx.lifecycle.process)
+    implementation(libs.androidx.biometric)
     implementation("androidx.exifinterface:exifinterface:1.3.7")
     debugImplementation(libs.androidx.compose.ui.tooling)
     testImplementation(libs.junit)

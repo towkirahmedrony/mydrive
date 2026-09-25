@@ -38,6 +38,9 @@ import com.mydrive.app.debug.DeveloperLogDatabase
 import com.mydrive.app.debug.DeveloperLogger
 import com.mydrive.app.debug.DeveloperModeStore
 import com.mydrive.app.debug.LogCategory
+import androidx.lifecycle.DefaultLifecycleObserver
+import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.ProcessLifecycleOwner
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -199,6 +202,11 @@ class MyDriveApp : Application() {
             event = "APP_STARTED",
             message = "My Drive started"
         )
+        ProcessLifecycleOwner.get().lifecycle.addObserver(object : DefaultLifecycleObserver {
+            override fun onStop(owner: LifecycleOwner) {
+                vaultSession.onBackgrounded()
+            }
+        })
         authRepository
         UploadWorkScheduler.schedule(this)
         BackupDiscoveryScheduler.schedule(this)

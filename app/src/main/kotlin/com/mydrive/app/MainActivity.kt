@@ -1,9 +1,9 @@
 package com.mydrive.app
 
 import android.os.Bundle
-import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.fragment.app.FragmentActivity
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -20,7 +20,7 @@ import com.mydrive.app.ui.session.SessionViewModel
 import com.mydrive.app.ui.theme.MyDriveTheme
 import kotlinx.coroutines.launch
 
-class MainActivity : ComponentActivity() {
+class MainActivity : FragmentActivity() {
     private var mediaStoreMonitor: MediaStoreChangeMonitor? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {

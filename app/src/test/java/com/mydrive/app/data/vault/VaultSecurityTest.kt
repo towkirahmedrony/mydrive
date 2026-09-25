@@ -67,6 +67,19 @@ class VaultPinCryptoTest {
     @Test
     fun `pin policy rejects a too short pin`() {
         assertTrue(VaultPinCrypto.MIN_PIN_LENGTH >= 6)
+        assertFalse(VaultPinCrypto.isAcceptablePin("12345".toCharArray()))
+        assertTrue(VaultPinCrypto.isAcceptablePin("123456".toCharArray()))
+        assertFalse(VaultPinCrypto.isAcceptablePin("12345a".toCharArray()))
+        assertFalse(VaultPinCrypto.isAcceptablePin("1234567890123".toCharArray()))
+    }
+
+    @Test
+    fun `a verifier cannot be reversed to the pin`() {
+        val salt = ByteArray(16) { 9 }
+        val verifier = VaultPinCrypto.deriveVerifier(pin("246810"), salt, iterations = 1_000)
+        val encoded = Base64.getEncoder().encodeToString(verifier)
+        assertFalse(encoded.contains("246810"))
+        assertEquals(VaultPinCrypto.DEFAULT_KEY_BITS / 8, verifier.size)
     }
 }
 
@@ -140,6 +153,14 @@ class VaultSessionTest {
     @Test
     fun `a new session starts locked`() {
         assertFalse(session().isUnlocked())
+    }
+
+    @Test
+    fun `unlocking does not persist across a new session instance`() {
+        val first = session()
+        first.unlock()
+        assertTrue(first.isUnlocked())
+        assertFalse("a restarted process must start locked", session().isUnlocked())
     }
 
     @Test
