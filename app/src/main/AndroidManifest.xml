@@ -43,19 +43,6 @@
             </intent-filter>
         </activity>
 
-        <!--
-          Hosts the platform BiometricPrompt for the Private Vault. MainActivity is a
-          ComponentActivity, and android.hardware.biometrics.BiometricPrompt requires
-          a FragmentActivity, so the prompt lives in this dedicated, non-exported
-          activity instead of changing the app's existing entry point.
-        -->
-        <activity
-            android:name=".data.vault.VaultAuthActivity"
-            android:exported="false"
-            android:excludeFromRecents="true"
-            android:label="@string/vault_biometric_title"
-            android:noHistory="true"
-            android:theme="@style/AppTheme" />
 
     </application>
 </manifest>
