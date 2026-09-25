@@ -62,7 +62,7 @@ class BackupRepository(
         return BackupGate.Ready
     }
 
-    fun startBackup(ids: Collection<String>) {
+    fun startBackup(ids: Collection<String>, resumeIfPaused: Boolean = true) {
         if (gate() != BackupGate.Ready) {
             DeveloperLogger.warn(
                 category = LogCategory.SYSTEM,
@@ -80,9 +80,13 @@ class BackupRepository(
             return
         }
         ids.forEach { OperationTrace.idFor(it) }
-        syncRepository.setPaused(false)
+        if (resumeIfPaused) {
+            syncRepository.setPaused(false)
+        }
         syncRepository.enqueue(ids, ownerUserId)
-        scheduleUploadWork()
+        if (!syncRepository.paused.value) {
+            scheduleUploadWork()
+        }
     }
 
     fun retry(id: String) = retryAll(listOf(id))

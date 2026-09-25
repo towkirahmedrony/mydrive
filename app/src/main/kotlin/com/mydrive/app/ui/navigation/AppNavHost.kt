@@ -54,6 +54,7 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import com.mydrive.app.MyDriveApp
+import com.mydrive.app.data.backup.BackupDiscoveryReason
 import com.mydrive.app.data.local.GalleryTabStore
 import com.mydrive.app.data.repository.AuthRepository
 import com.mydrive.app.data.repository.BackupRepository
@@ -118,12 +119,19 @@ fun AppNavHost(
     var developerFabOffset by remember { mutableStateOf(Offset.Zero) }
     val permissionScope = rememberCoroutineScope()
     val loadState by repository.loadState.collectAsStateWithLifecycle()
+    val appContext = LocalContext.current.applicationContext as MyDriveApp
     MediaAccessRequest(
         needsPermission = loadState.needsPermission,
         permissions = repository.requiredPermissions(),
         onResult = {
             repository.markPermissionAsked()
-            permissionScope.launch { repository.refresh(force = true) }
+            permissionScope.launch {
+                if (repository.hasMediaReadPermission()) {
+                    appContext.automaticBackupCoordinator.request(BackupDiscoveryReason.PERMISSION_GRANTED)
+                } else {
+                    repository.refresh(force = true)
+                }
+            }
         }
     )
 
@@ -211,7 +219,12 @@ fun AppNavHost(
             }
             composable(AppDestination.Sync.route) {
                 val vm: SyncViewModel = viewModel(
-                    factory = SyncViewModel.factory(repository, syncRepository, backupRepository)
+                    factory = SyncViewModel.factory(
+                        repository,
+                        syncRepository,
+                        backupRepository,
+                        appContext.automaticBackupCoordinator
+                    )
                 )
                 SyncScreen(
                     viewModel = vm,

@@ -376,7 +376,7 @@ private fun SyncActions(
         }
         if (state.hasEligible) {
             PrimaryActionButton(
-                text = "Start Backup",
+                text = "Back up now",
                 onClick = viewModel::startBackup,
                 icon = Icons.Outlined.CloudUpload,
                 modifier = Modifier.fillMaxWidth()

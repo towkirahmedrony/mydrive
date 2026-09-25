@@ -10,6 +10,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.mydrive.app.data.auth.AuthState
+import com.mydrive.app.data.backup.BackupDiscoveryReason
 import com.mydrive.app.data.media.MediaStoreChangeMonitor
 import com.mydrive.app.ui.auth.AuthLoadingScreen
 import com.mydrive.app.ui.auth.AuthNavHost
@@ -59,6 +60,9 @@ class MainActivity : ComponentActivity() {
         val app = application as MyDriveApp
         val monitor = mediaStoreMonitor ?: MediaStoreChangeMonitor(this) {
             app.mediaRepository.onMediaStoreChanged()
+            lifecycleScope.launch {
+                app.automaticBackupCoordinator.request(BackupDiscoveryReason.MEDIASTORE)
+            }
         }.also { mediaStoreMonitor = it }
         monitor.start()
     }
@@ -68,7 +72,7 @@ class MainActivity : ComponentActivity() {
         val app = application as MyDriveApp
         app.authRepository.onAppForeground()
         lifecycleScope.launch {
-            app.mediaRepository.refresh(force = false)
+            app.automaticBackupCoordinator.request(BackupDiscoveryReason.FOREGROUND)
         }
     }
 

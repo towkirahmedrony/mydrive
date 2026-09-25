@@ -41,7 +41,7 @@ object MockMediaData {
     )
 
     val backupPreferences = BackupPreferences(
-        automaticBackup = false,
+        automaticBackup = true,
         backupPhotos = true,
         backupVideos = true,
         wifiOnly = true,

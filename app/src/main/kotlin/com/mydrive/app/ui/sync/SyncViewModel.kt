@@ -7,7 +7,9 @@ import com.mydrive.app.data.local.SyncRecord
 import com.mydrive.app.data.model.BackupState
 import com.mydrive.app.data.model.MediaItem
 import com.mydrive.app.data.model.backupStateFor
-import com.mydrive.app.data.model.isEligibleForBackup
+import com.mydrive.app.data.backup.AutomaticBackupCoordinator
+import com.mydrive.app.data.backup.BackupDiscoveryReason
+import com.mydrive.app.data.backup.BackupDiscoveryResult
 import com.mydrive.app.data.model.MediaLoadState
 import com.mydrive.app.data.model.MediaType
 import com.mydrive.app.data.model.TelegramConnectionState
@@ -84,7 +86,8 @@ data class SyncUiState(
 class SyncViewModel(
     private val repository: MediaRepository,
     private val syncRepository: SyncRepository,
-    private val backupRepository: BackupRepository
+    private val backupRepository: BackupRepository,
+    private val automaticBackupCoordinator: AutomaticBackupCoordinator? = null
 ) : ViewModel() {
 
     private val actionNotice = MutableStateFlow<String?>(null)
@@ -122,20 +125,26 @@ class SyncViewModel(
                 actionNotice.value = gate.message()
                 return@launch
             }
-            val eligible = withContext(Dispatchers.Default) {
-                val records = syncRepository.records.value
-                repository.deviceMedia.value
-                    .filter { item ->
-                        // Eligibility consults the authoritative cloud record
-                        // (`cloudBackedUp`), not just the install-local queue: a
-                        // media the cloud already holds must never be uploaded
-                        // again, even when the local queue was lost or re-keyed.
-                        isEligibleForBackup(
-                            item = item,
-                            recordState = records[item.id]?.state?.toBackupState()?.resumeLocally()
-                        )
+            val coordinator = automaticBackupCoordinator
+            if (coordinator != null) {
+                when (val result = coordinator.request(BackupDiscoveryReason.MANUAL)) {
+                    BackupDiscoveryResult.NothingToBackup,
+                    BackupDiscoveryResult.PermissionDenied -> {
+                        actionNotice.value = "No photos or videos are ready to back up."
                     }
-                    .map { it.id }
+                    BackupDiscoveryResult.NoSession -> {
+                        actionNotice.value = "Sign in to back up photos."
+                    }
+                    else -> Unit
+                }
+                return@launch
+            }
+            val eligible = withContext(Dispatchers.Default) {
+                AutomaticBackupCoordinator.selectEligibleBackupIds(
+                    deviceItems = repository.deviceMedia.value,
+                    libraryItems = repository.media.value,
+                    records = syncRepository.records.value
+                )
             }
             if (eligible.isEmpty()) {
                 actionNotice.value = "No photos or videos are ready to back up."
@@ -346,12 +355,18 @@ class SyncViewModel(
         fun factory(
             repository: MediaRepository,
             syncRepository: SyncRepository,
-            backupRepository: BackupRepository
+            backupRepository: BackupRepository,
+            automaticBackupCoordinator: AutomaticBackupCoordinator? = null
         ): ViewModelProvider.Factory =
             object : ViewModelProvider.Factory {
                 @Suppress("UNCHECKED_CAST")
                 override fun <T : ViewModel> create(modelClass: Class<T>): T {
-                    return SyncViewModel(repository, syncRepository, backupRepository) as T
+                    return SyncViewModel(
+                        repository,
+                        syncRepository,
+                        backupRepository,
+                        automaticBackupCoordinator
+                    ) as T
                 }
             }
     }

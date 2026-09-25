@@ -39,6 +39,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -52,10 +53,13 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.mydrive.app.MyDriveApp
+import com.mydrive.app.data.backup.BackupDiscoveryReason
 import com.mydrive.app.ui.components.AlbumCard
 import com.mydrive.app.ui.components.EmptyState
 import com.mydrive.app.ui.components.SearchField
 import com.mydrive.app.ui.permission.MediaPermissionScreen
+import kotlinx.coroutines.launch
 import com.mydrive.app.ui.theme.CardShape
 import com.mydrive.app.ui.theme.Copper
 import com.mydrive.app.ui.theme.Spacing
@@ -88,10 +92,17 @@ fun AlbumsScreen(
     val gridState = rememberSaveable(saver = LazyGridState.Saver) { LazyGridState() }
     val columnCount = albumGridColumnCount(LocalConfiguration.current.screenWidthDp)
 
+    val permissionScope = rememberCoroutineScope()
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) {
         viewModel.onPermissionResult()
+        val app = context.applicationContext as? MyDriveApp
+        if (app != null && app.mediaRepository.hasMediaReadPermission()) {
+            permissionScope.launch {
+                app.automaticBackupCoordinator.request(BackupDiscoveryReason.PERMISSION_GRANTED)
+            }
+        }
     }
 
     DisposableEffect(lifecycleOwner) {

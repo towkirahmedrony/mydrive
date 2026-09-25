@@ -18,6 +18,9 @@ import com.mydrive.app.data.remote.NetworkMonitor
 import com.mydrive.app.data.remote.SupabaseConfig
 import com.mydrive.app.data.remote.SupabaseModule
 import com.mydrive.app.data.remote.TelegramApiVerifier
+import com.mydrive.app.data.backup.AutomaticBackupCoordinator
+import com.mydrive.app.data.backup.BackupDiscoveryReason
+import com.mydrive.app.data.worker.BackupDiscoveryScheduler
 import com.mydrive.app.data.worker.UploadWorkScheduler
 import com.mydrive.app.data.local.LibraryVisibilityStore
 import com.mydrive.app.data.local.MediaSyncCursorStore
@@ -117,7 +120,32 @@ class MyDriveApp : Application() {
             queueLookup = syncRepository::queueEntity,
             queuedMediaResolver = mediaStoreDataSource::resolveQueuedMedia,
             uriProbe = mediaStoreDataSource::probeUri,
-            scheduleUploadWork = { UploadWorkScheduler.schedule(this) }
+            scheduleUploadWork = {
+                val prefs = mediaRepository.preferences.value
+                UploadWorkScheduler.schedule(
+                    context = this,
+                    wifiOnly = prefs.wifiOnly,
+                    charging = prefs.uploadWhileCharging
+                )
+            }
+        )
+    }
+
+    val automaticBackupCoordinator: AutomaticBackupCoordinator by lazy {
+        AutomaticBackupCoordinator(
+            canReadMedia = { mediaRepository.hasMediaReadPermission() },
+            automaticBackupEnabled = { mediaRepository.preferences.value.automaticBackup },
+            currentUserId = { sessionProvider.currentUserIdOrNull() },
+            refreshLibrary = { force, localOverlayOnly ->
+                mediaRepository.refresh(force = force, localOverlayOnly = localOverlayOnly)
+            },
+            deviceMedia = { mediaRepository.deviceMedia.value },
+            libraryMedia = { mediaRepository.media.value },
+            records = { syncRepository.records.value },
+            startBackup = { ids, resumeIfPaused ->
+                backupRepository.startBackup(ids, resumeIfPaused = resumeIfPaused)
+            },
+            isPaused = { syncRepository.paused.value }
         )
     }
 
@@ -125,7 +153,12 @@ class MyDriveApp : Application() {
         AccountSessionCoordinator(
             context = this,
             mediaRepository = mediaRepository,
-            syncRepository = syncRepository
+            syncRepository = syncRepository,
+            onAuthenticatedReady = {
+                applicationScope.launch {
+                    automaticBackupCoordinator.request(BackupDiscoveryReason.AUTHENTICATED)
+                }
+            }
         )
     }
 
@@ -151,8 +184,12 @@ class MyDriveApp : Application() {
         )
         authRepository
         UploadWorkScheduler.schedule(this)
+        BackupDiscoveryScheduler.schedule(this)
         // One sweep per process start reclaims whatever the previous run left
         // behind — interrupted writes included — before the caches grow again.
         applicationScope.launch { MediaDiskCache.trim(filesDir) }
+        applicationScope.launch {
+            automaticBackupCoordinator.request(BackupDiscoveryReason.APP_START)
+        }
     }
 }

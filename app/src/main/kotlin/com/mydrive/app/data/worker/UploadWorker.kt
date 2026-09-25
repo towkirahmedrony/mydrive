@@ -23,9 +23,19 @@ object UploadWorkScheduler {
         WorkManager.getInstance(context).cancelUniqueWork(UNIQUE_WORK_NAME)
     }
 
-    fun schedule(context: Context, replace: Boolean = false) {
+    fun schedule(
+        context: Context,
+        replace: Boolean = false,
+        wifiOnly: Boolean = false,
+        charging: Boolean = false
+    ) {
+        val networkType = if (wifiOnly) NetworkType.UNMETERED else NetworkType.CONNECTED
+        val constraints = Constraints.Builder()
+            .setRequiredNetworkType(networkType)
+            .apply { if (charging) setRequiresCharging(true) }
+            .build()
         val request = OneTimeWorkRequestBuilder<UploadWorker>()
-            .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
+            .setConstraints(constraints)
             .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS)
             .build()
         val policy = if (replace) ExistingWorkPolicy.REPLACE else ExistingWorkPolicy.KEEP
@@ -38,7 +48,8 @@ object UploadWorkScheduler {
             metadata = mapOf(
                 "unique_name" to UNIQUE_WORK_NAME,
                 "policy" to policy.name,
-                "network" to "CONNECTED",
+                "network" to networkType.name,
+                "charging" to charging.toString(),
                 "backoff" to "EXPONENTIAL_30s"
             )
         )

@@ -29,6 +29,10 @@ class BackupEligibilityTest {
         type = MediaType.PHOTO,
         mimeType = "image/jpeg",
         fileSizeBytes = 1024L,
+        capturedAtMillis = 1L,
+        device = "Pixel",
+        resolution = "100 x 100",
+        thumbnailSeed = id.hashCode(),
         backupState = backupState,
         cloudBackedUp = cloudBackedUp
     )
