@@ -1895,8 +1895,8 @@ class MediaRepository(
                 height = item.height,
                 durationMillis = item.durationMillis,
                 capturedAtMillis = item.capturedAtMillis,
-                albumId = resolved.albumId,
-                albumName = resolved.albumName,
+                albumId = resolved.id,
+                albumName = resolved.name,
                 type = item.type.name
             )
         )
