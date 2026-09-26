@@ -2,6 +2,7 @@ package com.mydrive.app.data.media
 
 import com.mydrive.app.data.model.MediaItem
 import com.mydrive.app.data.model.MediaType
+import com.mydrive.app.data.model.cacheVersion
 
 /**
  * Everything an album grid needs to render one cover, already reduced to the
@@ -17,7 +18,9 @@ data class AlbumCover(
     val previewUri: String?,
     val remoteMediaId: String?,
     val seed: Int,
-    val type: MediaType
+    val type: MediaType,
+    /** The cover media's change signal, so its cached thumbnail is only re-derived when it changed. */
+    val version: String
 )
 
 /**
@@ -72,7 +75,8 @@ object AlbumCoverResolver {
                 previewUri = cloudUri,
                 remoteMediaId = item.remoteMediaId?.takeIf { it.isNotBlank() },
                 seed = item.thumbnailSeed,
-                type = item.type
+                type = item.type,
+                version = item.cacheVersion
             )
         } else {
             AlbumCover(
@@ -80,7 +84,8 @@ object AlbumCoverResolver {
                 previewUri = null,
                 remoteMediaId = item.remoteMediaId?.takeIf { it.isNotBlank() },
                 seed = item.thumbnailSeed,
-                type = item.type
+                type = item.type,
+                version = item.cacheVersion
             )
         }
     }

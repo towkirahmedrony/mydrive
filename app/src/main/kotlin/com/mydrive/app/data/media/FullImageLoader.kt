@@ -37,7 +37,8 @@ object FullImageLoader {
         uriString: String,
         maxDimPx: Int = 2048,
         mediaId: String? = null,
-        userId: String? = AccountSession.userId
+        userId: String? = AccountSession.userId,
+        version: String? = null
     ): Bitmap? {
         if (uriString.isBlank() && mediaId.isNullOrBlank()) return null
         val key = MediaCacheKeys.memoryKey(
@@ -45,7 +46,8 @@ object FullImageLoader {
             mediaId = mediaId,
             uri = uriString,
             variant = MediaCacheKeys.VARIANT_ORIGINAL,
-            sizePx = maxDimPx
+            sizePx = maxDimPx,
+            version = version
         )
         if (key == "blocked-remote") return null
         return cache.get(key)
@@ -58,7 +60,9 @@ object FullImageLoader {
         fallbackMediaId: String? = null,
         previewUri: String? = null,
         sessionProvider: AuthenticatedSessionProvider? = null,
-        userId: String? = AccountSession.userId
+        userId: String? = AccountSession.userId,
+        /** The source's change signal, so a re-saved file does not serve stale pixels. */
+        version: String? = null
     ): Bitmap? = withContext(Dispatchers.IO) {
         val preview = previewUri?.trim().orEmpty()
         if (uriString.isBlank() && preview.isBlank() && fallbackMediaId.isNullOrBlank()) return@withContext null
@@ -94,7 +98,8 @@ object FullImageLoader {
             mediaId = fallbackMediaId,
             uri = uriString.ifBlank { preview },
             variant = MediaCacheKeys.VARIANT_ORIGINAL,
-            sizePx = maxDimPx
+            sizePx = maxDimPx,
+            version = version
         )
         if (key == "blocked-remote") {
             MediaDiagnosticLogger.error(attempt, "AVAILABILITY", "REMOTE_CACHE_KEY_BLOCKED", "no owner id for a remote URI")
@@ -115,7 +120,7 @@ object FullImageLoader {
 
         val appContext = context.applicationContext
         val diskFile = if (!ownerId.isNullOrBlank() && !fallbackMediaId.isNullOrBlank()) {
-            MediaCacheKeys.originalFile(appContext.filesDir, ownerId, fallbackMediaId)
+            MediaCacheKeys.originalFile(appContext.filesDir, ownerId, fallbackMediaId, version)
         } else {
             null
         }

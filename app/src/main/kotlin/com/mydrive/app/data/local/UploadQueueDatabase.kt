@@ -176,6 +176,8 @@ abstract class UploadQueueDatabase : RoomDatabase() {
          */
         private val MIGRATION_5_6 = object : Migration(5, 6) {
             override fun migrate(database: SupportSQLiteDatabase) {
+                // The CREATE INDEX for this table is added by MIGRATION_6_7, so a
+                // device upgrading from v5 ends up with the identical schema.
                 database.execSQL(
                     "CREATE TABLE IF NOT EXISTS `media_catalog` (" +
                         "`ownerUserId` TEXT NOT NULL, " +
@@ -229,16 +231,23 @@ abstract class UploadQueueDatabase : RoomDatabase() {
         }
 
         /**
-         * Drops the album-statistics side table.
+         * Drops the album-statistics side table and indexes the catalog read.
          *
-         * It existed only to feed a synthetic "My Drive" album from an aggregate of
-         * cloud-only media. Album identity now comes from an item's own device
-         * folder, so the aggregate has no consumer. Additive-only in every other
-         * respect: the gallery catalog and the upload queue keep their rows.
+         * `media_catalog_meta` existed only to feed a synthetic "My Drive" album
+         * from an aggregate of cloud-only media, and album identity now comes from
+         * an item's own device folder. The index serves the hydration query
+         * (`WHERE ownerUserId = ? ORDER BY capturedAtMillis DESC, mediaId ASC`),
+         * which runs on the launch critical path. Additive-only otherwise: the
+         * gallery catalog and the upload queue keep their rows.
          */
         private val MIGRATION_6_7 = object : Migration(6, 7) {
             override fun migrate(database: SupportSQLiteDatabase) {
                 database.execSQL("DROP TABLE IF EXISTS `media_catalog_meta`")
+                database.execSQL(
+                    "CREATE INDEX IF NOT EXISTS " +
+                        "`index_media_catalog_ownerUserId_capturedAtMillis_mediaId` " +
+                        "ON `media_catalog` (`ownerUserId`, `capturedAtMillis`, `mediaId`)"
+                )
             }
         }
 

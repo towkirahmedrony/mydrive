@@ -204,6 +204,11 @@ class MyDriveApp : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        // The gallery catalog lives in this app's Room database, and opening it —
+        // including any pending migration — is the slowest part of the first read.
+        // Paying it here, on IO and before auth resolves, keeps the launch read to
+        // one indexed scan so the first composition can draw the persisted gallery.
+        mediaRepository.warmLocalCatalog()
         DeveloperLogger.attach(DeveloperLogDatabase.get(this))
         DeveloperLogger.info(
             category = LogCategory.SYSTEM,

@@ -362,17 +362,21 @@ class MediaRepository(
     private fun hydrateLocalCatalog(userId: String) {
         if (catalogHydratedOwner == userId) return
         catalogHydratedOwner = userId
-        val rows = mediaCatalogStore.snapshotBlocking(userId)
+        val startedAt = System.currentTimeMillis()
+        // Blocking-on-IO read, allowed on the main thread because the launch bind
+        // runs there and the gallery has to have its data before the first
+        // composition. Deferring this to a background read is what made a launch
+        // render an empty library and then fill it in once the scan finished.
+        val rows = mediaCatalogStore.snapshotForStartup(userId)
         synchronized(sessionLock) {
             if (boundUserId != userId) return
             // The cloud snapshot is only a synchronization seed and a failure
             // fallback; it is never the gallery.
             seedCloudRowsFromCache()
             if (rows.isNullOrEmpty()) {
-                // `rows == null` means "not known yet" (the blocking read was
-                // refused because this bind is running on the main thread) — never
-                // "empty". Keep restoring and finish off-thread; a loading state
-                // here would be a spinner over a gallery that may well exist.
+                // `rows == null` means the read itself failed — never "empty".
+                // Keep restoring and finish off-thread; a loading state here would
+                // be a spinner over a gallery that may well exist.
                 if (rows == null) {
                     _loadState.update { it.copy(isRestoring = true) }
                     scope.launch { hydrateLocalCatalogAsync(userId) }
@@ -403,17 +407,32 @@ class MediaRepository(
                 event = "CATALOG_HYDRATED",
                 message = "Gallery restored from the local catalog before any scan or network pass",
                 metadata = mapOf(
-                    "restored_media" to _media.value.size.toString(),
-                    "albums" to _albums.value.size.toString()
+                    "media" to _media.value.size.toString(),
+                    "albums" to _albums.value.size.toString(),
+                    "rows" to rows.size.toString(),
+                    "duration_ms" to (System.currentTimeMillis() - startedAt).toString()
                 )
             )
         }
     }
 
     /**
+     * Opens the local catalog database ahead of the launch bind.
+     *
+     * Opening the database — and running any pending migration — is the slowest
+     * part of the first read and pure overhead on a cold start. Paying it here, on
+     * IO and before auth resolves, keeps the launch read itself down to one
+     * indexed scan.
+     */
+    fun warmLocalCatalog() {
+        mediaCatalogStore.markWarmUpScheduled()
+        scope.launch { mediaCatalogStore.warmUp() }
+    }
+
+    /**
      * Same restoration, off the caller's thread, for the case where the blocking
-     * read was refused because the caller was on the main thread. The screen owns
-     * the loading state for those few milliseconds only.
+     * read could not be completed at all (a database failure). The screen owns the
+     * loading state for those few milliseconds only.
      */
     private suspend fun hydrateLocalCatalogAsync(userId: String) {
         val rows = mediaCatalogStore.snapshot(userId)
@@ -451,7 +470,7 @@ class MediaRepository(
      * already invisible to Compose; the persisted catalog is written for the same
      * reason only when something actually differs.
      */
-    private fun publishLibrary(items: List<MediaItem>) {
+    private fun publishLibrary(items: List<MediaItem>, prune: Boolean = true) {
         val previous = _media.value
         // Album identity is resolved once, here, for every path that reaches the
         // UI: composition, the local-overlay pass and the cloud-only fallback.
@@ -459,7 +478,25 @@ class MediaRepository(
         _media.value = resolved
         _albums.value = buildAlbums(resolved)
         updateStorage(resolved)
-        scheduleCatalogPersist(previous, resolved)
+        scheduleCatalogPersist(previous, resolved, prune)
+    }
+
+    /**
+     * Applies one local operation to the rendered library and the persisted
+     * catalog together.
+     *
+     * A delete, trash, restore, rename or rotate is already correct in memory;
+     * remembering it at the same moment is what keeps the next cold start correct
+     * instead of serving media the user removed until a scan happens to notice.
+     */
+    private fun mutateLibrary(transform: (List<MediaItem>) -> List<MediaItem>) {
+        val previous = _media.value
+        val updated = transform(previous)
+        if (updated == previous) return
+        _media.value = updated
+        _albums.value = buildAlbums(updated)
+        updateStorage(updated)
+        scheduleCatalogPersist(previous, updated)
     }
 
     /**
@@ -469,7 +506,11 @@ class MediaRepository(
      * the newest snapshot: a reconciliation that touches ten items writes ten
      * rows, a reconciliation that changes nothing writes nothing.
      */
-    private fun scheduleCatalogPersist(previous: List<MediaItem>, next: List<MediaItem>) {
+    private fun scheduleCatalogPersist(
+        previous: List<MediaItem>,
+        next: List<MediaItem>,
+        prune: Boolean = true
+    ) {
         val owner = boundUserId?.takeIf { it.isNotBlank() } ?: return
         if (MediaCatalogReconciler.diff(owner, previous, next).isEmpty) {
             // The rendered library did not change: nothing to write, and no
@@ -479,6 +520,7 @@ class MediaRepository(
         catalogDirty = true
         pendingCatalogPrevious = previous
         pendingCatalogNext = next
+        pendingCatalogPrune = prune
         if (catalogWriterJob?.isActive == true) return
         catalogWriterJob = scope.launch {
             catalogWriteMutex.withLock {
@@ -486,12 +528,14 @@ class MediaRepository(
                     catalogDirty = false
                     val snapshotPrevious = pendingCatalogPrevious
                     val snapshotNext = pendingCatalogNext
+                    val snapshotPrune = pendingCatalogPrune
                     if (boundUserId != owner) return@withLock
                     runCatching {
                         mediaCatalogStore.save(
                             ownerUserId = owner,
                             previous = snapshotPrevious,
-                            next = snapshotNext
+                            next = snapshotNext,
+                            prune = snapshotPrune
                         )
                     }.onFailure { error ->
                         // A cache write failure is not a gallery failure: the screen
@@ -513,6 +557,10 @@ class MediaRepository(
 
     @Volatile
     private var pendingCatalogNext: List<MediaItem> = emptyList()
+
+    /** Whether the pending write may delete rows this pass could not account for. */
+    @Volatile
+    private var pendingCatalogPrune: Boolean = true
 
     /**
      * The last known cloud-only snapshot, held as a failure fallback only.
@@ -768,12 +816,48 @@ class MediaRepository(
                     locallyHiddenIds.removeAll { it !in scannedIds && it !in trashedIds }
                 }
                 val records = syncRepository.records.value
-                val deviceItems = if (canReadLocal) {
+                val verifiedItems = if (canReadLocal) {
                     scanned
                         .filter { it.id !in locallyHiddenIds }
                         .map { item -> item.copy(isFavorite = item.id in favoriteIds).withRecord(records[item.id]) }
                 } else {
                     _deviceMedia.value
+                }
+                // A pass may only speak for the whole device when it could both
+                // read local media and see all of it. Anything else — no read
+                // permission, or "selected photos" partial access, or a failed
+                // collection query — is an incomplete view of the device and must
+                // never be allowed to shrink what the user can see.
+                val authoritativeLocalRead = canReadLocal &&
+                    localScanComplete &&
+                    permissions.access() == MediaAccess.GRANTED
+                val deviceItems = if (authoritativeLocalRead) {
+                    verifiedItems
+                } else {
+                    // Carry over what this pass could not verify, from the library
+                    // that is already on screen. The result is a superset of the
+                    // visible set, so an incomplete scan can add media but never
+                    // remove a folder or a photo the user already had.
+                    val verifiedIds = if (canReadLocal) scannedIds + trashedIds else emptySet()
+                    val carried = _media.value.filter { item ->
+                        item.id !in verifiedIds && item.originLocal && !item.isTrashed
+                    }
+                    if (carried.isEmpty()) {
+                        verifiedItems
+                    } else {
+                        DeveloperLogger.info(
+                            category = LogCategory.MEDIASTORE,
+                            event = "SCAN_INCOMPLETE_CARRYING_LIBRARY",
+                            message = "Local scan could not see every folder; keeping the known library",
+                            metadata = mapOf(
+                                "verified" to verifiedItems.size.toString(),
+                                "carried_over" to carried.size.toString(),
+                                "full_access" to (permissions.access() == MediaAccess.GRANTED).toString(),
+                                "scan_complete" to localScanComplete.toString()
+                            )
+                        )
+                        verifiedItems + carried
+                    }
                 }
                 if (!sessionStillCurrent(session, ownerId)) return
                 if (canReadLocal) {
@@ -802,8 +886,10 @@ class MediaRepository(
                             if (previous.id !in nextIds) rememberCloudCopy(previous.id)
                         }
                     }
-                    if (canReadLocal) {
+                    if (canReadLocal && localScanComplete) {
                         _deviceMedia.value = deviceItems
+                    }
+                    if (canReadLocal) {
                         // An incomplete trash scan keeps the last known Trash list
                         // instead of showing an empty Trash that never happened.
                         if (trashScan.complete) publishTrash(trashed)
@@ -817,7 +903,9 @@ class MediaRepository(
                             loadedRemoteRows
                         )
                         val libraryItems = mergePreservedCloudItems(cachedLibrary, deviceItems)
-                        publishLibrary(libraryItems)
+                        // A MediaStore notification may only add or update: only a
+                        // pass that could see the whole device may remove rows.
+                        publishLibrary(libraryItems, prune = authoritativeLocalRead)
                         _loadState.update { it.copy(isLoading = false, isRefreshing = false, isLoadingMore = false) }
                     }
                 }
@@ -831,10 +919,20 @@ class MediaRepository(
                         favoriteIds = favoriteIds,
                         records = records,
                         cursor = incrementalCursor,
+                        prune = authoritativeLocalRead,
                         now = now
                     )
                 } else {
-                    loadFirstPageLocked(session, ownerId, deviceItems, trashed, favoriteIds, records, now)
+                    loadFirstPageLocked(
+                        session,
+                        ownerId,
+                        deviceItems,
+                        trashed,
+                        favoriteIds,
+                        records,
+                        prune = authoritativeLocalRead,
+                        now = now
+                    )
                 }
             } catch (cancelled: CancellationException) {
                 // The caller went away (screen left, refresh superseded). Nothing
@@ -962,6 +1060,7 @@ class MediaRepository(
         trashed: List<MediaItem>,
         favoriteIds: Set<String>,
         records: Map<String, SyncRecord>,
+        prune: Boolean,
         now: Long
     ) {
         // "Replacing" means the user already has something on screen — content, or
@@ -991,7 +1090,7 @@ class MediaRepository(
                     MediaLibraryPaging.latestSyncCursor(null, page.rows)
                 )
                 val libraryItems = composeLibrary(deviceItems, trashed, favoriteIds, records, page.rows)
-                publishLibrary(libraryItems)
+                publishLibrary(libraryItems, prune = prune)
                 lastRefreshAt = now
                 _loadState.update {
                     it.copy(
@@ -1072,6 +1171,7 @@ class MediaRepository(
         favoriteIds: Set<String>,
         records: Map<String, SyncRecord>,
         cursor: MediaSyncCursor,
+        prune: Boolean,
         now: Long
     ) {
         val epoch = catalogEpoch
@@ -1150,7 +1250,7 @@ class MediaRepository(
             // guard that proved this pass still owns the catalog.
             mediaSyncCursorStore.advanceTo(position)
             val libraryItems = composeLibrary(deviceItems, trashed, favoriteIds, records, loadedRemoteRows)
-            publishLibrary(libraryItems)
+            publishLibrary(libraryItems, prune = prune)
             lastRefreshAt = now
             _loadState.update {
                 it.copy(
@@ -1519,7 +1619,8 @@ class MediaRepository(
                     mediaCount = albumItems.size,
                     coverUri = cover?.uri.orEmpty(),
                     coverPreviewUri = cover?.previewUri,
-                    coverRemoteMediaId = cover?.remoteMediaId
+                    coverRemoteMediaId = cover?.remoteMediaId,
+                    coverVersion = cover?.version
                 )
             }
             .sortedByDescending { it.mediaCount }
@@ -2427,8 +2528,7 @@ class MediaRepository(
         }
         if (keepLocalHide) {
             visibilityStore.hideLocal(id)
-            _media.update { items -> items.filter { it.id != id } }
-            rebuildAlbums()
+            mutateLibrary { items -> items.filter { it.id != id } }
         }
         when (result) {
             HideMediaResult.Success -> {
@@ -2533,13 +2633,14 @@ class MediaRepository(
             // on the server response can leave the same cloud copy visible in an
             // album while the local copy is already in Trash.
             visibilityStore.hideLocal(id)
-            _media.update { items ->
+            // Remember the removal now: waiting for a future cold-start scan to
+            // notice would put the trashed item back on screen first.
+            mutateLibrary { items ->
                 items.filterNot { candidate ->
                     candidate.id == id ||
                         (!remoteId.isNullOrBlank() && candidate.remoteMediaId == remoteId)
                 }
             }
-            rebuildAlbums()
             // Trash is reversible, so the persistent thumbnail is deliberately KEPT:
             // only the permanent-delete lifecycle may purge it. Moving media to
             // Trash must never make the thumbnail eligible for deletion.
@@ -3046,11 +3147,10 @@ class MediaRepository(
             _deviceMedia.update { items ->
                 items.map { if (it.id == id) updatedItem else it }
             }
-            _media.update { items ->
+            mutateLibrary { items ->
                 items.map { if (it.id == id) updatedItem else it }
             }
             syncRepository.updateQueueMedia(id, updatedItem)
-            rebuildAlbums()
         }
         updated
     }
@@ -3110,7 +3210,10 @@ class MediaRepository(
                     )
                 }
                 _deviceMedia.update { items -> items.map(::applyRotation) }
-                _media.update { items -> items.map(::applyRotation) }
+                // New dimensions and a new modification time: persisting them is
+                // what lets the rotated thumbnail be re-derived instead of the
+                // stale one being served from cache on the next launch.
+                mutateLibrary { items -> items.map(::applyRotation) }
                 FullImageLoader.clearCache()
             }
             written
@@ -3126,6 +3229,6 @@ class MediaRepository(
         try { context.contentResolver.query(uri, projection, null, null, null)?.use { cursor -> if (cursor.moveToFirst()) { val idx = cursor.getColumnIndex(MediaStore.MediaColumns.DATA); if (idx >= 0) cursor.getString(idx) else null } else null } } catch (_: Exception) { null }
     }
 
-    private fun rebuildAlbums() { _albums.value = buildAlbums(_media.value) }
+
 
 }

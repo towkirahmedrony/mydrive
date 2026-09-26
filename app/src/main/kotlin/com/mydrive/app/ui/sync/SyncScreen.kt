@@ -70,6 +70,7 @@ import com.mydrive.app.ui.theme.StatusIdle
 import com.mydrive.app.ui.theme.StatusSyncing
 import com.mydrive.app.ui.util.formatFileSize
 import com.mydrive.app.ui.util.formatTimeAgo
+import com.mydrive.app.data.model.cacheVersion
 
 @Composable
 fun SyncScreen(
@@ -543,7 +544,8 @@ private fun JobThumbnail(job: SyncJob) {
             fallbackMediaId = job.media.remoteMediaId,
             previewUri = job.media.thumbnailUrl,
             modifier = Modifier.fillMaxSize(),
-            sizePx = 128
+            sizePx = 128,
+            version = job.media.cacheVersion
         )
         if (job.media.type == MediaType.VIDEO) {
             Icon(

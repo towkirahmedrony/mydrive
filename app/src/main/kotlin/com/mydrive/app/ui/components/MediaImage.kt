@@ -44,7 +44,12 @@ fun MediaImage(
     sizePx: Int = ThumbnailLoader.PREVIEW_SIZE_PX,
     contentDescription: String? = null,
     placeholderBitmap: Bitmap? = null,
-    onUnavailable: (() -> Unit)? = null
+    onUnavailable: (() -> Unit)? = null,
+    /**
+     * The media's change signal. Part of the cache key, so a rotated or re-saved
+     * file re-derives its thumbnail instead of showing the previous pixels.
+     */
+    version: String? = null
 ) {
     val context = LocalContext.current
     val ownerId = AccountSession.userId
@@ -57,18 +62,18 @@ fun MediaImage(
     // entries may have no local URI, but a valid preview/storage URL should
     // still be tried before the authenticated Drive fallback.
     val cloudFallback = previewUri?.trim()?.takeIf { it.isNotBlank() && it != uri }
-    var bitmap by remember(primaryUri, cloudFallback, fallbackMediaId, sizePx, ownerId) {
+    var bitmap by remember(primaryUri, cloudFallback, fallbackMediaId, sizePx, ownerId, version) {
         mutableStateOf(
             placeholderBitmap
-                ?: ThumbnailLoader.peek(primaryUri, sizePx, mediaId = fallbackMediaId, userId = ownerId)
-                ?: ThumbnailLoader.peek(primaryUri, 256, mediaId = fallbackMediaId, userId = ownerId)
+                ?: ThumbnailLoader.peek(primaryUri, sizePx, mediaId = fallbackMediaId, userId = ownerId, version = version)
+                ?: ThumbnailLoader.peek(primaryUri, 256, mediaId = fallbackMediaId, userId = ownerId, version = version)
         )
     }
-    var failed by remember(primaryUri, cloudFallback, fallbackMediaId, sizePx, ownerId) {
+    var failed by remember(primaryUri, cloudFallback, fallbackMediaId, sizePx, ownerId, version) {
         mutableStateOf(false)
     }
 
-    LaunchedEffect(primaryUri, cloudFallback, fallbackMediaId, sizePx, ownerId) {
+    LaunchedEffect(primaryUri, cloudFallback, fallbackMediaId, sizePx, ownerId, version) {
         if (primaryUri.isBlank() && fallbackMediaId.isNullOrBlank()) {
             MediaDiagnosticLogger.unavailableUi(
                 mediaId = fallbackMediaId,
@@ -85,7 +90,7 @@ fun MediaImage(
             onUnavailable?.invoke()
             return@LaunchedEffect
         }
-        val cached = ThumbnailLoader.peek(primaryUri, sizePx, mediaId = fallbackMediaId, userId = ownerId)
+        val cached = ThumbnailLoader.peek(primaryUri, sizePx, mediaId = fallbackMediaId, userId = ownerId, version = version)
         if (cached != null) {
             bitmap = cached
         }
@@ -97,7 +102,8 @@ fun MediaImage(
             fallbackMediaId = fallbackMediaId,
             previewUri = cloudFallback,
             sessionProvider = app?.sessionProvider,
-            userId = ownerId
+            userId = ownerId,
+            version = version
         )
         if (loaded != null) {
             bitmap = loaded

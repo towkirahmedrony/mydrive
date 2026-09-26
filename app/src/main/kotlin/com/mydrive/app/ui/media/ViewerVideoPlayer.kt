@@ -42,6 +42,7 @@ import com.mydrive.app.ui.theme.Copper
 import com.mydrive.app.ui.theme.Ink
 import com.mydrive.app.ui.theme.Ivory
 import kotlinx.coroutines.delay
+import com.mydrive.app.data.model.cacheVersion
 
 data class VideoPlaybackState(
     val playing: Boolean = false,
@@ -193,11 +194,13 @@ fun ViewerVideoPlayer(
                     contentScale = ContentScale.Fit,
                     sizePx = 720,
                     contentDescription = item.filename,
+                    version = item.cacheVersion,
                     placeholderBitmap = ThumbnailLoader.peek(
                         item.displayUri,
                         256,
                         mediaId = item.remoteMediaId,
-                        userId = AccountSession.userId
+                        userId = AccountSession.userId,
+                        version = item.cacheVersion
                     )
                 )
                 Box(

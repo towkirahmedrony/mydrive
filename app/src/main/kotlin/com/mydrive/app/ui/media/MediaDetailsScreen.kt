@@ -65,6 +65,7 @@ import com.mydrive.app.ui.theme.StatusSyncing
 import com.mydrive.app.ui.util.formatDateTime
 import com.mydrive.app.ui.util.formatDuration
 import com.mydrive.app.ui.util.formatFileSize
+import com.mydrive.app.data.model.cacheVersion
 
 @Composable
 fun MediaDetailsScreen(
@@ -118,7 +119,8 @@ fun MediaDetailsScreen(
                     previewUri = item.thumbnailUrl,
                     modifier = Modifier.fillMaxSize(),
                     contentScale = ContentScale.Crop,
-                    sizePx = 720
+                    sizePx = 720,
+                    version = item.cacheVersion
                 )
                 Box(
                     modifier = Modifier

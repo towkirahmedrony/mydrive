@@ -106,6 +106,7 @@ import com.mydrive.app.ui.theme.StatusAttention
 import com.mydrive.app.ui.theme.StatusIdle
 import com.mydrive.app.ui.util.formatPlaybackMs
 import kotlinx.coroutines.launch
+import com.mydrive.app.data.model.cacheVersion
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -273,7 +274,8 @@ fun MediaViewerScreen(
                         fallbackMediaId = neighbor.remoteMediaId,
                         previewUri = neighbor.thumbnailUrl,
                         sessionProvider = sessionProvider,
-                        userId = AccountSession.userId
+                        userId = AccountSession.userId,
+                        version = neighbor.cacheVersion
                     )
                 }
             }
@@ -604,7 +606,8 @@ private fun RemovePhotoSheet(
                         modifier = Modifier.fillMaxSize(),
                         contentScale = ContentScale.Crop,
                         sizePx = 144,
-                        contentDescription = item.filename
+                        contentDescription = item.filename,
+                        version = item.cacheVersion
                     )
                 }
                 Spacer(Modifier.width(Spacing.md))

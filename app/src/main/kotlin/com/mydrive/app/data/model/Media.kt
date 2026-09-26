@@ -170,6 +170,16 @@ const val UNGROUPED_ALBUM_ID = "ungrouped"
 const val UNGROUPED_ALBUM_NAME = "Other"
 
 /**
+ * A cheap change signal for any cache keyed by media identity.
+ *
+ * Identity alone is not enough: rotating a photo or re-saving a file keeps its
+ * MediaStore id, so a thumbnail cached against the id would be served forever.
+ * The modification time and the size are what move when the pixels do, and both
+ * are already on every item, so this costs no query.
+ */
+val MediaItem.cacheVersion: String get() = "$dateModifiedMillis:$fileSizeBytes"
+
+/**
  * Album ids that name the *storage provider* rather than a folder.
  *
  * MediaStore bucket ids are numeric (`BUCKET_ID.toString()`) or, when a bucket
@@ -222,6 +232,11 @@ fun List<MediaItem>.resolveAlbums(): List<MediaItem> =
 data class AlbumFolder(
     val id: String,
     val name: String,
+    /**
+     * The cover's [cacheVersion], so the album card reuses the disk-cached cover
+     * thumbnail and re-derives it only when the cover media actually changed.
+     */
+    val coverVersion: String? = null,
     val coverSeed: Int,
     val coverType: MediaType = MediaType.PHOTO,
     val mediaCount: Int = 0,

@@ -3,12 +3,18 @@ package com.mydrive.app.data.local
 import android.os.Looper
 import androidx.room.Dao
 import androidx.room.Entity
+import androidx.room.Index
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
 import com.mydrive.app.data.model.BackupState
 import com.mydrive.app.data.model.MediaItem
 import com.mydrive.app.data.model.MediaType
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * One rendered row of the local gallery catalog.
@@ -29,7 +35,11 @@ import com.mydrive.app.data.model.MediaType
  */
 @Entity(
     tableName = "media_catalog",
-    primaryKeys = ["ownerUserId", "mediaId"]
+    primaryKeys = ["ownerUserId", "mediaId"],
+    // The hydration query is `WHERE ownerUserId = ? ORDER BY capturedAtMillis
+    // DESC, mediaId ASC`, and it runs on the launch critical path. This index
+    // makes it a straight index scan instead of a scan plus a sort.
+    indices = [Index(value = ["ownerUserId", "capturedAtMillis", "mediaId"])]
 )
 data class MediaCatalogEntity(
     val ownerUserId: String,
@@ -136,6 +146,50 @@ object MediaCatalogReconciler {
  */
 class MediaCatalogStore(private val dao: MediaCatalogDao) {
 
+    private val warmUpSignal = CompletableDeferred<Unit>()
+
+    @Volatile
+    private var warmUpStarted = false
+
+    /**
+     * Opens the database and runs any pending migration.
+     *
+     * Opening is the one unavoidably slow part of the first read — and on an
+     * upgraded install it includes the migrations — so it is started as early as
+     * possible and off the calling thread. [snapshotForStartup] then waits on
+     * [warmUpSignal] instead of racing this, so the open is never paid twice.
+     */
+    suspend fun warmUp() {
+        markWarmUpScheduled()
+        runCatching { dao.snapshot(ANY_OWNER) }
+        warmUpSignal.complete(Unit)
+        Unit
+    }
+
+    /**
+     * Records that a warm-up is on its way.
+     *
+     * Called by whoever schedules [warmUp], so a launch read that arrives before
+     * the warm-up coroutine has started still waits for it instead of racing it.
+     */
+    fun markWarmUpScheduled() {
+        warmUpStarted = true
+    }
+
+    /**
+     * Waits for an in-flight warm-up, at most [WARM_UP_TIMEOUT_MS].
+     *
+     * The wait is bounded because it happens on the launch path: if the database
+     * is unusually slow to open, the launch read proceeds on its own rather than
+     * hold the first frame indefinitely.
+     */
+    private fun awaitWarmUp() {
+        if (!warmUpStarted || warmUpSignal.isCompleted) return
+        runCatching {
+            runBlocking { withTimeoutOrNull(WARM_UP_TIMEOUT_MS) { warmUpSignal.await() } }
+        }
+    }
+
     /**
      * The persisted catalog for [ownerUserId], read synchronously.
      *
@@ -150,6 +204,24 @@ class MediaCatalogStore(private val dao: MediaCatalogDao) {
         return runCatching { dao.snapshotNow(owner) }.getOrElse { null }
     }
 
+    /**
+     * A blocking read that is allowed on the main thread, for the launch path.
+     *
+     * A gallery must draw its persisted state on the first frame, and the launch
+     * bind runs on the main thread, so the read is handed to an IO thread and the
+     * caller waits for it. Only the read is on the critical path: the database is
+     * opened and indexed ahead of this by [warmUp], and the query is a single
+     * indexed scan, not a scan plus sort.
+     */
+    fun snapshotForStartup(ownerUserId: String): List<MediaCatalogEntity>? {
+        val owner = ownerUserId.takeIf { it.isNotBlank() } ?: return null
+        awaitWarmUp()
+        if (Looper.myLooper() != Looper.getMainLooper()) return snapshotBlocking(owner)
+        return runCatching {
+            runBlocking { withContext(Dispatchers.IO) { dao.snapshotNow(owner) } }
+        }.getOrElse { null }
+    }
+
     suspend fun snapshot(ownerUserId: String): List<MediaCatalogEntity> {
         val owner = ownerUserId.takeIf { it.isNotBlank() } ?: return emptyList()
         return runCatching { dao.snapshot(owner) }.getOrDefault(emptyList())
@@ -160,23 +232,38 @@ class MediaCatalogStore(private val dao: MediaCatalogDao) {
      *
      * Never a "clear everything, write everything": an unchanged library is a
      * no-op, and the row identity a caller already holds stays untouched.
+     *
+     * @param prune whether an item that is no longer in [next] may be deleted
+     *   from disk. Only a pass that could see *everything* may answer that, so a
+     *   partial-access scan, a failed collection query or a revoked permission
+     *   upserts what it found and leaves the rest alone. A pass that cannot see
+     *   the whole device must never be able to shrink the cache.
      */
     suspend fun save(
         ownerUserId: String,
         previous: List<MediaItem>,
-        next: List<MediaItem>
+        next: List<MediaItem>,
+        prune: Boolean = true
     ): Boolean {
         val owner = ownerUserId.takeIf { it.isNotBlank() } ?: return false
         val diff = MediaCatalogReconciler.diff(owner, previous, next)
         if (diff.upserts.isNotEmpty()) dao.upsertAll(diff.upserts)
-        if (diff.removedIds.isNotEmpty()) dao.deleteByIds(owner, diff.removedIds)
-        return !diff.isEmpty
+        if (prune && diff.removedIds.isNotEmpty()) dao.deleteByIds(owner, diff.removedIds)
+        return !diff.isEmpty || !prune
     }
 
     /** Drops one account's cached gallery. Session-scoped, never called on a normal launch. */
     suspend fun clearOwner(ownerUserId: String) {
         val owner = ownerUserId.takeIf { it.isNotBlank() } ?: return
         dao.deleteFor(owner)
+    }
+
+    private companion object {
+        /** Matches no real account; exists only to open the database and warm the query plan. */
+        const val ANY_OWNER = ""
+
+        /** Bound on waiting for an in-flight warm-up on the launch path. */
+        const val WARM_UP_TIMEOUT_MS = 2_000L
     }
 }
 

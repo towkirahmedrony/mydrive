@@ -46,6 +46,7 @@ import com.mydrive.app.debug.MediaDiagnosticLogger
 import com.mydrive.app.ui.util.thumbnailBrush
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
+import com.mydrive.app.data.model.cacheVersion
 
 private const val MIN_SCALE = 1f
 private const val MAX_SCALE = 5f
@@ -103,20 +104,37 @@ fun ZoomablePhoto(
             .collect { zoomed -> latestOnZoomedChange(zoomed) }
     }
 
-    var bitmap by remember(item.id, ownerId) {
+    var bitmap by remember(item.id, ownerId, item.cacheVersion) {
         mutableStateOf(
             // Full resolution first, from the ORIGINAL candidate: a thumbnail is
             // never upscaled into the "original" slot.
-            FullImageLoader.peek(item.originalUri, mediaId = item.remoteMediaId, userId = ownerId)
-                ?: ThumbnailLoader.peek(item.displayUri, placeholderPx, mediaId = item.remoteMediaId, userId = ownerId)
-                ?: ThumbnailLoader.peek(item.displayUri, 256, mediaId = item.remoteMediaId, userId = ownerId)
+            FullImageLoader.peek(
+                item.originalUri,
+                mediaId = item.remoteMediaId,
+                userId = ownerId,
+                version = item.cacheVersion
+            )
+                ?: ThumbnailLoader.peek(
+                    item.displayUri,
+                    placeholderPx,
+                    mediaId = item.remoteMediaId,
+                    userId = ownerId,
+                    version = item.cacheVersion
+                )
+                ?: ThumbnailLoader.peek(
+                    item.displayUri,
+                    256,
+                    mediaId = item.remoteMediaId,
+                    userId = ownerId,
+                    version = item.cacheVersion
+                )
         )
     }
     // Diagnostic state for the LOCAL_ORIGINAL_COMPARISON trace: whether the
     // thumbnail placeholder attempt succeeded for this item.
     var thumbnailResult by remember(item.id, ownerId) { mutableStateOf<String?>(null) }
 
-    LaunchedEffect(item.id, placeholderPx, ownerId) {
+    LaunchedEffect(item.id, placeholderPx, ownerId, item.cacheVersion) {
         if (item.displayUri.isBlank() && item.remoteMediaId.isNullOrBlank()) {
             thumbnailResult = "FAILURE"
             MediaDiagnosticLogger.unavailableUi(
@@ -142,7 +160,8 @@ fun ZoomablePhoto(
                 fallbackMediaId = item.remoteMediaId,
                 previewUri = item.thumbnailUrl,
                 sessionProvider = app?.sessionProvider,
-                userId = ownerId
+                userId = ownerId,
+                version = item.cacheVersion
             )
             if (loaded != null) {
                 bitmap = loaded
@@ -170,7 +189,8 @@ fun ZoomablePhoto(
             fallbackMediaId = item.remoteMediaId,
             previewUri = item.originalUrl,
             sessionProvider = app?.sessionProvider,
-            userId = ownerId
+            userId = ownerId,
+            version = item.cacheVersion
         )
         val originalResult = if (full != null) "SUCCESS" else "FAILURE"
         // The comparison the task asks for: when a local thumbnail fails but the

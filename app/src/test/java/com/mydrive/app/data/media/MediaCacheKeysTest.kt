@@ -62,6 +62,51 @@ class MediaCacheKeysTest {
     }
 
     @Test
+    fun anUnchangedMediaReusesItsCachedEntry() {
+        val first = MediaCacheKeys.thumbnailFile(File("/tmp"), "user-a", "img-1", 256, "1000:2048")
+        val again = MediaCacheKeys.thumbnailFile(File("/tmp"), "user-a", "img-1", 256, "1000:2048")
+        assertEquals(first.path, again.path)
+
+        val memoryFirst = MediaCacheKeys.memoryKey("user-a", "img-1", "content://m/1", MediaCacheKeys.VARIANT_THUMBNAIL, 256, "1000:2048")
+        val memoryAgain = MediaCacheKeys.memoryKey("user-a", "img-1", "content://m/1", MediaCacheKeys.VARIANT_THUMBNAIL, 256, "1000:2048")
+        assertEquals(memoryFirst, memoryAgain)
+    }
+
+    @Test
+    fun aModifiedMediaMissesItsOwnCacheEntryOnly() {
+        // A rotated photo keeps its MediaStore id. Without a change signal it would
+        // be served the pixels it had before, forever.
+        val before = MediaCacheKeys.thumbnailFile(File("/tmp"), "user-a", "img-1", 256, "1000:2048")
+        val after = MediaCacheKeys.thumbnailFile(File("/tmp"), "user-a", "img-1", 256, "2000:2048")
+        assertNotEquals(before.path, after.path)
+        assertNotEquals(before.name, after.name)
+
+        // A sibling that did not change keeps its entry.
+        val sibling = MediaCacheKeys.thumbnailFile(File("/tmp"), "user-a", "img-2", 256, "1000:2048")
+        assertNotEquals(after.name, sibling.name)
+
+        val memoryBefore = MediaCacheKeys.memoryKey("user-a", "img-1", "content://m/1", MediaCacheKeys.VARIANT_THUMBNAIL, 256, "1000:2048")
+        val memoryAfter = MediaCacheKeys.memoryKey("user-a", "img-1", "content://m/1", MediaCacheKeys.VARIANT_THUMBNAIL, 256, "2000:2048")
+        assertNotEquals(memoryBefore, memoryAfter)
+    }
+
+    @Test
+    fun originalsAlsoCarryTheChangeSignal() {
+        val before = MediaCacheKeys.originalFile(File("/tmp"), "user-a", "img-1", "1000:2048")
+        val after = MediaCacheKeys.originalFile(File("/tmp"), "user-a", "img-1", "2000:2048")
+        assertNotEquals(before.path, after.path)
+        // Callers that only know an identity keep their key exactly as it was.
+        assertEquals(
+            MediaCacheKeys.originalFile(File("/tmp"), "user-a", "img-1").path,
+            MediaCacheKeys.originalFile(File("/tmp"), "user-a", "img-1", null).path
+        )
+        assertEquals(
+            MediaCacheKeys.thumbnailFile(File("/tmp"), "user-a", "img-1", 256).path,
+            MediaCacheKeys.thumbnailFile(File("/tmp"), "user-a", "img-1", 256, null).path
+        )
+    }
+
+    @Test
     fun diskPathsAreIsolatedByUser() {
         val root = File("/tmp")
         val a = MediaCacheKeys.thumbnailFile(root, "user-a", "media-1", 256)

@@ -76,6 +76,7 @@ import com.mydrive.app.ui.theme.MediaShape
 import com.mydrive.app.ui.theme.SheetShape
 import com.mydrive.app.ui.theme.Spacing
 import com.mydrive.app.ui.theme.StatusAttention
+import com.mydrive.app.data.model.cacheVersion
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -344,7 +345,8 @@ fun TrashActionSheet(
                         previewUri = preview.thumbnailUrl,
                         modifier = Modifier.fillMaxSize(),
                         sizePx = 144,
-                        contentDescription = preview.filename
+                        contentDescription = preview.filename,
+                        version = preview.cacheVersion
                     )
                 }
                 Spacer(Modifier.height(Spacing.md))

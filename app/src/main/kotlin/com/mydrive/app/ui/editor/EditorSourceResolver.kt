@@ -10,6 +10,7 @@ import com.mydrive.app.data.model.MediaItem
 import java.io.File
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import com.mydrive.app.data.model.cacheVersion
 
 /**
  * Resolves the picture the editor should open, for both kinds of library item:
@@ -63,7 +64,8 @@ object EditorSourceResolver {
                 maxDimPx = CLOUD_MAX_DIM_PX,
                 fallbackMediaId = item.remoteMediaId,
                 previewUri = preview,
-                sessionProvider = app?.sessionProvider
+                sessionProvider = app?.sessionProvider,
+                version = item.cacheVersion
             )
         }.getOrNull()
             ?: return@withContext Result.Failed("Couldn't download this photo from My Drive. Check your connection and try again.")

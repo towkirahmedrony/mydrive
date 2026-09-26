@@ -42,6 +42,7 @@ import com.mydrive.app.ui.gallery.MediaGroup
 import com.mydrive.app.ui.theme.CardShape
 import com.mydrive.app.ui.theme.MediaShape
 import com.mydrive.app.ui.theme.Spacing
+import com.mydrive.app.data.model.cacheVersion
 
 private data class GridEntry(
     val key: String,
@@ -209,7 +210,8 @@ fun AlbumCard(
                 previewUri = album.coverPreviewUri,
                 modifier = Modifier.fillMaxSize(),
                 sizePx = ThumbnailLoader.PREVIEW_SIZE_PX,
-                contentDescription = album.name
+                contentDescription = album.name,
+                version = album.coverVersion
             )
         }
         Text(

@@ -70,6 +70,7 @@ import com.mydrive.app.ui.theme.StatusConnected
 import com.mydrive.app.ui.theme.StatusIdle
 import com.mydrive.app.ui.theme.StatusSyncing
 import com.mydrive.app.ui.util.formatDuration
+import com.mydrive.app.data.model.cacheVersion
 
 @Composable
 fun AppCard(
@@ -234,7 +235,8 @@ fun MediaThumb(
             type = item.type,
             modifier = Modifier.fillMaxSize(),
             sizePx = 256,
-            contentDescription = description
+            contentDescription = description,
+            version = item.cacheVersion
         )
         if (item.type == MediaType.VIDEO) {
             Box(
