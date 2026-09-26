@@ -201,6 +201,7 @@ fun MediaViewerScreen(
     }
 
     val deleteConfirmation by viewModel.deleteConfirmation.collectAsStateWithLifecycle()
+    val manageMediaRequest by viewModel.manageMediaRequest.collectAsStateWithLifecycle()
     val userMessage by viewModel.userMessage.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
     val deleteLauncher = rememberLauncherForActivityResult(
@@ -208,10 +209,25 @@ fun MediaViewerScreen(
     ) { result ->
         viewModel.onDeleteConfirmationResult(result.resultCode == Activity.RESULT_OK)
     }
+    val manageMediaLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) {
+        viewModel.onManageMediaAccessResult()
+    }
 
     LaunchedEffect(deleteConfirmation) {
         deleteConfirmation?.let { request ->
             deleteLauncher.launch(IntentSenderRequest.Builder(request.intentSender).build())
+        }
+    }
+
+    LaunchedEffect(manageMediaRequest) {
+        if (manageMediaRequest == null) return@LaunchedEffect
+        val intent = viewModel.manageMediaIntent()
+        if (intent != null) {
+            manageMediaLauncher.launch(intent)
+        } else {
+            viewModel.onManageMediaAccessResult()
         }
     }
 

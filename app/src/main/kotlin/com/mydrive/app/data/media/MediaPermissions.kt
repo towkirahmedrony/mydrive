@@ -2,8 +2,12 @@ package com.mydrive.app.data.media
 
 import android.Manifest
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
+import android.provider.MediaStore
+import android.provider.Settings
 import androidx.core.content.ContextCompat
 
 enum class MediaAccess {
@@ -66,6 +70,25 @@ class MediaPermissions(context: Context) {
         }
     }
 
+    fun canManageMedia(): Boolean {
+        return Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+            MediaStore.canManageMedia(appContext)
+    }
+
+    fun hasAskedManageMedia(): Boolean = prefs.getBoolean(KEY_MANAGE_MEDIA_ASKED, false)
+
+    fun markManageMediaAsked() {
+        prefs.edit().putBoolean(KEY_MANAGE_MEDIA_ASKED, true).apply()
+    }
+
+    fun manageMediaRequestIntent(): Intent? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return null
+        if (canManageMedia()) return null
+        return Intent(Settings.ACTION_REQUEST_MANAGE_MEDIA).apply {
+            data = Uri.fromParts("package", appContext.packageName, null)
+        }
+    }
+
     private fun granted(permission: String): Boolean {
         return ContextCompat.checkSelfPermission(appContext, permission) ==
             PackageManager.PERMISSION_GRANTED
@@ -74,5 +97,6 @@ class MediaPermissions(context: Context) {
     companion object {
         private const val PREFS = "albums_media_permissions"
         private const val KEY_ASKED = "asked"
+        private const val KEY_MANAGE_MEDIA_ASKED = "manage_media_asked"
     }
 }

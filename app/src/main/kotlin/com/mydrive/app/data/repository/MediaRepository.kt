@@ -80,6 +80,7 @@ sealed class DeleteMediaResult {
         val intentSender: IntentSender,
         val alreadyPerformedOnApproval: Boolean
     ) : DeleteMediaResult()
+    data object RequiresManageMedia : DeleteMediaResult()
     data object NotFound : DeleteMediaResult()
     data object PermissionDenied : DeleteMediaResult()
     data object Failed : DeleteMediaResult()
@@ -243,6 +244,10 @@ class MediaRepository(
 
     fun requiredPermissions(): Array<String> = permissions.requiredPermissions()
     fun markPermissionAsked() { permissions.markAsked() }
+    fun canManageMedia(): Boolean = permissions.canManageMedia()
+    fun hasAskedManageMedia(): Boolean = permissions.hasAskedManageMedia()
+    fun markManageMediaAsked() { permissions.markManageMediaAsked() }
+    fun manageMediaRequestIntent() = permissions.manageMediaRequestIntent()
 
     fun bindAccount(userId: String) {
         synchronized(sessionLock) {
@@ -972,7 +977,7 @@ class MediaRepository(
         val extension = if (format == Bitmap.CompressFormat.PNG) "png" else "jpg"
         val mimeType = if (format == Bitmap.CompressFormat.PNG) "image/png" else "image/jpeg"
         val quality = if (format == Bitmap.CompressFormat.PNG) 100 else 95
-        val filename = "${sanitized}_edited.$extension"
+        val filename = "${sanitized}_edited_${System.currentTimeMillis()}.$extension"
 
         // Encode out of memory first: the EXIF block is copied into the file and
         // the byte count verified before anything is published to MediaStore.
@@ -985,7 +990,9 @@ class MediaRepository(
             runCatching { tempFile.delete() }
             return@withContext SaveEditedPhotoResult.Failed
         }
-        copyExif(context, exifSourceUri, tempFile)
+        if (format == Bitmap.CompressFormat.JPEG) {
+            copyExif(context, exifSourceUri, tempFile)
+        }
 
         val result = try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -993,9 +1000,11 @@ class MediaRepository(
             } else {
                 saveLegacyItem(context, tempFile, filename, mimeType)
             }
-        } catch (_: SecurityException) {
+        } catch (error: SecurityException) {
+            logEditedPhotoSaveFailure(source, filename, error)
             SaveEditedPhotoResult.PermissionDenied
-        } catch (_: Exception) {
+        } catch (error: Exception) {
+            logEditedPhotoSaveFailure(source, filename, error)
             SaveEditedPhotoResult.Failed
         } finally {
             runCatching { tempFile.delete() }
@@ -1017,35 +1026,109 @@ class MediaRepository(
         source: MediaItem?
     ): SaveEditedPhotoResult {
         val resolver = context.contentResolver
-        val collection = MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
-        val relativePath = source?.relativePath?.takeIf { it.isNotBlank() }
-            ?: (Environment.DIRECTORY_PICTURES + File.separator + "My Drive")
-        val values = ContentValues().apply {
-            put(MediaStore.MediaColumns.DISPLAY_NAME, filename)
-            put(MediaStore.MediaColumns.MIME_TYPE, mimeType)
-            put(MediaStore.MediaColumns.RELATIVE_PATH, relativePath)
-            put(MediaStore.MediaColumns.IS_PENDING, 1)
-            put(MediaStore.MediaColumns.DATE_TAKEN, System.currentTimeMillis())
+        val expected = tempFile.length()
+        if (expected <= 0L) return SaveEditedPhotoResult.Failed
+        val now = System.currentTimeMillis()
+        val relativePaths = pendingRelativePaths(source?.relativePath)
+        var lastError: Exception? = null
+        for (collection in pendingImageCollections()) {
+            for (relativePath in relativePaths) {
+                val values = ContentValues().apply {
+                    put(MediaStore.MediaColumns.DISPLAY_NAME, filename)
+                    put(MediaStore.MediaColumns.MIME_TYPE, mimeType)
+                    put(MediaStore.MediaColumns.RELATIVE_PATH, relativePath)
+                    put(MediaStore.MediaColumns.IS_PENDING, 1)
+                    put(MediaStore.MediaColumns.DATE_TAKEN, now)
+                }
+                val uri = try {
+                    resolver.insert(collection, values)
+                } catch (error: SecurityException) {
+                    throw error
+                } catch (error: Exception) {
+                    lastError = error
+                    null
+                } ?: continue
+                try {
+                    val written = resolver.openOutputStream(uri)?.use { output ->
+                        val count = tempFile.inputStream().use { input ->
+                            input.copyTo(output, bufferSize = 65_536)
+                        }
+                        output.flush()
+                        count
+                    } ?: -1L
+                    if (written != expected) {
+                        lastError = IllegalStateException("Wrote $written bytes, expected $expected")
+                        failPending(resolver, uri)
+                        continue
+                    }
+                    val pendingSize = queryDescriptorSize(resolver, uri)
+                    if (pendingSize > 0L && pendingSize != expected) {
+                        lastError = IllegalStateException("Pending descriptor size $pendingSize, expected $expected")
+                        failPending(resolver, uri)
+                        continue
+                    }
+                    val publish = ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) }
+                    val published = try {
+                        resolver.update(uri, publish, null, null) >= 0
+                    } catch (error: Exception) {
+                        lastError = error
+                        false
+                    }
+                    if (!published) {
+                        failPending(resolver, uri)
+                        continue
+                    }
+                    if (!isMediaReadable(resolver, uri)) {
+                        lastError = FileNotFoundException("Published MediaStore URI is not readable")
+                        failPending(resolver, uri)
+                        continue
+                    }
+                    val publishedSize = queryDescriptorSize(resolver, uri)
+                    if (publishedSize == 0L) {
+                        lastError = IllegalStateException("Published MediaStore item is zero bytes")
+                        failPending(resolver, uri)
+                        continue
+                    }
+                    val id = uri.lastPathSegment?.toLongOrNull() ?: 0L
+                    return SaveEditedPhotoResult.Saved(itemId = "img-$id", mediaStoreId = id, filename = filename)
+                } catch (error: SecurityException) {
+                    runCatching { resolver.delete(uri, null, null) }
+                    throw error
+                } catch (error: Exception) {
+                    lastError = error
+                    runCatching { resolver.delete(uri, null, null) }
+                }
+            }
         }
-        val uri = resolver.insert(collection, values) ?: return SaveEditedPhotoResult.Failed
-        return try {
-            val written = resolver.openOutputStream(uri)?.use { output ->
-                tempFile.inputStream().use { input -> input.copyTo(output, bufferSize = 65_536) }
-                true
-            } ?: false
-            if (!written) return failPending(resolver, uri)
-            val size = queryMediaSize(resolver, uri)
-            if (size <= 0L || size != tempFile.length()) return failPending(resolver, uri)
-            val publish = ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) }
-            if (resolver.update(uri, publish, null, null) <= 0) return failPending(resolver, uri)
-            if (!isMediaReadable(resolver, uri)) return failPending(resolver, uri)
-            val id = uri.lastPathSegment?.toLongOrNull() ?: 0L
-            SaveEditedPhotoResult.Saved(itemId = "img-$id", mediaStoreId = id, filename = filename)
-        } catch (error: Exception) {
-            // Never leak a half-written pending row.
-            runCatching { resolver.delete(uri, null, null) }
-            throw error
-        }
+        if (lastError != null) throw lastError
+        return SaveEditedPhotoResult.Failed
+    }
+
+    @androidx.annotation.RequiresApi(Build.VERSION_CODES.Q)
+    private fun pendingImageCollections(): List<Uri> {
+        val uris = linkedSetOf<Uri>()
+        runCatching { uris += MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY) }
+        runCatching { uris += MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL) }
+        uris += MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+        return uris.toList()
+    }
+
+    private fun pendingRelativePaths(sourcePath: String?): List<String> {
+        val fallback = Environment.DIRECTORY_PICTURES + File.separator + "My Drive" + File.separator
+        val sanitized = sanitizeRelativePath(sourcePath)
+        return listOfNotNull(sanitized, fallback).distinct()
+    }
+
+    private fun sanitizeRelativePath(sourcePath: String?): String? {
+        val raw = sourcePath?.trim()?.trim('/')?.takeIf { it.isNotBlank() } ?: return null
+        val root = raw.substringBefore('/')
+        val allowed = setOf(
+            Environment.DIRECTORY_PICTURES,
+            Environment.DIRECTORY_DCIM,
+            Environment.DIRECTORY_DOWNLOADS
+        )
+        if (root !in allowed) return null
+        return "$raw/"
     }
 
     private fun failPending(resolver: ContentResolver, uri: Uri): SaveEditedPhotoResult {
@@ -1098,9 +1181,30 @@ class MediaRepository(
         } ?: 0L
     }.getOrDefault(0L)
 
+    private fun queryDescriptorSize(resolver: ContentResolver, uri: Uri): Long = runCatching {
+        resolver.openFileDescriptor(uri, "r")?.use { it.statSize } ?: -1L
+    }.getOrDefault(-1L)
+
     private fun isMediaReadable(resolver: ContentResolver, uri: Uri): Boolean = runCatching {
-        resolver.openInputStream(uri)?.use { true } ?: false
+        resolver.openInputStream(uri)?.use { input -> input.read() >= 0 } ?: false
     }.getOrDefault(false)
+
+    private fun logEditedPhotoSaveFailure(source: MediaItem?, filename: String, error: Throwable) {
+        DeveloperLogger.error(
+            LogCategory.MEDIASTORE,
+            "MEDIA_EDIT_SAVE_FAILED",
+            "Edited photo MediaStore save failed",
+            localMediaId = source?.id,
+            throwable = error,
+            metadata = mapOf(
+                "filename" to filename,
+                "source_uri" to source?.uri,
+                "android_api" to Build.VERSION.SDK_INT.toString(),
+                "exception_class" to error.javaClass.name,
+                "exception_message" to error.message
+            )
+        )
+    }
 
     /**
      * Copies the relevant EXIF block (timestamps, camera, GPS, orientation) from
@@ -1703,13 +1807,15 @@ class MediaRepository(
     }
 
     private fun trashLocalMedia(context: Context, item: MediaItem, uri: Uri): DeleteMediaResult {
-        val canManageMedia = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && MediaStore.canManageMedia(context)
+        val canManageMedia = permissions.canManageMedia()
         val ownerPackage = queryOwnerPackage(context, uri)
         val ownedByApp = ownerPackage == context.packageName
+        val alreadyTrashed = isUriTrashed(context, uri)
         val baseMeta = mediaActionMetadata("DELETE", item) + mapOf(
             "owner_package" to ownerPackage,
             "owned_by_app" to ownedByApp.toString(),
             "can_manage_media" to canManageMedia.toString(),
+            "already_trashed" to alreadyTrashed.toString(),
             "permission_granted" to permissions.canReadMedia().toString()
         )
         DeveloperLogger.info(
@@ -1719,16 +1825,21 @@ class MediaRepository(
             localMediaId = item.id,
             metadata = baseMeta + mapOf("operation" to "start")
         )
+        if (alreadyTrashed) {
+            logTrashResult(item, baseMeta, "already_trashed", "SUCCESS", systemConfirmation = false)
+            return DeleteMediaResult.Success
+        }
         return try {
             when {
-                Build.VERSION.SDK_INT >= Build.VERSION_CODES.R -> trashOnApiRPlus(context, item, uri, baseMeta)
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.R ->
+                    trashOnApiRPlus(context, item, uri, baseMeta, canManageMedia)
                 Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q -> deleteOnApiQ(context, item, uri, baseMeta)
                 else -> deleteLegacy(context, item, uri, baseMeta)
             }
         } catch (error: RecoverableSecurityException) {
-            requestSystemTrashConfirmation(context, item, uri, baseMeta, error)
+            recoverTrashWithoutSystemDialog(context, item, uri, baseMeta, error)
         } catch (error: SecurityException) {
-            requestSystemTrashConfirmation(context, item, uri, baseMeta, error)
+            recoverTrashWithoutSystemDialog(context, item, uri, baseMeta, error)
         } catch (error: FileNotFoundException) {
             logMediaActionFailure("DELETE", item, error, baseMeta + mapOf("result" to "NOT_FOUND"))
             DeleteMediaResult.NotFound
@@ -1742,20 +1853,26 @@ class MediaRepository(
         context: Context,
         item: MediaItem,
         uri: Uri,
-        baseMeta: Map<String, String?>
+        baseMeta: Map<String, String?>,
+        canManageMedia: Boolean
     ): DeleteMediaResult {
-        return if (tryDirectTrash(context, uri)) {
+        val direct = tryDirectTrash(context, uri)
+        if (direct.success) {
             logTrashResult(item, baseMeta, "direct_is_trashed", "SUCCESS", systemConfirmation = false)
-            DeleteMediaResult.Success
-        } else {
-            logMediaActionFailure(
-                "DELETE",
-                item,
-                FileNotFoundException("MediaStore trash update returned 0 rows"),
-                baseMeta + mapOf("android_flow" to "direct_is_trashed", "result" to "NOT_FOUND")
-            )
-            DeleteMediaResult.NotFound
+            return DeleteMediaResult.Success
         }
+        if (isUriTrashed(context, uri) || !uriStillExists(context, uri)) {
+            logTrashResult(item, baseMeta, "already_trashed", "SUCCESS", systemConfirmation = false)
+            return DeleteMediaResult.Success
+        }
+        if (canManageMedia) {
+            val managed = tryDirectTrash(context, uri)
+            if (managed.success || isUriTrashed(context, uri)) {
+                logTrashResult(item, baseMeta, "manage_media_is_trashed", "SUCCESS", systemConfirmation = false)
+                return DeleteMediaResult.Success
+            }
+        }
+        return recoverTrashWithoutSystemDialog(context, item, uri, baseMeta, direct.error)
     }
 
     private fun deleteOnApiQ(
@@ -1778,7 +1895,18 @@ class MediaRepository(
                 DeleteMediaResult.NotFound
             }
         } catch (error: RecoverableSecurityException) {
-            requestSystemTrashConfirmation(context, item, uri, baseMeta, error)
+            logTrashResult(
+                item,
+                baseMeta,
+                "recoverable_security_intent",
+                "REQUIRES_SYSTEM_CONFIRMATION",
+                systemConfirmation = true,
+                error = error
+            )
+            DeleteMediaResult.RequiresSystemConfirmation(
+                error.userAction.actionIntent.intentSender,
+                alreadyPerformedOnApproval = false
+            )
         }
     }
 
@@ -1802,56 +1930,125 @@ class MediaRepository(
         }
     }
 
-    private fun tryDirectTrash(context: Context, uri: Uri): Boolean {
+    private data class DirectTrashAttempt(
+        val success: Boolean,
+        val error: Exception? = null
+    )
+
+    private fun tryDirectTrash(context: Context, uri: Uri): DirectTrashAttempt {
         val values = ContentValues().apply {
             put(MediaStore.MediaColumns.IS_TRASHED, 1)
         }
-        return context.contentResolver.update(uri, values, null, null) > 0
+        return try {
+            DirectTrashAttempt(success = context.contentResolver.update(uri, values, null, null) > 0)
+        } catch (error: RecoverableSecurityException) {
+            DirectTrashAttempt(success = false, error = error)
+        } catch (error: SecurityException) {
+            DirectTrashAttempt(success = false, error = error)
+        } catch (error: Exception) {
+            DirectTrashAttempt(success = false, error = error)
+        }
     }
 
-    private fun requestSystemTrashConfirmation(
+    private fun recoverTrashWithoutSystemDialog(
         context: Context,
         item: MediaItem,
         uri: Uri,
         baseMeta: Map<String, String?>,
         error: Exception?
     ): DeleteMediaResult {
-        return try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+        if (isUriTrashed(context, uri) || !uriStillExists(context, uri)) {
+            logTrashResult(item, baseMeta, "already_trashed", "SUCCESS", systemConfirmation = false, error = error)
+            return DeleteMediaResult.Success
+        }
+        if (permissions.canManageMedia()) {
+            val retry = tryDirectTrash(context, uri)
+            if (retry.success || isUriTrashed(context, uri)) {
+                logTrashResult(item, baseMeta, "manage_media_is_trashed", "SUCCESS", systemConfirmation = false, error = error)
+                return DeleteMediaResult.Success
+            }
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && !permissions.canManageMedia()) {
+            logTrashResult(
+                item,
+                baseMeta,
+                "manage_media_required",
+                "REQUIRES_MANAGE_MEDIA",
+                systemConfirmation = false,
+                error = error
+            )
+            return DeleteMediaResult.RequiresManageMedia
+        }
+        if (Build.VERSION.SDK_INT == Build.VERSION_CODES.R) {
+            return try {
                 val sender = MediaStore.createTrashRequest(context.contentResolver, listOf(uri), true).intentSender
-                logTrashResult(item, baseMeta, "create_trash_request", "REQUIRES_SYSTEM_CONFIRMATION", systemConfirmation = true, error = error)
+                logTrashResult(
+                    item,
+                    baseMeta,
+                    "create_trash_request",
+                    "REQUIRES_SYSTEM_CONFIRMATION",
+                    systemConfirmation = true,
+                    error = error
+                )
                 DeleteMediaResult.RequiresSystemConfirmation(sender, alreadyPerformedOnApproval = true)
-            } else if (error is RecoverableSecurityException) {
-                val sender = error.userAction.actionIntent.intentSender
-                logTrashResult(item, baseMeta, "recoverable_security_intent", "REQUIRES_SYSTEM_CONFIRMATION", systemConfirmation = true, error = error)
-                DeleteMediaResult.RequiresSystemConfirmation(sender, alreadyPerformedOnApproval = false)
-            } else {
-                val denied = error ?: SecurityException("No write access to this MediaStore item")
+            } catch (requestError: Exception) {
                 logMediaActionFailure(
                     "DELETE",
                     item,
-                    denied,
+                    requestError,
                     baseMeta + mapOf(
-                        "android_flow" to "no_system_confirmation_available",
-                        "result" to "PERMISSION_DENIED",
-                        "system_confirmation_required" to "true"
+                        "android_flow" to "create_trash_request",
+                        "result" to "FAILED",
+                        "cause_exception" to error?.javaClass?.simpleName
                     )
                 )
-                DeleteMediaResult.PermissionDenied
+                DeleteMediaResult.Failed
             }
-        } catch (requestError: Exception) {
-            logMediaActionFailure(
-                "DELETE",
-                item,
-                requestError,
-                baseMeta + mapOf(
-                    "android_flow" to "create_trash_request",
-                    "result" to "FAILED",
-                    "system_confirmation_required" to "true",
-                    "cause_exception" to error?.javaClass?.simpleName
-                )
+        }
+        val denied = error ?: SecurityException("No write access to this MediaStore item")
+        logMediaActionFailure(
+            "DELETE",
+            item,
+            denied,
+            baseMeta + mapOf(
+                "android_flow" to "direct_is_trashed",
+                "result" to "PERMISSION_DENIED",
+                "system_confirmation_required" to "false"
             )
-            DeleteMediaResult.Failed
+        )
+        return DeleteMediaResult.PermissionDenied
+    }
+
+    private fun isUriTrashed(context: Context, uri: Uri): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return false
+        return try {
+            context.contentResolver.query(
+                uri,
+                arrayOf(MediaStore.MediaColumns.IS_TRASHED),
+                null,
+                null,
+                null
+            )?.use { cursor ->
+                if (!cursor.moveToFirst()) return@use false
+                val index = cursor.getColumnIndex(MediaStore.MediaColumns.IS_TRASHED)
+                index >= 0 && cursor.getInt(index) == 1
+            } ?: false
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private fun uriStillExists(context: Context, uri: Uri): Boolean {
+        return try {
+            context.contentResolver.query(
+                uri,
+                arrayOf(MediaStore.MediaColumns._ID),
+                null,
+                null,
+                null
+            )?.use { it.moveToFirst() } ?: true
+        } catch (_: Exception) {
+            true
         }
     }
 

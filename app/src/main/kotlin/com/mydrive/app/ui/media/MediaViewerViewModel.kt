@@ -37,6 +37,10 @@ data class DeleteConfirmationRequest(
     val alreadyPerformedOnApproval: Boolean
 )
 
+data class ManageMediaAccessRequest(
+    val itemId: String
+)
+
 sealed class MediaOperation {
     data object Idle : MediaOperation()
     data class DeleteConfirm(val itemId: String) : MediaOperation()
@@ -61,9 +65,12 @@ class MediaViewerViewModel(
     val pendingOperation: StateFlow<MediaOperation> = _pendingOperation
     private val _deleteConfirmation = kotlinx.coroutines.flow.MutableStateFlow<DeleteConfirmationRequest?>(null)
     val deleteConfirmation: StateFlow<DeleteConfirmationRequest?> = _deleteConfirmation
+    private val _manageMediaRequest = kotlinx.coroutines.flow.MutableStateFlow<ManageMediaAccessRequest?>(null)
+    val manageMediaRequest: StateFlow<ManageMediaAccessRequest?> = _manageMediaRequest
     private val _userMessage = kotlinx.coroutines.flow.MutableStateFlow<String?>(null)
     val userMessage: StateFlow<String?> = _userMessage
     private var pendingDeleteCompletion: ((Int?) -> Unit)? = null
+    private var manageMediaRetryId: String? = null
 
     val uiState: StateFlow<MediaViewerUiState> = repository.media
         .map { media ->
@@ -151,6 +158,7 @@ class MediaViewerViewModel(
             }
         } else {
             pendingDeleteCompletion = null
+            manageMediaRetryId = null
             DeveloperLogger.info(
                 LogCategory.MEDIASTORE,
                 "MEDIA_DELETE_CONFIRMATION_CANCELLED",
@@ -163,6 +171,23 @@ class MediaViewerViewModel(
                     "system_confirmation_required" to "true"
                 )
             )
+        }
+    }
+
+    fun manageMediaIntent() = repository.manageMediaRequestIntent()
+
+    fun onManageMediaAccessResult() {
+        val request = _manageMediaRequest.value ?: return
+        _manageMediaRequest.value = null
+        repository.markManageMediaAsked()
+        if (repository.canManageMedia()) {
+            performDelete(request.itemId)
+        } else {
+            pendingDeleteCompletion = null
+            manageMediaRetryId = null
+            viewModelScope.launch {
+                showUserMessage("Allow media management in Settings, then try again.")
+            }
         }
     }
 
@@ -182,6 +207,16 @@ class MediaViewerViewModel(
                         intentSender = result.intentSender,
                         alreadyPerformedOnApproval = result.alreadyPerformedOnApproval,
                     )
+                }
+                DeleteMediaResult.RequiresManageMedia -> {
+                    if (manageMediaRetryId == itemId) {
+                        pendingDeleteCompletion = null
+                        manageMediaRetryId = null
+                        showUserMessage("Allow media management in Settings, then try again.")
+                    } else {
+                        manageMediaRetryId = itemId
+                        _manageMediaRequest.value = ManageMediaAccessRequest(itemId)
+                    }
                 }
                 DeleteMediaResult.Success -> finalizeDelete(itemId, currentIndex)
                 DeleteMediaResult.NotFound -> {
