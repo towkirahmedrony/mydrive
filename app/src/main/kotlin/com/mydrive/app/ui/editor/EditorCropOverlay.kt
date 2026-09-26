@@ -46,16 +46,17 @@ fun EditorCropOverlay(
             .pointerInput(Unit) {
                 detectDragGestures(
                     onDragStart = { offset ->
-                        val handlePad = with(density) { 28.dp.toPx() } / min(size.width, size.height).coerceAtLeast(1f)
-                        val nx = (offset.x / size.width).coerceIn(0f, 1f)
-                        val ny = (offset.y / size.height).coerceIn(0f, 1f)
+                        val minDim = min(size.width, size.height).coerceAtLeast(1).toFloat()
+                        val handlePad = with(density) { 28.dp.toPx() } / minDim
+                        val nx = (offset.x / size.width.coerceAtLeast(1).toFloat()).coerceIn(0f, 1f)
+                        val ny = (offset.y / size.height.coerceAtLeast(1).toFloat()).coerceIn(0f, 1f)
                         activeHandle = EditorCropMath.hitTest(cropState.value, nx, ny, handlePad)
                     },
                     onDrag = { change, dragAmount ->
                         val handle = activeHandle ?: return@detectDragGestures
                         change.consume()
-                        val dx = dragAmount.x / size.width.coerceAtLeast(1f)
-                        val dy = dragAmount.y / size.height.coerceAtLeast(1f)
+                        val dx = dragAmount.x / size.width.coerceAtLeast(1).toFloat()
+                        val dy = dragAmount.y / size.height.coerceAtLeast(1).toFloat()
                         val pixelAspect = aspectState.value.pixelAspect(imageAspectState.value)
                         val normRatio = EditorCropMath.normalizedRatio(pixelAspect, imageAspectState.value)
                         onChangeState.value(EditorCropMath.resize(cropState.value, handle, dx, dy, normRatio))
