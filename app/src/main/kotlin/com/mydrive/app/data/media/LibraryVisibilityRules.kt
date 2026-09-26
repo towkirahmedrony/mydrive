@@ -108,11 +108,11 @@ object LibraryVisibilityRules {
     ): Boolean {
         if (item.id in hiddenLocalIds) return true
         if (trashed.isEmpty()) return false
-        if (trashed.containsKey(item.id)) return true
         val remote = item.remoteMediaId?.takeIf { it.isNotBlank() }
         val local = item.mediaStoreId.takeIf { it > 0L }
-        return trashed.values.any { identity ->
-            (remote != null && remote in identity.remoteMediaIds) ||
+        return trashed.any { identity ->
+            identity.localId == item.id ||
+                (remote != null && remote in identity.remoteMediaIds) ||
                 (local != null && identity.localMediaId == local)
         }
     }
