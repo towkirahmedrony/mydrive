@@ -2464,7 +2464,37 @@ class MediaRepository(
                     requestTrashMutationConfirmation(context, listOf(uri), restore, item, baseMeta, null)
                 }
             } else {
-                requestTrashMutationConfirmation(context, listOf(uri), restore, item, baseMeta, null)
+                if (permissions.canManageMedia()) {
+                    when (val deletion = tryDirectPermanentDelete(context, uri)) {
+                        is DirectPermanentDeleteAttempt.Success -> {
+                            logTrashMutation(item, baseMeta, "direct_delete_manage_media", "SUCCESS")
+                            TrashMutationResult.Success
+                        }
+                        is DirectPermanentDeleteAttempt.AlreadyGone -> {
+                            logTrashMutation(item, baseMeta, "direct_delete_already_gone", "SUCCESS")
+                            TrashMutationResult.NotFound
+                        }
+                        is DirectPermanentDeleteAttempt.Failed -> {
+                            logMediaActionFailure(
+                                action,
+                                item,
+                                deletion.error,
+                                baseMeta + mapOf(
+                                    "android_flow" to "direct_delete_manage_media",
+                                    "result" to "FAILED",
+                                    "can_manage_media" to "true"
+                                )
+                            )
+                            if (deletion.error is SecurityException) {
+                                TrashMutationResult.PermissionDenied
+                            } else {
+                                TrashMutationResult.Failed
+                            }
+                        }
+                    }
+                } else {
+                    requestTrashMutationConfirmation(context, listOf(uri), restore, item, baseMeta, null)
+                }
             }
         } catch (error: RecoverableSecurityException) {
             requestTrashMutationConfirmation(context, listOf(uri), restore, item, baseMeta, error)
@@ -2536,7 +2566,49 @@ class MediaRepository(
                     requestTrashMutationConfirmation(context, remaining, restore = true, sample, baseMeta, null)
                 }
             } else {
-                requestTrashMutationConfirmation(context, uris, restore = false, sample, baseMeta, null)
+                if (!permissions.canManageMedia()) {
+                    requestTrashMutationConfirmation(context, uris, restore = false, sample, baseMeta, null)
+                } else {
+                    val failed = mutableListOf<Pair<Uri, Exception>>()
+                    var deleted = 0
+                    for (uri in uris) {
+                        when (val deletion = tryDirectPermanentDelete(context, uri)) {
+                            is DirectPermanentDeleteAttempt.Success -> deleted += 1
+                            is DirectPermanentDeleteAttempt.AlreadyGone -> deleted += 1
+                            is DirectPermanentDeleteAttempt.Failed -> failed += uri to deletion.error
+                        }
+                    }
+                    if (failed.isEmpty()) {
+                        logTrashMutation(
+                            sample,
+                            baseMeta,
+                            "direct_delete_manage_media_batch",
+                            "SUCCESS"
+                        )
+                        _trashProgress.value = TrashOperationProgress()
+                        TrashMutationResult.Success
+                    } else {
+                        val error = failed.first().second
+                        logMediaActionFailure(
+                            action,
+                            sample,
+                            error,
+                            baseMeta + mapOf(
+                                "android_flow" to "direct_delete_manage_media_batch",
+                                "result" to "FAILED",
+                                "can_manage_media" to "true",
+                                "deleted_count" to deleted.toString(),
+                                "failed_count" to failed.size.toString()
+                            )
+                        )
+                        _trashProgress.value = TrashOperationProgress()
+                        if (error is SecurityException) {
+                            TrashMutationResult.PermissionDenied
+                        } else {
+                            TrashMutationResult.Failed
+                        }
+                    }
+                }
             }
         } catch (error: RecoverableSecurityException) {
             requestTrashMutationConfirmation(context, uris, restore, sample, baseMeta, error)
@@ -2563,6 +2635,32 @@ class MediaRepository(
             false
         } catch (_: Exception) {
             false
+        }
+    }
+
+    private sealed class DirectPermanentDeleteAttempt {
+        data object Success : DirectPermanentDeleteAttempt()
+        data object AlreadyGone : DirectPermanentDeleteAttempt()
+        data class Failed(val error: Exception) : DirectPermanentDeleteAttempt()
+    }
+
+    private fun tryDirectPermanentDelete(
+        context: Context,
+        uri: Uri
+    ): DirectPermanentDeleteAttempt {
+        return try {
+            when {
+                context.contentResolver.delete(uri, null, null) > 0 ->
+                    DirectPermanentDeleteAttempt.Success
+                !uriStillExists(context, uri) ->
+                    DirectPermanentDeleteAttempt.AlreadyGone
+                else ->
+                    DirectPermanentDeleteAttempt.Failed(
+                        FileNotFoundException("MediaStore permanent delete returned 0 rows")
+                    )
+            }
+        } catch (error: Exception) {
+            DirectPermanentDeleteAttempt.Failed(error)
         }
     }
 
