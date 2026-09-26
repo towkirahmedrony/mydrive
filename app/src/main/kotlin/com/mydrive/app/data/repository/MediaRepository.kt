@@ -2220,6 +2220,7 @@ class MediaRepository(
         if (ids.isEmpty()) return@withContext
         val idSet = ids.toSet()
         ids.forEach { restoreCloudTrash(it) }
+        ids.forEach { visibilityStore.unhideLocal(it) }
         locallyHiddenIds.removeAll(idSet)
         _trashedMedia.update { items -> items.filter { it.id !in idSet } }
         publishTrash(_trashedMedia.value)
@@ -2251,12 +2252,25 @@ class MediaRepository(
             clientUploadId = record?.clientUploadId
         )
         if (result == HideMediaResult.Success) {
+            val remoteId = item?.remoteMediaId ?: record?.remoteMediaId
+            // Keep the local visibility overlay in sync immediately. The next
+            // refresh may still be composing from a cached page, so relying only
+            // on the server response can leave the same cloud copy visible in an
+            // album while the local copy is already in Trash.
+            visibilityStore.hideLocal(id)
+            _media.update { items ->
+                items.filterNot { candidate ->
+                    candidate.id == id ||
+                        (!remoteId.isNullOrBlank() && candidate.remoteMediaId == remoteId)
+                }
+            }
+            rebuildAlbums()
             // Trash is reversible, so the persistent thumbnail is deliberately KEPT:
             // only the permanent-delete lifecycle may purge it. Moving media to
             // Trash must never make the thumbnail eligible for deletion.
             logThumbnailLifecycle(
                 operation = "move_to_trash",
-                mediaId = item?.remoteMediaId ?: record?.remoteMediaId.orEmpty(),
+                mediaId = remoteId.orEmpty(),
                 result = "KEPT",
                 reason = "RESTORABLE"
             )
