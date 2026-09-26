@@ -27,6 +27,7 @@ import com.mydrive.app.data.backup.BackupDiscoveryReason
 import com.mydrive.app.data.worker.BackupDiscoveryScheduler
 import com.mydrive.app.data.worker.UploadWorkScheduler
 import com.mydrive.app.data.local.LibraryVisibilityStore
+import com.mydrive.app.data.local.MediaCatalogStore
 import com.mydrive.app.data.local.MediaSyncCursorStore
 import com.mydrive.app.data.repository.AuthRepository
 import com.mydrive.app.data.repository.BackupRepository
@@ -92,6 +93,9 @@ class MyDriveApp : Application() {
             // Per-account incremental synchronization position, so a refresh only
             // fetches the media records that changed since the last one.
             mediaSyncCursorStore = MediaSyncCursorStore(this),
+            // Last known composed gallery, in the app's existing Room database:
+            // Photos/Albums are restored from here before any scan or network pass.
+            mediaCatalogStore = MediaCatalogStore(UploadQueueDatabase.get(this).mediaCatalogDao()),
             scope = applicationScope
         )
     }

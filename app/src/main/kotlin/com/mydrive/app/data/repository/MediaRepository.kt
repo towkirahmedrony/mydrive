@@ -19,9 +19,13 @@ import androidx.exifinterface.media.ExifInterface
 import com.mydrive.app.data.local.CloudLibraryEntry
 import com.mydrive.app.data.local.FavoritesStore
 import com.mydrive.app.data.local.LibraryVisibilityStore
+import com.mydrive.app.data.local.MediaCatalogReconciler
+import com.mydrive.app.data.local.MediaCatalogStore
 import com.mydrive.app.data.local.MediaSyncCursorStore
 import com.mydrive.app.data.local.SyncRecord
 import com.mydrive.app.data.local.TelegramSettingsStore
+import com.mydrive.app.data.local.toAlbumStats
+import com.mydrive.app.data.local.toMediaItem
 import com.mydrive.app.data.media.FullImageLoader
 import com.mydrive.app.data.media.MediaAlbumStats
 import com.mydrive.app.data.media.MediaLibraryPaging
@@ -134,6 +138,13 @@ class MediaRepository(
     private val mediaAssetsRepository: MediaAssetsRepository,
     private val visibilityStore: LibraryVisibilityStore,
     private val mediaSyncCursorStore: MediaSyncCursorStore,
+    /**
+     * Last known composed gallery, on disk. It is the single source of truth the
+     * UI is restored from at launch and written back to after every
+     * reconciliation, so Photos/Albums never depend on a scan or a network round
+     * trip to become visible.
+     */
+    private val mediaCatalogStore: MediaCatalogStore,
     private val scope: CoroutineScope
 ) {
 
@@ -195,6 +206,18 @@ class MediaRepository(
     private var loadedRemoteRows: List<MediaAssetRow> = emptyList()
     private var cloudAlbumStats: MediaAlbumStats = MediaAlbumStats()
 
+    /**
+     * The account whose persisted catalog is already in memory. Guarantees the
+     * hydration runs once per bind instead of on every refresh trigger, and that
+     * a re-bind of the same account never blanks a populated gallery.
+     */
+    private var catalogHydratedOwner: String? = null
+
+    /** Coalesced writer for the persisted catalog: at most one write in flight. */
+    private val catalogWriteMutex = Mutex()
+    private var catalogDirty = false
+    private var catalogWriterJob: Job? = null
+
     private companion object {
         /** Per-composition cap for the verbose cloud availability trace. */
         const val AVAILABILITY_TRACE_BUDGET = 30
@@ -231,8 +254,10 @@ class MediaRepository(
                     val updatedLibrary = currentLibrary.map { it.withRecord(records[it.id]) }
                     val updatedDevice = currentDevice.map { it.withRecord(records[it.id]) }
                     if (updatedLibrary != currentLibrary) {
-                        _media.value = updatedLibrary
-                        updateStorage(updatedLibrary)
+                        // A backup-progress or error-state change is a real change to
+                        // the rendered library, so it is published and persisted the
+                        // same way a reconciliation result is.
+                        publishLibrary(updatedLibrary)
                     }
                     if (updatedDevice != currentDevice) {
                         _deviceMedia.value = updatedDevice
@@ -250,7 +275,8 @@ class MediaRepository(
     fun manageMediaRequestIntent() = permissions.manageMediaRequestIntent()
 
     fun bindAccount(userId: String) {
-        synchronized(sessionLock) {
+        val previousOwner = synchronized(sessionLock) {
+            val previous = boundUserId
             boundUserId = userId
             visibilityStore.bindUser(userId)
             favorites.bindUser(userId)
@@ -258,14 +284,30 @@ class MediaRepository(
             // the visibility and favorite caches are: account B must never resume
             // from account A's position.
             mediaSyncCursorStore.bindUser(userId)
-            resetCatalog(showLoading = true)
-            hydrateCachedCloudCatalog()
+            if (previous != userId) {
+                // A different account's catalog is not this account's data, so the
+                // in-memory catalog is dropped. The persistence itself is keyed by
+                // owner and is left alone: signing back in must find it again.
+                catalogHydratedOwner = null
+                resetCatalog(showLoading = true)
+            } else {
+                // Same account, still in memory (process alive, session refreshed):
+                // keep showing it. There is nothing to reload.
+                lastRefreshAt = 0L
+            }
+            previous
         }
+        if (previousOwner == userId) return
+        // Synchronous, on-disk hydration: by the time the authenticated state is
+        // published and the Photos/Albums host composes, the last known library is
+        // already in `_media`/`_albums`. No spinner, no temporary dataset.
+        hydrateLocalCatalog(userId)
     }
 
     fun clearAccountSession() {
         synchronized(sessionLock) {
             boundUserId = null
+            catalogHydratedOwner = null
             viewerSessionIds = null
             locallyHiddenIds.clear()
             visibilityStore.clearSession()
@@ -285,6 +327,8 @@ class MediaRepository(
         nextPageCursor = null
         loadedRemoteRows = emptyList()
         cloudAlbumStats = MediaAlbumStats()
+        persistedAlbumStats = null
+        cloudSnapshotFallback = null
         _media.value = emptyList()
         _deviceMedia.value = emptyList()
         _albums.value = emptyList()
@@ -300,8 +344,185 @@ class MediaRepository(
         }
     }
 
-    /** Publishes the last successful account-scoped cloud snapshot immediately. */
-    private fun hydrateCachedCloudCatalog() {
+    /**
+     * Restores the last known gallery from disk.
+     *
+     * This runs before the first Photos/Albums composition and does no scan, no
+     * network request and no reconciliation: it is a single indexed read of rows
+     * this account already had. Afterwards the screen is showing real, usable
+     * content, and the background reconciliation only has to *amend* it.
+     *
+     * When nothing is persisted for this account — a first launch, a fresh
+     * install, or an install upgrading from a build that had no catalog — the
+     * initialization state is kept. That is the only case where a loading state is
+     * truthful, and it is deliberately preferred over publishing the cloud-only
+     * snapshot, which is a *different, partial* dataset and would reproduce the
+     * very jump this architecture removes. That snapshot is not thrown away: it
+     * seeds the first pass and stands in whenever a refresh fails.
+     */
+    private fun hydrateLocalCatalog(userId: String) {
+        if (catalogHydratedOwner == userId) return
+        catalogHydratedOwner = userId
+        val rows = mediaCatalogStore.snapshotBlocking(userId)
+        val meta = if (rows.isNullOrEmpty()) null else mediaCatalogStore.metaBlocking(userId)
+        synchronized(sessionLock) {
+            if (boundUserId != userId) return
+            // The cloud snapshot is only a synchronization seed and a failure
+            // fallback; it is never the gallery.
+            seedCloudRowsFromCache()
+            if (rows.isNullOrEmpty()) {
+                // Nothing persisted for this account yet: a first launch, a fresh
+                // install, or an install upgrading from a build without the
+                // catalog. This is the one case where a loading state is honest —
+                // publishing the cloud-only subset here would be the very
+                // "partial dataset, then a different dataset" flicker.
+                _loadState.update {
+                    it.copy(isLoading = true, isRefreshing = false, isLoadingMore = false, errorMessage = null)
+                }
+                // `rows == null` means "not known yet" (the blocking read was
+                // refused, e.g. on the main thread) — never "empty".
+                if (rows == null) scope.launch { hydrateLocalCatalogAsync(userId) }
+                return
+            }
+            cloudAlbumStats = meta.toAlbumStats()
+            // What was just rendered is exactly what is on disk, so nothing is
+            // dirty. The next reconciliation diffs against these rows normally.
+            persistedAlbumStats = cloudAlbumStats
+            _media.value = rows.map { it.toMediaItem(favorites.ids.value) }
+            _albums.value = buildAlbums(_media.value, cloudAlbumStats)
+            updateStorage(_media.value)
+            _loadState.update { it.copy(isLoading = false, errorMessage = null) }
+            DeveloperLogger.info(
+                category = LogCategory.DATABASE,
+                event = "CATALOG_HYDRATED",
+                message = "Gallery restored from the local catalog before any scan or network pass",
+                metadata = mapOf(
+                    "restored_media" to _media.value.size.toString(),
+                    "albums" to _albums.value.size.toString()
+                )
+            )
+        }
+    }
+
+    /**
+     * Same restoration, off the caller's thread, for the case where the blocking
+     * read was refused because the caller was on the main thread. The screen owns
+     * the loading state for those few milliseconds only.
+     */
+    private suspend fun hydrateLocalCatalogAsync(userId: String) {
+        val rows = mediaCatalogStore.snapshot(userId)
+        val meta = if (rows.isEmpty()) null else mediaCatalogStore.meta(userId)
+        synchronized(sessionLock) {
+            if (boundUserId != userId || _media.value.isNotEmpty()) return
+            if (rows.isEmpty()) return
+            cloudAlbumStats = meta.toAlbumStats()
+            persistedAlbumStats = cloudAlbumStats
+            _media.value = rows.map { it.toMediaItem(favorites.ids.value) }
+            _albums.value = buildAlbums(_media.value, cloudAlbumStats)
+            updateStorage(_media.value)
+            _loadState.update { it.copy(isLoading = false, errorMessage = null) }
+        }
+    }
+
+    /**
+     * Publishes a newly composed library as the single UI source of truth.
+     *
+     * StateFlow only emits on a *changed* value, so an unchanged reconciliation is
+     * already invisible to Compose; the persisted catalog is written for the same
+     * reason only when something actually differs.
+     */
+    private fun publishLibrary(items: List<MediaItem>) {
+        val previous = _media.value
+        _media.value = items
+        _albums.value = buildAlbums(items, cloudAlbumStats)
+        updateStorage(items)
+        scheduleCatalogPersist(previous, items)
+    }
+
+    /**
+     * Writes the difference between [previous] and [next] to disk, coalesced.
+     *
+     * At most one writer runs at a time and a burst of publications collapses into
+     * the newest snapshot: a reconciliation that touches ten items writes ten
+     * rows, a reconciliation that changes nothing writes nothing.
+     */
+    private fun scheduleCatalogPersist(previous: List<MediaItem>, next: List<MediaItem>) {
+        val owner = boundUserId?.takeIf { it.isNotBlank() } ?: return
+        val rowsChanged = !MediaCatalogReconciler.diff(owner, previous, next).isEmpty
+        val statsChanged = cloudAlbumStats != persistedAlbumStats
+        if (!rowsChanged && !statsChanged) {
+            // Neither the rendered library nor the album numbers moved: there is
+            // nothing to write, so no coroutine is started at all.
+            return
+        }
+        catalogDirty = true
+        pendingCatalogPrevious = previous
+        pendingCatalogNext = next
+        if (catalogWriterJob?.isActive == true) return
+        catalogWriterJob = scope.launch {
+            catalogWriteMutex.withLock {
+                while (catalogDirty) {
+                    catalogDirty = false
+                    val snapshotPrevious = pendingCatalogPrevious
+                    val snapshotNext = pendingCatalogNext
+                    val snapshotStats = cloudAlbumStats
+                    if (boundUserId != owner) return@withLock
+                    runCatching {
+                        mediaCatalogStore.save(
+                            ownerUserId = owner,
+                            previous = snapshotPrevious,
+                            next = snapshotNext,
+                            albumStats = snapshotStats
+                        )
+                    }.onSuccess {
+                        persistedAlbumStats = snapshotStats
+                    }.onFailure { error ->
+                        // A cache write failure is not a gallery failure: the screen
+                        // keeps the content it already has.
+                        DeveloperLogger.warn(
+                            category = LogCategory.DATABASE,
+                            event = "CATALOG_PERSIST_FAILED",
+                            message = "Could not persist the local gallery catalog; UI state is unaffected",
+                            throwable = error
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    @Volatile
+    private var pendingCatalogPrevious: List<MediaItem> = emptyList()
+
+    @Volatile
+    private var pendingCatalogNext: List<MediaItem> = emptyList()
+
+    /**
+     * The last known cloud-only snapshot, held as a failure fallback only.
+     * Session-scoped: it is derived from [visibilityStore] and rebuilt on bind.
+     */
+    @Volatile
+    private var cloudSnapshotFallback: List<MediaItem>? = null
+
+    /**
+     * The album numbers as they are on disk, so a write happens when they move and
+     * does not happen when they have not.
+     */
+    @Volatile
+    private var persistedAlbumStats: MediaAlbumStats? = null
+
+    /**
+     * Seeds the in-memory cloud rows from the persisted per-account cloud snapshot.
+     *
+     * These rows are NOT the gallery. They exist only so the first background pass
+     * can be an incremental one instead of a full first-page load. The item list
+     * is kept aside as a *fallback* — see [publishCloudFallbackIfEmpty] — because
+     * it is a cloud-only subset and publishing it as the live gallery is exactly
+     * the "partial dataset, then a different dataset" behaviour this architecture
+     * removes.
+     */
+    private fun seedCloudRowsFromCache() {
+        cloudSnapshotFallback = null
         val cached = visibilityStore.cloudEntries()
         if (cached.isEmpty()) return
         val records = syncRepository.records.value
@@ -323,9 +544,35 @@ class MediaRepository(
             )
         }
         loadedRemoteRows = cachedRows
-        _media.value = cached.values.map { it.toMediaItem(favoriteIds, records[it.localId]) }
-        _albums.value = buildAlbums(_media.value, cloudAlbumStats)
-        updateStorage(_media.value)
+        cloudSnapshotFallback = cached.values
+            .map { it.toMediaItem(favoriteIds, records[it.localId]) }
+            .sortedWith(compareByDescending<MediaItem> { it.capturedAtMillis }.thenBy { it.id })
+    }
+
+    /**
+     * Shows the last known cloud-only snapshot when a refresh failed and there is
+     * otherwise nothing to display.
+     *
+     * A failed refresh must never hide content the account already has. This is
+     * deliberately memory-only: the cloud snapshot is not the composed gallery, so
+     * it must not become the persisted catalog and be mistaken for one next launch.
+     *
+     * @return true when something was published.
+     */
+    private fun publishCloudFallbackIfEmpty(): Boolean {
+        if (_media.value.isNotEmpty()) return false
+        val fallback = cloudSnapshotFallback
+        if (fallback.isNullOrEmpty()) return false
+        _media.value = fallback
+        _albums.value = buildAlbums(fallback, cloudAlbumStats)
+        updateStorage(fallback)
+        DeveloperLogger.info(
+            category = LogCategory.DATABASE,
+            event = "CATALOG_FALLBACK_PUBLISHED",
+            message = "Refresh failed; showing the last known cloud snapshot instead of an error",
+            metadata = mapOf("media" to fallback.size.toString())
+        )
+        return true
     }
 
     fun onMediaStoreChanged() {
@@ -370,7 +617,13 @@ class MediaRepository(
         if (boundUserId.isNullOrBlank()) return
         favorites.toggle(id)
         val favorite = favorites.contains(id)
-        _media.update { items -> items.map { item -> if (item.id == id) item.copy(isFavorite = favorite) else item } }
+        val previous = _media.value
+        val updated = previous.map { item -> if (item.id == id) item.copy(isFavorite = favorite) else item }
+        if (updated == previous) return
+        _media.value = updated
+        // Favorites are part of the rendered library, so the favorite state that a
+        // cold start restores must include this one.
+        scheduleCatalogPersist(previous, updated)
     }
 
     fun updatePreferences(transform: (BackupPreferences) -> BackupPreferences) { _preferences.update(transform) }
@@ -409,11 +662,14 @@ class MediaRepository(
 
     suspend fun refresh(force: Boolean = false, localOverlayOnly: Boolean = false) {
         // A remote pass is already running for this account: fold this request into
-        // it (it runs once more afterwards) instead of queueing a duplicate remote
-        // reconciliation behind the mutex. Local-overlay refreshes are never folded:
-        // they do no network work and must reflect a MediaStore change immediately.
+        // it instead of queueing a duplicate remote reconciliation behind the
+        // mutex. The running pass re-reads the same catalog, so a second pass is
+        // only owed for a request that was *forced* (a permission grant, an
+        // explicit retry) and would otherwise be swallowed by a pass that started
+        // without it. Local-overlay refreshes are never folded: they do no network
+        // work and must reflect a MediaStore change immediately.
         val remoteRequested = !localOverlayOnly
-        if (remoteRequested && !remoteRefreshGate.begin()) {
+        if (remoteRequested && !remoteRefreshGate.begin(force = force)) {
             applyAccessState()
             return
         }
@@ -545,9 +801,7 @@ class MediaRepository(
                             loadedRemoteRows
                         )
                         val libraryItems = mergePreservedCloudItems(cachedLibrary, deviceItems)
-                        _media.value = libraryItems
-                        _albums.value = buildAlbums(libraryItems, cloudAlbumStats)
-                        updateStorage(libraryItems)
+                        publishLibrary(libraryItems)
                         _loadState.update { it.copy(isLoading = false, isRefreshing = false, isLoadingMore = false) }
                     }
                 }
@@ -588,7 +842,7 @@ class MediaRepository(
                 synchronized(sessionLock) {
                     if (!sessionStillCurrent(session, ownerId)) return
                     applyAccessState()
-                    val keepExisting = _media.value.isNotEmpty()
+                    val keepExisting = keepOrFallbackContent()
                     _loadState.update {
                         it.copy(
                             isLoading = false,
@@ -657,9 +911,7 @@ class MediaRepository(
                         MediaLibraryPaging.latestSyncCursor(null, page.rows)
                     )
                     val libraryItems = composeLibrary(deviceItems, trashed, favoriteIds, records, loadedRemoteRows)
-                    _media.value = libraryItems
-                    _albums.value = buildAlbums(libraryItems, cloudAlbumStats)
-                    updateStorage(libraryItems)
+                    publishLibrary(libraryItems)
                     _loadState.update {
                         it.copy(
                             isLoadingMore = false,
@@ -731,10 +983,8 @@ class MediaRepository(
                     MediaLibraryPaging.latestSyncCursor(null, page.rows)
                 )
                 val libraryItems = composeLibrary(deviceItems, trashed, favoriteIds, records, page.rows)
-                _media.value = libraryItems
-                _albums.value = buildAlbums(libraryItems, cloudAlbumStats)
+                publishLibrary(libraryItems)
                 lastRefreshAt = now
-                updateStorage(libraryItems)
                 _loadState.update {
                     it.copy(
                         isLoading = false,
@@ -766,7 +1016,7 @@ class MediaRepository(
             )
             synchronized(sessionLock) {
                 if (!sessionStillCurrent(session, ownerId) || epoch != catalogEpoch) return
-                val keepExisting = _media.value.isNotEmpty()
+                val keepExisting = keepOrFallbackContent()
                 _loadState.update {
                     it.copy(
                         isLoading = false,
@@ -780,6 +1030,16 @@ class MediaRepository(
             }
         }
     }
+
+    /**
+     * Whether a failed pass still leaves something usable on screen.
+     *
+     * Valid content wins over an error in every case: the composed library if there
+     * is one, otherwise the last known cloud snapshot. Only a genuinely empty
+     * account is allowed to show a failure.
+     */
+    private fun keepOrFallbackContent(): Boolean =
+        _media.value.isNotEmpty() || publishCloudFallbackIfEmpty()
 
     /**
      * Incremental synchronization: read the rows that changed after [cursor] and
@@ -853,7 +1113,7 @@ class MediaRepository(
             )
             synchronized(sessionLock) {
                 if (!sessionStillCurrent(session, ownerId) || epoch != catalogEpoch) return
-                val keepExisting = _media.value.isNotEmpty()
+                val keepExisting = keepOrFallbackContent()
                 _loadState.update {
                     it.copy(
                         isLoading = false,
@@ -882,10 +1142,8 @@ class MediaRepository(
             // guard that proved this pass still owns the catalog.
             mediaSyncCursorStore.advanceTo(position)
             val libraryItems = composeLibrary(deviceItems, trashed, favoriteIds, records, loadedRemoteRows)
-            _media.value = libraryItems
-            _albums.value = buildAlbums(libraryItems, cloudAlbumStats)
+            publishLibrary(libraryItems)
             lastRefreshAt = now
-            updateStorage(libraryItems)
             _loadState.update {
                 it.copy(
                     isLoading = false,
@@ -1430,7 +1688,10 @@ class MediaRepository(
         }
         return library
             .distinctBy { it.remoteMediaId?.takeIf(String::isNotBlank) ?: "local:${it.id}" }
-            .sortedByDescending { it.capturedAtMillis }
+            // Fully deterministic: the tiebreak makes the composed order equal to
+            // the order the persisted catalog is read back in, so restoring the
+            // gallery from disk cannot reshuffle tiles within the same timestamp.
+            .sortedWith(compareByDescending<MediaItem> { it.capturedAtMillis }.thenBy { it.id })
     }
 
     /**
@@ -1554,7 +1815,7 @@ class MediaRepository(
         if (preserved.isEmpty()) return overlay
         return (overlay + preserved)
             .distinctBy { it.remoteMediaId?.takeIf(String::isNotBlank) ?: "local:${it.id}" }
-            .sortedByDescending { it.capturedAtMillis }
+            .sortedWith(compareByDescending<MediaItem> { it.capturedAtMillis }.thenBy { it.id })
     }
 
     private fun com.mydrive.app.data.remote.dto.MediaAssetRow.toCloudOnlyMediaItem(

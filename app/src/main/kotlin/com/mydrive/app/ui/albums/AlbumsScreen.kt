@@ -158,7 +158,9 @@ fun AlbumsScreen(
             }
         }
 
-        if (state.isLoading && state.albums.isNotEmpty()) {
+        // A non-blocking refresh indicator: the folders below stay visible and
+        // usable while the background reconciliation runs.
+        if ((state.isLoading || state.isRefreshing) && state.albums.isNotEmpty()) {
             LinearProgressIndicator(
                 modifier = Modifier.fillMaxWidth(),
                 color = Copper,

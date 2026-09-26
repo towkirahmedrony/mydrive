@@ -14,30 +14,45 @@ class RemoteRefreshGateTest {
     }
 
     @Test
-    fun `a burst of callers collapses into one running pass plus one trailing pass`() {
+    fun `a launch-time burst collapses into exactly one pass`() {
         val gate = RemoteRefreshGate()
 
         assertTrue("first caller runs", gate.begin())
-        assertFalse("photos resume is folded in", gate.begin())
-        assertFalse("albums entry is folded in", gate.begin())
-        assertFalse("media store refresh is folded in", gate.begin())
+        assertFalse("photos resume is folded in", gate.begin(force = false))
+        assertFalse("albums entry is folded in", gate.begin(force = false))
+        assertFalse("app start is folded in", gate.begin(force = false))
+        assertFalse("foreground is folded in", gate.begin(force = false))
+        assertFalse("authenticated is folded in", gate.begin(force = false))
 
-        assertTrue("one trailing pass is owed", gate.end())
-        assertTrue("the trailing pass runs", gate.begin())
-        assertFalse("nothing else was queued", gate.end())
+        assertFalse("nothing further is owed: the running pass covers them all", gate.end())
+        assertFalse("and the gate stays quiet", gate.end())
     }
 
     @Test
-    fun `a caller arriving while the trailing pass runs asks for its own trailing pass`() {
+    fun `a forced caller folded in still gets its own trailing pass`() {
+        val gate = RemoteRefreshGate()
+
+        assertTrue("first caller runs", gate.begin())
+        assertFalse("photos resume is folded in", gate.begin(force = false))
+        assertFalse("a permission grant is folded in", gate.begin(force = true))
+        assertFalse("albums entry is folded in", gate.begin(force = false))
+
+        assertTrue("the forced intent owes one trailing pass", gate.end())
+        assertTrue("the trailing pass runs", gate.begin())
+        assertFalse("the trailing pass owes nothing itself", gate.end())
+    }
+
+    @Test
+    fun `a forced caller arriving while the trailing pass runs asks for its own trailing pass`() {
         val gate = RemoteRefreshGate()
 
         assertTrue(gate.begin())
-        assertFalse(gate.begin())
+        assertFalse(gate.begin(force = true))
         assertTrue(gate.end())
 
         // Trailing pass starts; a pull-to-refresh arrives mid-flight.
         assertTrue(gate.begin())
-        assertFalse(gate.begin())
+        assertFalse(gate.begin(force = true))
         assertTrue(gate.end())
         assertFalse(gate.end())
     }

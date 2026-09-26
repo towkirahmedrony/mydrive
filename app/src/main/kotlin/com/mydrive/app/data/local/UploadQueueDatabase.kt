@@ -59,11 +59,17 @@ interface UploadQueueDao {
 }
 
 /**
- * The app's single Room database, holding the media upload queue.
+ * The app's single Room database: the media upload queue, the Private Vault
+ * state, and the persisted gallery catalog the Photos/Albums UI is restored from.
  */
 @Database(
-    entities = [UploadQueueEntity::class, VaultItemEntity::class],
-    version = 5,
+    entities = [
+        UploadQueueEntity::class,
+        VaultItemEntity::class,
+        MediaCatalogEntity::class,
+        MediaCatalogMetaEntity::class
+    ],
+    version = 6,
     exportSchema = false
 )
 abstract class UploadQueueDatabase : RoomDatabase() {
@@ -71,6 +77,12 @@ abstract class UploadQueueDatabase : RoomDatabase() {
 
     /** Local Private Vault state: authoritative for this device's vault files. */
     abstract fun vaultDao(): VaultDao
+
+    /**
+     * Last known composed gallery, so a cold start renders Photos/Albums from
+     * disk instead of waiting for a MediaStore scan and a cloud reconciliation.
+     */
+    abstract fun mediaCatalogDao(): MediaCatalogDao
 
     companion object {
         @Volatile private var instance: UploadQueueDatabase? = null
@@ -158,12 +170,71 @@ abstract class UploadQueueDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * Adds the persisted gallery catalog. Purely additive: the upload queue and
+         * the vault keep their rows, and an install upgrading from v5 simply has an
+         * empty catalog, which is the same state as a first launch.
+         */
+        private val MIGRATION_5_6 = object : Migration(5, 6) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `media_catalog` (" +
+                        "`ownerUserId` TEXT NOT NULL, " +
+                        "`mediaId` TEXT NOT NULL, " +
+                        "`filename` TEXT NOT NULL, " +
+                        "`type` TEXT NOT NULL, " +
+                        "`fileSizeBytes` INTEGER NOT NULL, " +
+                        "`capturedAtMillis` INTEGER NOT NULL, " +
+                        "`device` TEXT NOT NULL, " +
+                        "`resolution` TEXT NOT NULL, " +
+                        "`durationSeconds` INTEGER, " +
+                        "`isFavorite` INTEGER NOT NULL, " +
+                        "`backupState` TEXT NOT NULL, " +
+                        "`backupCompleted` INTEGER NOT NULL, " +
+                        "`telegramCompleted` INTEGER NOT NULL, " +
+                        "`thumbnailSeed` INTEGER NOT NULL, " +
+                        "`albumId` TEXT NOT NULL, " +
+                        "`albumName` TEXT NOT NULL, " +
+                        "`mediaStoreId` INTEGER NOT NULL, " +
+                        "`uri` TEXT NOT NULL, " +
+                        "`mimeType` TEXT NOT NULL, " +
+                        "`dateAddedMillis` INTEGER NOT NULL, " +
+                        "`dateModifiedMillis` INTEGER NOT NULL, " +
+                        "`width` INTEGER NOT NULL, " +
+                        "`height` INTEGER NOT NULL, " +
+                        "`durationMillis` INTEGER, " +
+                        "`relativePath` TEXT, " +
+                        "`cloudinaryAssetId` TEXT, " +
+                        "`cloudinaryPublicId` TEXT, " +
+                        "`isTrashed` INTEGER NOT NULL, " +
+                        "`dateExpiresMillis` INTEGER NOT NULL, " +
+                        "`remoteMediaId` TEXT, " +
+                        "`thumbnailUrl` TEXT, " +
+                        "`originLocal` INTEGER NOT NULL, " +
+                        "`originalUrl` TEXT, " +
+                        "`cloudBackedUp` INTEGER NOT NULL, " +
+                        "`errorMessage` TEXT, " +
+                        "PRIMARY KEY(`ownerUserId`, `mediaId`))"
+                )
+                database.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `media_catalog_meta` (" +
+                        "`ownerUserId` TEXT NOT NULL, " +
+                        "`cloudOnlyCount` INTEGER NOT NULL, " +
+                        "`coverMediaId` TEXT, " +
+                        "`coverMimeType` TEXT, " +
+                        "`coverSourceUrl` TEXT, " +
+                        "`updatedAt` INTEGER NOT NULL, " +
+                        "PRIMARY KEY(`ownerUserId`))"
+                )
+            }
+        }
+
         fun get(context: Context): UploadQueueDatabase = instance ?: synchronized(this) {
             instance ?: Room.databaseBuilder(
                 context.applicationContext,
                 UploadQueueDatabase::class.java,
                 "upload_queue.db"
-            ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
+            ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
                 .build()
                 .also { instance = it }
         }

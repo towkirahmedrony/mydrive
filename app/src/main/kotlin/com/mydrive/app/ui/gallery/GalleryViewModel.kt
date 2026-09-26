@@ -50,7 +50,11 @@ class GalleryViewModel(
     private val query = MutableStateFlow("")
 
     init {
-        refresh(force = true)
+        // Not forced: the repository already restored the last known gallery from
+        // disk before this ViewModel existed, so opening Photos only *reconciles*
+        // in the background. A forced pass here would bypass the launch throttle
+        // and start a second device scan on top of the app-start one.
+        refresh(force = false)
     }
 
     val uiState: StateFlow<GalleryUiState> = combine(

@@ -127,10 +127,14 @@ class AutomaticBackupCoordinator(
         }
 
         val localOverlayOnly = reason == BackupDiscoveryReason.MEDIASTORE
+        // Only a genuine state change bypasses the launch throttle. APP_START,
+        // FOREGROUND and AUTHENTICATED all fire within the same cold start as the
+        // gallery's own load, and forcing each of them made every launch scan the
+        // device several times over. They now fold into whichever pass is already
+        // running; MEDIASTORE is a local overlay pass, so it is never throttled and
+        // keeps reacting to a new photo immediately.
         val force = reason == BackupDiscoveryReason.PERMISSION_GRANTED ||
-            reason == BackupDiscoveryReason.MANUAL ||
-            reason == BackupDiscoveryReason.AUTHENTICATED ||
-            reason == BackupDiscoveryReason.MEDIASTORE
+            reason == BackupDiscoveryReason.MANUAL
         refreshLibrary(force, localOverlayOnly)
 
         if (!canReadMedia()) return BackupDiscoveryResult.PermissionDenied
