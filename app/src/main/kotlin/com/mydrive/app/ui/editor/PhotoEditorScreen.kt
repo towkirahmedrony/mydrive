@@ -1,6 +1,7 @@
 package com.mydrive.app.ui.editor
 
 import android.app.Activity
+import android.graphics.Bitmap
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
@@ -13,7 +14,6 @@ import androidx.compose.foundation.gestures.calculatePan
 import androidx.compose.foundation.gestures.calculateRotation
 import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.gestures.detectDragGestures
-import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
@@ -36,6 +36,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -50,6 +51,7 @@ import androidx.compose.material.icons.outlined.FilterVintage
 import androidx.compose.material.icons.outlined.Flip
 import androidx.compose.material.icons.outlined.Gesture
 import androidx.compose.material.icons.outlined.Redo
+import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.RestartAlt
 import androidx.compose.material.icons.outlined.Rotate90DegreesCcw
 import androidx.compose.material.icons.outlined.Rotate90DegreesCw
@@ -82,6 +84,7 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
@@ -90,6 +93,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
@@ -109,7 +113,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.view.WindowCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.mydrive.app.R
 import com.mydrive.app.ui.theme.Copper
 import com.mydrive.app.ui.theme.Ink
 import com.mydrive.app.ui.theme.Ivory
@@ -120,13 +123,17 @@ import kotlin.math.roundToInt
 @Composable
 fun PhotoEditorScreen(
     viewModel: PhotoEditorViewModel,
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    onSaved: (String) -> Unit = { onBack() }
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val darkTheme = isSystemInDarkTheme()
     val view = LocalView.current
     val snackbarHostState = remember { SnackbarHostState() }
     var showDiscardDialog by remember { mutableStateOf(false) }
+    // Filled in by the preview stage so Save can bake overlays at the right
+    // scale even though the Save button lives in the top bar.
+    var renderContext by remember { mutableStateOf(EditorOverlayRenderContext.Default) }
 
     DisposableEffect(darkTheme) {
         val window = (view.context as? Activity)?.window
@@ -151,6 +158,12 @@ fun PhotoEditorScreen(
         viewModel.consumeSaveMessage()
     }
 
+    LaunchedEffect(state.savedMediaId) {
+        val savedId = state.savedMediaId ?: return@LaunchedEffect
+        viewModel.consumeSaved()
+        onSaved(savedId)
+    }
+
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -168,7 +181,7 @@ fun PhotoEditorScreen(
                 onUndo = viewModel::undo,
                 onRedo = viewModel::redo,
                 onReset = viewModel::reset,
-                onSave = viewModel::savePreview
+                onSave = { viewModel.savePreview(renderContext) }
             )
             Box(
                 modifier = Modifier
@@ -177,26 +190,47 @@ fun PhotoEditorScreen(
             ) {
                 when {
                     state.isLoading -> {
-                        CircularProgressIndicator(
+                        Column(
                             modifier = Modifier.align(Alignment.Center),
-                            color = Copper
-                        )
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            CircularProgressIndicator(color = Copper)
+                            if (state.loadingFromCloud) {
+                                Spacer(Modifier.height(Spacing.md))
+                                Text(
+                                    text = "Downloading from My Drive…",
+                                    color = Ivory.copy(alpha = 0.8f),
+                                    style = MaterialTheme.typography.bodySmall
+                                )
+                            }
+                        }
                     }
                     state.loadFailed -> {
-                        Text(
-                            text = "This photo could not be opened for editing.",
-                            color = Ivory,
-                            style = MaterialTheme.typography.bodyMedium,
+                        Column(
                             modifier = Modifier
                                 .align(Alignment.Center)
                                 .padding(Spacing.lg),
-                            textAlign = TextAlign.Center
-                        )
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Text(
+                                text = state.loadErrorMessage
+                                    ?: "This photo could not be opened for editing.",
+                                color = Ivory,
+                                style = MaterialTheme.typography.bodyMedium,
+                                textAlign = TextAlign.Center
+                            )
+                            Spacer(Modifier.height(Spacing.md))
+                            Row(horizontalArrangement = Arrangement.spacedBy(Spacing.sm)) {
+                                EditorChip("Retry", Icons.Outlined.Refresh, viewModel::retryLoad)
+                                EditorChip("Back", Icons.AutoMirrored.Outlined.ArrowBack, onBack)
+                            }
+                        }
                     }
                     else -> {
                         EditorPreviewStage(
                             state = state,
-                            viewModel = viewModel
+                            viewModel = viewModel,
+                            onRenderContext = { renderContext = it }
                         )
                         if (state.isRendering) {
                             CircularProgressIndicator(
@@ -234,7 +268,7 @@ fun PhotoEditorScreen(
         AlertDialog(
             onDismissRequest = { showDiscardDialog = false },
             title = { Text("Discard edits?") },
-            text = { Text("Your current edits stay in this session only until you save a temporary preview.") },
+            text = { Text("Your current edits stay in this session only until you save a copy to Photos.") },
             confirmButton = {
                 TextButton(onClick = {
                     showDiscardDialog = false
@@ -317,7 +351,8 @@ private fun EditorTopBar(
 @Composable
 private fun EditorPreviewStage(
     state: PhotoEditorUiState,
-    viewModel: PhotoEditorViewModel
+    viewModel: PhotoEditorViewModel,
+    onRenderContext: (EditorOverlayRenderContext) -> Unit
 ) {
     val preview = state.preview ?: return
     BoxWithConstraints(
@@ -336,6 +371,17 @@ private fun EditorPreviewStage(
         val density = LocalDensity.current
         val drawWidthDp = with(density) { drawWidth.toDp() }
         val drawHeightDp = with(density) { drawHeight.toDp() }
+        // Export renders at the source resolution, so the overlay sizes must be
+        // scaled from this on-screen box before the overlays are baked in.
+        LaunchedEffect(drawWidth, density, preview) {
+            onRenderContext(
+                EditorOverlayRenderContext(
+                    displayWidthPx = drawWidth,
+                    density = density.density,
+                    fontScale = density.fontScale
+                )
+            )
+        }
         val displayCrop = remember(
             state.recipe.crop,
             state.recipe.rotationDegrees,
@@ -364,16 +410,11 @@ private fun EditorPreviewStage(
                 contentScale = ContentScale.Fit
             )
             if (state.selectedTool != EditorTool.CROP && state.eyedropperEnabled) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .pointerInput(preview) {
-                            detectTapGestures { offset ->
-                                val x = (offset.x / size.width).coerceIn(0f, 1f)
-                                val y = (offset.y / size.height).coerceIn(0f, 1f)
-                                viewModel.sampleDisplayedColor(x, y)
-                            }
-                        }
+                ColorEyedropperOverlay(
+                    preview = preview,
+                    sampledColor = state.sampledColor,
+                    onSample = { x, y -> viewModel.sampleDisplayedColor(x, y) },
+                    onFinish = viewModel::finishEyedropper
                 )
             }
             if (state.selectedTool != EditorTool.CROP) DrawingLayer(
@@ -406,8 +447,170 @@ private fun EditorPreviewStage(
                     onChange = viewModel::updateDisplayCrop,
                     onChangeFinished = viewModel::commitLiveChange
                 )
+                CropAspectBadge(
+                    preset = state.cropAspect,
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .padding(top = Spacing.sm)
+                )
             }
         }
+    }
+}
+
+@Composable
+private fun CropAspectBadge(
+    preset: CropAspectPreset,
+    modifier: Modifier = Modifier
+) {
+    val free = preset == CropAspectPreset.FREE
+    Row(
+        modifier = modifier
+            .clip(RoundedCornerShape(Radius.pill))
+            .background(Color.Black.copy(alpha = 0.6f))
+            .border(1.dp, Color.White.copy(alpha = 0.4f), RoundedCornerShape(Radius.pill))
+            .padding(horizontal = Spacing.sm, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(
+            imageVector = Icons.Outlined.Crop,
+            contentDescription = null,
+            tint = if (free) Copper else Ivory,
+            modifier = Modifier.size(14.dp)
+        )
+        Spacer(Modifier.width(6.dp))
+        Text(
+            text = if (free) "Free crop - drag corners or edges" else "Locked ${preset.label}",
+            color = Ivory,
+            style = MaterialTheme.typography.labelSmall
+        )
+    }
+}
+
+/**
+ * The photo-color picker. While the finger is down a loupe sits just above the
+ * sampling point, showing the magnified image, a centre crosshair and the
+ * sampled color; the color is applied to the active Draw brush or Text overlay
+ * live, and [onFinish] commits it exactly once on release.
+ */
+@Composable
+private fun ColorEyedropperOverlay(
+    preview: Bitmap,
+    sampledColor: Long?,
+    onSample: (Float, Float) -> Unit,
+    onFinish: () -> Unit
+) {
+    var pointer by remember { mutableStateOf<Offset?>(null) }
+    BoxWithConstraints(
+        modifier = Modifier
+            .fillMaxSize()
+            .pointerInput(preview) {
+                awaitEachGesture {
+                    val down = awaitFirstDown(requireUnconsumed = false)
+                    val widthPx = size.width.coerceAtLeast(1).toFloat()
+                    val heightPx = size.height.coerceAtLeast(1).toFloat()
+                    fun report(position: Offset) {
+                        onSample(
+                            (position.x / widthPx).coerceIn(0f, 1f),
+                            (position.y / heightPx).coerceIn(0f, 1f)
+                        )
+                    }
+                    pointer = down.position
+                    report(down.position)
+                    down.consume()
+                    do {
+                        val event = awaitPointerEvent()
+                        event.changes.forEach { change ->
+                            if (change.pressed) {
+                                pointer = change.position
+                                report(change.position)
+                                change.consume()
+                            }
+                        }
+                    } while (event.changes.any { it.pressed })
+                    pointer = null
+                    onFinish()
+                }
+            }
+    ) {
+        val position = pointer ?: return@BoxWithConstraints
+        ColorMagnifier(
+            preview = preview,
+            pointer = position,
+            containerWidthPx = constraints.maxWidth.toFloat(),
+            containerHeightPx = constraints.maxHeight.toFloat(),
+            sampledColor = sampledColor
+        )
+    }
+}
+
+@Composable
+private fun ColorMagnifier(
+    preview: Bitmap,
+    pointer: Offset,
+    containerWidthPx: Float,
+    containerHeightPx: Float,
+    sampledColor: Long?
+) {
+    val density = LocalDensity.current
+    val loupeSize = 104.dp
+    val loupePx = with(density) { loupeSize.toPx() }
+    val marginPx = with(density) { 18.dp.toPx() }
+    val containerWidthDp = with(density) { containerWidthPx.toDp() }
+    val containerHeightDp = with(density) { containerHeightPx.toDp() }
+    // The magnifier shows real image pixels, so the image is laid out undistorted
+    // at the displayed size and scaled about the exact sampled point.
+    val zoom = 5f
+    val nx = (pointer.x / containerWidthPx.coerceAtLeast(1f)).coerceIn(0f, 1f)
+    val ny = (pointer.y / containerHeightPx.coerceAtLeast(1f)).coerceIn(0f, 1f)
+
+    var left = pointer.x - loupePx / 2f
+    var top = pointer.y - loupePx - marginPx
+    if (top < 0f) top = pointer.y + marginPx
+    left = left.coerceIn(0f, (containerWidthPx - loupePx).coerceAtLeast(0f))
+    top = top.coerceIn(0f, (containerHeightPx - loupePx).coerceAtLeast(0f))
+
+    Box(
+        modifier = Modifier
+            .offset { IntOffset(left.roundToInt(), top.roundToInt()) }
+            .size(loupeSize)
+            .clip(CircleShape)
+            .background(Color.Black)
+            .border(2.dp, Color.White.copy(alpha = 0.9f), CircleShape)
+    ) {
+        Image(
+            bitmap = preview.asImageBitmap(),
+            contentDescription = null,
+            contentScale = ContentScale.FillBounds,
+            modifier = Modifier
+                .size(containerWidthDp, containerHeightDp)
+                .align(Alignment.Center)
+                .graphicsLayer {
+                    transformOrigin = TransformOrigin(nx, ny)
+                    scaleX = zoom
+                    scaleY = zoom
+                    translationX = containerWidthPx * (0.5f - nx)
+                    translationY = containerHeightPx * (0.5f - ny)
+                }
+        )
+        Canvas(modifier = Modifier.fillMaxSize()) {
+            val center = Offset(size.width / 2f, size.height / 2f)
+            val arm = 9.dp.toPx()
+            val crosshair = Color.White.copy(alpha = 0.92f)
+            drawLine(crosshair, Offset(center.x - arm, center.y), Offset(center.x + arm, center.y), 1.5f.dp.toPx())
+            drawLine(crosshair, Offset(center.x, center.y - arm), Offset(center.x, center.y + arm), 1.5f.dp.toPx())
+            drawCircle(Color.Black.copy(alpha = 0.5f), radius = 4.dp.toPx(), center = center)
+            drawCircle(Color.White, radius = 4.dp.toPx(), center = center, style = Stroke(width = 1.5f.dp.toPx()))
+        }
+        Box(
+            modifier = Modifier
+                .align(Alignment.BottomEnd)
+                .padding(6.dp)
+                .size(24.dp)
+                .clip(CircleShape)
+                .background(if (sampledColor != null) Color(sampledColor) else Color.Transparent)
+                .border(2.dp, Color.White, CircleShape)
+        )
     }
 }
 
@@ -724,7 +927,11 @@ private fun CropPanel(state: PhotoEditorUiState, viewModel: PhotoEditorViewModel
             }
         }
         Text(
-            text = "Drag the frame, edges, or corners to crop.",
+            text = if (state.cropAspect == CropAspectPreset.FREE) {
+                "Free crop: drag any corner or edge to resize without a fixed ratio."
+            } else {
+                "Locked to ${state.cropAspect.label}: drag a corner or edge to resize."
+            },
             color = Ivory.copy(alpha = 0.7f),
             style = MaterialTheme.typography.bodySmall
         )
@@ -890,7 +1097,7 @@ private fun DrawPanel(state: PhotoEditorUiState, viewModel: PhotoEditorViewModel
             selected = state.brushColor,
             eyedropperEnabled = state.eyedropperEnabled,
             onSelect = viewModel::setBrushColor,
-            onToggleEyedropper = { viewModel.setEyedropperEnabled(!state.eyedropperEnabled) }
+            onToggleEyedropper = viewModel::toggleEyedropper
         )
         Row(horizontalArrangement = Arrangement.spacedBy(Spacing.sm)) {
             EditorChip("Undo stroke", Icons.Outlined.Undo) { viewModel.undoStroke() }
@@ -940,7 +1147,7 @@ private fun TextPanel(state: PhotoEditorUiState, viewModel: PhotoEditorViewModel
                 selected = selected.color,
                 eyedropperEnabled = state.eyedropperEnabled,
                 onSelect = { viewModel.setTextColor(selected.id, it) },
-                onToggleEyedropper = { viewModel.setEyedropperEnabled(!state.eyedropperEnabled) }
+                onToggleEyedropper = viewModel::toggleEyedropper
             )
         } else {
             Text(
@@ -1066,29 +1273,4 @@ private fun toolIcon(tool: EditorTool): ImageVector = when (tool) {
     EditorTool.STICKERS -> Icons.Outlined.EmojiEmotions
 }
 
-private fun stickerDrawable(kind: EditorStickerKind): Int = when (kind) {
-    EditorStickerKind.HEART -> R.drawable.editor_sticker_heart
-    EditorStickerKind.STAR -> R.drawable.editor_sticker_star
-    EditorStickerKind.SPARK -> R.drawable.editor_sticker_spark
-    EditorStickerKind.CIRCLE -> R.drawable.editor_sticker_circle
-    EditorStickerKind.DIAMOND -> R.drawable.editor_sticker_diamond
-    EditorStickerKind.TRIANGLE -> R.drawable.editor_sticker_triangle
-    EditorStickerKind.HEXAGON -> R.drawable.editor_sticker_hexagon
-    EditorStickerKind.SUN -> R.drawable.editor_sticker_sun
-    EditorStickerKind.LEAF -> R.drawable.editor_sticker_leaf
-    EditorStickerKind.MOON -> R.drawable.editor_sticker_moon
-    EditorStickerKind.CLOUD -> R.drawable.editor_sticker_cloud
-    EditorStickerKind.FLOWER -> R.drawable.editor_sticker_flower
-    EditorStickerKind.DROP -> R.drawable.editor_sticker_drop
-    EditorStickerKind.SMILE -> R.drawable.editor_sticker_smile
-    EditorStickerKind.WINK -> R.drawable.editor_sticker_wink
-    EditorStickerKind.LAUGH -> R.drawable.editor_sticker_laugh
-    EditorStickerKind.COOL -> R.drawable.editor_sticker_cool
-    EditorStickerKind.HEART_EYES -> R.drawable.editor_sticker_heart_eyes
-    EditorStickerKind.CHECK -> R.drawable.editor_sticker_check
-    EditorStickerKind.ARROW -> R.drawable.editor_sticker_arrow
-    EditorStickerKind.PIN -> R.drawable.editor_sticker_pin
-    EditorStickerKind.BADGE -> R.drawable.editor_sticker_badge
-    EditorStickerKind.BURST -> R.drawable.editor_sticker_burst
-    EditorStickerKind.FRAME -> R.drawable.editor_sticker_frame
-}
+private fun stickerDrawable(kind: EditorStickerKind): Int = EditorExportRenderer.stickerDrawableId(kind)

@@ -10,8 +10,11 @@ import android.graphics.BitmapFactory
 import android.graphics.Matrix
 import android.net.Uri
 import android.os.Build
+import android.os.Environment
 import android.provider.MediaStore
+import java.io.File
 import java.io.FileNotFoundException
+import java.io.FileOutputStream
 import androidx.exifinterface.media.ExifInterface
 import com.mydrive.app.data.local.CloudLibraryEntry
 import com.mydrive.app.data.local.FavoritesStore
@@ -107,6 +110,19 @@ sealed class RemoveFromLibraryResult {
     data object Failed : RemoveFromLibraryResult()
 }
 
+/** Outcome of saving an edited photo as a new device media item. */
+sealed class SaveEditedPhotoResult {
+    data class Saved(
+        val itemId: String,
+        val mediaStoreId: Long,
+        val filename: String
+    ) : SaveEditedPhotoResult()
+
+    /** The user has not granted the storage permission the legacy path needs. */
+    data object PermissionDenied : SaveEditedPhotoResult()
+    data object Failed : SaveEditedPhotoResult()
+}
+
 class MediaRepository(
     private val mediaStore: MediaStoreDataSource,
     private val favorites: FavoritesStore,
@@ -182,6 +198,25 @@ class MediaRepository(
         /** Per-composition cap for the verbose cloud availability trace. */
         const val AVAILABILITY_TRACE_BUDGET = 30
         private const val MIN_REFRESH_INTERVAL_MS = 1_500L
+
+        /** EXIF tags copied from the original when saving an edited photo. */
+        private val EXIF_TAGS = listOf(
+            ExifInterface.TAG_DATETIME,
+            ExifInterface.TAG_DATETIME_ORIGINAL,
+            ExifInterface.TAG_DATETIME_DIGITIZED,
+            ExifInterface.TAG_MAKE,
+            ExifInterface.TAG_MODEL,
+            ExifInterface.TAG_SOFTWARE,
+            ExifInterface.TAG_GPS_LATITUDE,
+            ExifInterface.TAG_GPS_LATITUDE_REF,
+            ExifInterface.TAG_GPS_LONGITUDE,
+            ExifInterface.TAG_GPS_LONGITUDE_REF,
+            ExifInterface.TAG_GPS_ALTITUDE,
+            ExifInterface.TAG_GPS_ALTITUDE_REF,
+            ExifInterface.TAG_F_NUMBER,
+            ExifInterface.TAG_EXPOSURE_TIME,
+            ExifInterface.TAG_FOCAL_LENGTH
+        )
     }
 
     init {
@@ -896,6 +931,194 @@ class MediaRepository(
     private fun applyAccessState() {
         val access = permissions.access()
         _loadState.update { it.copy(accessGranted = access == MediaAccess.GRANTED, accessPartial = access == MediaAccess.PARTIAL, needsPermission = access == MediaAccess.NEEDS_REQUEST, permissionDenied = access == MediaAccess.DENIED) }
+    }
+
+    /**
+     * Writes an edited bitmap as a NEW image in the device MediaStore.
+     *
+     * On Android 10+ the item is created with `IS_PENDING=1`, the encoded bytes
+     * are written, the write is verified against the file on disk, and only then
+     * is `IS_PENDING` cleared — so a failure is cleaned up (the pending row is
+     * deleted) instead of leaving a zero-byte or partially written item in the
+     * Gallery. On API 26-28 the legacy `DATA` column is used.
+     *
+     * The original is never modified, no `media_assets` row is created here (the
+     * normal MediaStore discovery + backup flow owns that), and the caller gets
+     * the new item id so it can be surfaced. The EXIF block of [exifSourceUri] is
+     * copied where practical.
+     */
+    suspend fun saveEditedPhoto(
+        context: Context,
+        source: MediaItem?,
+        bitmap: Bitmap,
+        exifSourceUri: String? = null
+    ): SaveEditedPhotoResult = withContext(Dispatchers.IO) {
+        if (bitmap.isRecycled) return@withContext SaveEditedPhotoResult.Failed
+
+        val baseName = source?.filename
+            ?.substringBeforeLast('.', source.filename)
+            ?.trim()
+            ?.takeIf { it.isNotBlank() }
+            ?: "My Drive photo"
+        val sanitized = baseName
+            .replace(Regex("[^A-Za-z0-9._ ()-]"), "_")
+            .take(80)
+            .ifBlank { "My Drive photo" }
+        val format = if (source?.mimeType?.contains("png", ignoreCase = true) == true) {
+            Bitmap.CompressFormat.PNG
+        } else {
+            Bitmap.CompressFormat.JPEG
+        }
+        val extension = if (format == Bitmap.CompressFormat.PNG) "png" else "jpg"
+        val mimeType = if (format == Bitmap.CompressFormat.PNG) "image/png" else "image/jpeg"
+        val quality = if (format == Bitmap.CompressFormat.PNG) 100 else 95
+        val filename = "${sanitized}_edited.$extension"
+
+        // Encode out of memory first: the EXIF block is copied into the file and
+        // the byte count verified before anything is published to MediaStore.
+        val tempFile = File(context.cacheDir, "editor-export-${System.currentTimeMillis()}.$extension")
+        val encoded = runCatching {
+            FileOutputStream(tempFile).use { out -> bitmap.compress(format, quality, out) }
+            tempFile.length() > 0L
+        }.getOrDefault(false)
+        if (!encoded) {
+            runCatching { tempFile.delete() }
+            return@withContext SaveEditedPhotoResult.Failed
+        }
+        copyExif(context, exifSourceUri, tempFile)
+
+        val result = try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                savePendingItem(context, tempFile, filename, mimeType, source)
+            } else {
+                saveLegacyItem(context, tempFile, filename, mimeType)
+            }
+        } catch (_: SecurityException) {
+            SaveEditedPhotoResult.PermissionDenied
+        } catch (_: Exception) {
+            SaveEditedPhotoResult.Failed
+        } finally {
+            runCatching { tempFile.delete() }
+        }
+
+        // Make the new item discoverable immediately through the normal scan.
+        if (result is SaveEditedPhotoResult.Saved) {
+            runCatching { refresh(force = true) }
+        }
+        result
+    }
+
+    @androidx.annotation.RequiresApi(Build.VERSION_CODES.Q)
+    private fun savePendingItem(
+        context: Context,
+        tempFile: File,
+        filename: String,
+        mimeType: String,
+        source: MediaItem?
+    ): SaveEditedPhotoResult {
+        val resolver = context.contentResolver
+        val collection = MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+        val relativePath = source?.relativePath?.takeIf { it.isNotBlank() }
+            ?: (Environment.DIRECTORY_PICTURES + File.separator + "My Drive")
+        val values = ContentValues().apply {
+            put(MediaStore.MediaColumns.DISPLAY_NAME, filename)
+            put(MediaStore.MediaColumns.MIME_TYPE, mimeType)
+            put(MediaStore.MediaColumns.RELATIVE_PATH, relativePath)
+            put(MediaStore.MediaColumns.IS_PENDING, 1)
+            put(MediaStore.MediaColumns.DATE_TAKEN, System.currentTimeMillis())
+        }
+        val uri = resolver.insert(collection, values) ?: return SaveEditedPhotoResult.Failed
+        return try {
+            val written = resolver.openOutputStream(uri)?.use { output ->
+                tempFile.inputStream().use { input -> input.copyTo(output, bufferSize = 65_536) }
+                true
+            } ?: false
+            if (!written) return failPending(resolver, uri)
+            val size = queryMediaSize(resolver, uri)
+            if (size <= 0L || size != tempFile.length()) return failPending(resolver, uri)
+            val publish = ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) }
+            if (resolver.update(uri, publish, null, null) <= 0) return failPending(resolver, uri)
+            if (!isMediaReadable(resolver, uri)) return failPending(resolver, uri)
+            val id = uri.lastPathSegment?.toLongOrNull() ?: 0L
+            SaveEditedPhotoResult.Saved(itemId = "img-$id", mediaStoreId = id, filename = filename)
+        } catch (error: Exception) {
+            // Never leak a half-written pending row.
+            runCatching { resolver.delete(uri, null, null) }
+            throw error
+        }
+    }
+
+    private fun failPending(resolver: ContentResolver, uri: Uri): SaveEditedPhotoResult {
+        runCatching { resolver.delete(uri, null, null) }
+        return SaveEditedPhotoResult.Failed
+    }
+
+    private fun saveLegacyItem(
+        context: Context,
+        tempFile: File,
+        filename: String,
+        mimeType: String
+    ): SaveEditedPhotoResult {
+        val resolver = context.contentResolver
+        @Suppress("DEPRECATION")
+        val pictures = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES)
+        val directory = File(pictures, "My Drive").apply { mkdirs() }
+        val target = File(directory, filename)
+        val copied = runCatching {
+            tempFile.inputStream().use { input ->
+                FileOutputStream(target).use { output -> input.copyTo(output, bufferSize = 65_536) }
+            }
+            target.length() > 0L
+        }.getOrDefault(false)
+        if (!copied) {
+            runCatching { target.delete() }
+            return SaveEditedPhotoResult.Failed
+        }
+        val values = ContentValues().apply {
+            put(MediaStore.MediaColumns.DISPLAY_NAME, filename)
+            put(MediaStore.MediaColumns.MIME_TYPE, mimeType)
+            put(MediaStore.MediaColumns.DATA, target.absolutePath)
+            put(MediaStore.MediaColumns.DATE_TAKEN, System.currentTimeMillis())
+        }
+        @Suppress("DEPRECATION")
+        val collection = MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+        val uri = resolver.insert(collection, values)
+        if (uri == null || queryMediaSize(resolver, uri) <= 0L) {
+            uri?.let { runCatching { resolver.delete(it, null, null) } }
+            runCatching { target.delete() }
+            return SaveEditedPhotoResult.Failed
+        }
+        val id = uri.lastPathSegment?.toLongOrNull() ?: 0L
+        return SaveEditedPhotoResult.Saved(itemId = "img-$id", mediaStoreId = id, filename = filename)
+    }
+
+    private fun queryMediaSize(resolver: ContentResolver, uri: Uri): Long = runCatching {
+        resolver.query(uri, arrayOf(MediaStore.MediaColumns.SIZE), null, null, null)?.use { cursor ->
+            if (cursor.moveToFirst()) cursor.getLong(0) else 0L
+        } ?: 0L
+    }.getOrDefault(0L)
+
+    private fun isMediaReadable(resolver: ContentResolver, uri: Uri): Boolean = runCatching {
+        resolver.openInputStream(uri)?.use { true } ?: false
+    }.getOrDefault(false)
+
+    /**
+     * Copies the relevant EXIF block (timestamps, camera, GPS, orientation) from
+     * [sourceUri] into [target] where the format supports it. Failures are
+     * ignored: metadata is a nice-to-have, the pixels are the point.
+     */
+    private fun copyExif(context: Context, sourceUri: String?, target: File) {
+        if (sourceUri.isNullOrBlank() || target.length() <= 0L) return
+        runCatching {
+            val source = context.contentResolver.openInputStream(Uri.parse(sourceUri))?.use { ExifInterface(it) }
+                ?: return
+            val destination = ExifInterface(target.absolutePath)
+            EXIF_TAGS.forEach { tag ->
+                source.getAttribute(tag)?.let { value -> destination.setAttribute(tag, value) }
+            }
+            destination.setAttribute(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL.toString())
+            destination.saveAttributes()
+        }
     }
 
     private fun buildAlbums(

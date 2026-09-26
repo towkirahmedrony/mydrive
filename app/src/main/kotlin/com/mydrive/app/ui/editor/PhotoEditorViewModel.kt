@@ -10,6 +10,7 @@ import androidx.lifecycle.viewModelScope
 import com.mydrive.app.data.model.MediaItem
 import com.mydrive.app.data.model.MediaType
 import com.mydrive.app.data.repository.MediaRepository
+import com.mydrive.app.data.repository.SaveEditedPhotoResult
 import java.io.File
 import java.util.UUID
 import kotlin.coroutines.cancellation.CancellationException
@@ -42,6 +43,12 @@ data class PhotoEditorUiState(
     val isRendering: Boolean = false,
     val isSaving: Boolean = false,
     val loadFailed: Boolean = false,
+    /** True while a cloud-only source is being prepared for editing. */
+    val loadingFromCloud: Boolean = false,
+    val loadErrorMessage: String? = null,
+    val sampledColor: Long? = null,
+    /** Set to the new MediaStore item id after a successful save. */
+    val savedMediaId: String? = null,
     val preview: Bitmap? = null,
     val saveMessage: String? = null
 )
@@ -61,6 +68,8 @@ class PhotoEditorViewModel(
         )
     )
     private var sourcePreview: Bitmap? = null
+    /** App-private copy downloaded for a cloud-only photo; deleted when the editor closes. */
+    private var sourceTempFile: File? = null
     private var renderJob: Job? = null
     private var thumbJob: Job? = null
     private var drawingStroke: EditorDrawStroke? = null
@@ -110,7 +119,7 @@ class PhotoEditorViewModel(
     fun reset() {
         overlayBefore = null
         store.reset()
-        _uiState.update { it.copy(cropAspect = CropAspectPreset.FREE, eyedropperEnabled = false) }
+        _uiState.update { it.copy(cropAspect = CropAspectPreset.FREE, eyedropperEnabled = false, sampledColor = null) }
         publishRecipe(rerender = true)
     }
 
@@ -174,13 +183,28 @@ class PhotoEditorViewModel(
     }
 
     fun setBrushColor(color: Long) {
-        _uiState.update { it.copy(brushColor = EditorPalette.argb(color), eyedropperEnabled = false) }
+        _uiState.update { it.copy(brushColor = EditorPalette.argb(color), eyedropperEnabled = false, sampledColor = null) }
     }
 
     fun setEyedropperEnabled(enabled: Boolean) {
         _uiState.update { it.copy(eyedropperEnabled = enabled) }
     }
 
+    /**
+     * Turns the picker on, or closes it (committing whatever color was sampled)
+     * when it is already active.
+     */
+    fun toggleEyedropper() {
+        if (_uiState.value.eyedropperEnabled) finishEyedropper() else setEyedropperEnabled(true)
+    }
+
+    /**
+     * Samples the DISPLAYED preview at a normalized point. The preview bitmap is
+     * exactly what the picker overlays, so the pixel under the finger is the
+     * pixel read here regardless of the image's scale, crop, rotation or flips. It
+     * applies the color live (for the loupe preview and the active tool) without
+     * closing the picker; [finishEyedropper] closes it on release.
+     */
     fun sampleDisplayedColor(x: Float, y: Float) {
         val preview = _uiState.value.preview ?: return
         if (preview.isRecycled) return
@@ -189,11 +213,30 @@ class PhotoEditorViewModel(
         }
         val state = _uiState.value
         if (state.selectedTool == EditorTool.TEXT) {
-            val textId = state.selectedTextId ?: return
-            setTextColor(textId, color)
+            val textId = state.selectedTextId
+            if (textId != null) {
+                previewChange(rerender = false) { recipe ->
+                    recipe.copy(texts = recipe.texts.map { overlay ->
+                        if (overlay.id == textId) overlay.copy(color = EditorPalette.argb(color)) else overlay
+                    })
+                }
+            }
         } else {
-            setBrushColor(color)
+            _uiState.update { it.copy(brushColor = EditorPalette.argb(color)) }
         }
+        _uiState.update { it.copy(sampledColor = color) }
+    }
+
+    /**
+     * Ends a picker session: commits the sampled color as one undo step, closes
+     * the picker, and drops the transient loupe swatch. The chosen color itself
+     * stays on the active Draw brush or Text overlay.
+     */
+    fun finishEyedropper() {
+        if (_uiState.value.selectedTool == EditorTool.TEXT) {
+            commitLiveChange()
+        }
+        _uiState.update { it.copy(eyedropperEnabled = false, sampledColor = null) }
     }
 
     fun beginStroke(x: Float, y: Float) {
@@ -342,33 +385,70 @@ class PhotoEditorViewModel(
         }
     }
 
-    fun savePreview() {
-        val preview = _uiState.value.preview
-        if (preview == null) {
+    /**
+     * Renders the recipe at the editor's source resolution (crop applied, draw /
+     * text / sticker overlays baked in, processed off the main thread) and saves a
+     * NEW image into the device MediaStore. The original is never touched and no
+     * `media_assets` row is created here — the existing MediaStore discovery and
+     * backup flow picks the new item up on its own.
+     */
+    fun savePreview(overlay: EditorOverlayRenderContext = EditorOverlayRenderContext.Default) {
+        val source = sourcePreview
+        val current = item
+        if (source == null || source.isRecycled) {
             Toast.makeText(context, "Nothing to save yet", Toast.LENGTH_SHORT).show()
             return
         }
-        _uiState.update { it.copy(isSaving = true) }
+        if (current == null) {
+            Toast.makeText(context, "This photo is no longer available", Toast.LENGTH_SHORT).show()
+            return
+        }
+        if (_uiState.value.isSaving) return
+        _uiState.update { it.copy(isSaving = true, saveMessage = null) }
+        val recipe = store.current
         viewModelScope.launch {
-            val saved = withContext(Dispatchers.IO) {
+            val outcome = withContext(Dispatchers.Default) {
                 runCatching {
-                    val dir = File(context.cacheDir, "editor-previews").apply { mkdirs() }
-                    val file = File(dir, "edit-${mediaId}-${System.currentTimeMillis()}.jpg")
-                    file.outputStream().use { stream ->
-                        preview.compress(Bitmap.CompressFormat.JPEG, 90, stream)
+                    val base = EditorPreviewPipeline.renderSync(source, recipe, applyCrop = true)
+                    val composed = if (recipe.strokes.isEmpty() && recipe.texts.isEmpty() && recipe.stickers.isEmpty()) {
+                        base
+                    } else {
+                        EditorExportRenderer.renderOverlays(
+                            context = context,
+                            base = base,
+                            recipe = recipe,
+                            displayWidthPx = overlay.displayWidthPx,
+                            density = overlay.density,
+                            fontScale = overlay.fontScale
+                        )
                     }
-                    file.absolutePath
-                }.getOrNull()
-            }
+                    val result = repository.saveEditedPhoto(
+                        context = context,
+                        source = current,
+                        bitmap = composed,
+                        exifSourceUri = exifSourceUri(current)
+                    )
+                    if (composed !== base && composed !== source && !composed.isRecycled) composed.recycle()
+                    if (base !== source && base !== composed && !base.isRecycled) base.recycle()
+                    result
+                }
+            }.getOrNull()
             _uiState.update { state ->
                 state.copy(
                     isSaving = false,
-                    saveMessage = if (saved != null) {
-                        "Saved a temporary editor preview. Full export comes later."
-                    } else {
-                        "Could not write the temporary preview."
+                    savedMediaId = (outcome as? SaveEditedPhotoResult.Saved)?.itemId,
+                    saveMessage = when (outcome) {
+                        is SaveEditedPhotoResult.Saved -> null
+                        is SaveEditedPhotoResult.PermissionDenied ->
+                            "Allow photo access, then try saving again."
+                        is SaveEditedPhotoResult.Failed ->
+                            "Couldn't save the edited photo. Please try again."
+                        null -> "Couldn't save the edited photo. Please try again."
                     }
                 )
+            }
+            if (outcome is SaveEditedPhotoResult.Saved) {
+                Toast.makeText(context, "Saved to Photos", Toast.LENGTH_SHORT).show()
             }
         }
     }
@@ -377,31 +457,102 @@ class PhotoEditorViewModel(
         _uiState.update { it.copy(saveMessage = null) }
     }
 
+    fun consumeSaved() {
+        _uiState.update { it.copy(savedMediaId = null) }
+    }
+
+    /**
+     * The picture the EXIF block should be copied from: the local MediaStore
+     * original, or the app-private cloud copy the editor already downloaded.
+     */
+    private fun exifSourceUri(current: MediaItem): String? {
+        if (current.originLocal && current.uri.isNotBlank()) return current.uri
+        return sourceTempFile?.let { android.net.Uri.fromFile(it).toString() }
+    }
+
     private fun loadSource() {
-        val uri = store.initial.sourceUri
-        if (uri.isBlank()) {
-            _uiState.update { it.copy(isLoading = false, loadFailed = true) }
-            return
-        }
-        viewModelScope.launch {
-            val bitmap = EditorImageLoader.loadPreview(context, uri)
-            sourcePreview = bitmap
+        val target = item
+        if (target == null) {
             _uiState.update {
                 it.copy(
                     isLoading = false,
-                    loadFailed = bitmap == null
+                    loadFailed = true,
+                    loadErrorMessage = "This photo could not be found."
                 )
             }
-            if (bitmap != null) {
-                _uiState.update {
-                    it.copy(
-                        sourceAspect = bitmap.width.toFloat() / bitmap.height.toFloat().coerceAtLeast(1f)
-                    )
+            return
+        }
+        loadSourceFor(target)
+    }
+
+    /** Retries a failed source load, including a failed cloud download. */
+    fun retryLoad() {
+        val target = item ?: return
+        if (_uiState.value.isLoading) return
+        loadSourceFor(target)
+    }
+
+    private fun loadSourceFor(target: MediaItem) {
+        sourcePreview?.takeIf { !it.isRecycled }?.recycle()
+        sourcePreview = null
+        _uiState.update {
+            it.copy(
+                isLoading = true,
+                loadFailed = false,
+                loadErrorMessage = null,
+                // A cloud-only item is downloaded before it can be edited. A local
+                // item is opened instantly, so the download hint is only shown
+                // when the source genuinely has to come from the cloud.
+                loadingFromCloud = !target.originLocal
+            )
+        }
+        viewModelScope.launch {
+            when (val resolved = EditorSourceResolver.resolve(context, target)) {
+                is EditorSourceResolver.Result.Local -> openResolvedSource(resolved.uri)
+                is EditorSourceResolver.Result.Downloaded -> {
+                    sourceTempFile = resolved.file
+                    _uiState.update { it.copy(loadingFromCloud = true) }
+                    openResolvedSource(android.net.Uri.fromFile(resolved.file).toString())
                 }
-                requestRender()
-                generateFilterThumbs(bitmap)
+                is EditorSourceResolver.Result.Failed -> {
+                    _uiState.update {
+                        it.copy(
+                            isLoading = false,
+                            loadingFromCloud = false,
+                            loadFailed = true,
+                            loadErrorMessage = resolved.message
+                        )
+                    }
+                }
             }
         }
+    }
+
+    private suspend fun openResolvedSource(uri: String) {
+        val bitmap = EditorImageLoader.loadPreview(context, uri)
+        if (bitmap == null) {
+            _uiState.update {
+                it.copy(
+                    isLoading = false,
+                    loadingFromCloud = false,
+                    loadFailed = true,
+                    loadErrorMessage = "This photo could not be opened for editing."
+                )
+            }
+            return
+        }
+        sourcePreview = bitmap
+        _uiState.update {
+            it.copy(
+                isLoading = false,
+                loadingFromCloud = false,
+                loadFailed = false,
+                loadErrorMessage = null,
+                sourceAspect = bitmap.width.toFloat() / bitmap.height.toFloat().coerceAtLeast(1f)
+            )
+        }
+        requestRender()
+        generateFilterThumbs(bitmap)
     }
 
     private fun previewChange(
@@ -485,6 +636,8 @@ class PhotoEditorViewModel(
         }
         sourcePreview?.takeIf { !it.isRecycled }?.recycle()
         sourcePreview = null
+        sourceTempFile?.let { file -> runCatching { file.delete() } }
+        sourceTempFile = null
         super.onCleared()
     }
 
