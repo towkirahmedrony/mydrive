@@ -31,4 +31,13 @@ object UserStoreKeys {
      * has not been confirmed yet. The mirror of [pendingCloudTrash].
      */
     fun pendingCloudRestore(userId: String) = "pending_cloud_restore/$userId"
+
+    /**
+     * The durable identity of every media the user has moved to Trash.
+     *
+     * Keyed per account and kept until an explicit Restore (or a permanent delete),
+     * because this is the record that lets a cloud row be recognised as belonging to
+     * a deleted media when the local MediaStore copy is no longer indexable.
+     */
+    fun trashedIdentities(userId: String) = "trashed_identities/$userId"
 }

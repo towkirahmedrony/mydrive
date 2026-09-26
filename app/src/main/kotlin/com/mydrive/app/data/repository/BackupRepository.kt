@@ -71,6 +71,13 @@ class BackupRepository(
      * (a single catalog page used to be the whole of that view).
      */
     private val verifyCloudBackedUp: suspend (List<CloudBackupCandidate>) -> CloudBackupLookup,
+    /**
+     * Whether the user has moved this media to Trash and not restored it.
+     *
+     * Upload is the last place a deleted media could reappear, so this asks the
+     * state layer instead of trusting that a queued item is still wanted.
+     */
+    private val isTrashed: (String) -> Boolean = { false },
     private val scheduleUploadWork: () -> Unit
 ) {
 
@@ -218,6 +225,32 @@ class BackupRepository(
         val record = syncRepository.records.value[id] ?: return ItemOutcome.Continue
         if (!syncRepository.belongsTo(record, userId)) return ItemOutcome.Continue
         if (record.state.toBackupState().resumeLocally() != BackupState.WAITING) return ItemOutcome.Continue
+        // A queued upload must never bring a deleted media back. The user's Trash
+        // decision is authoritative until an explicit Restore, so the item is
+        // cancelled before a source is resolved, before any network call and before
+        // any bytes are read.
+        if (isTrashed(id)) {
+            DeveloperLogger.info(
+                category = LogCategory.REPLICATION,
+                event = "MEDIA_UPLOAD_SKIPPED_TRASHED",
+                message = "Queued upload cancelled: the user moved this media to Trash",
+                operationId = operationId,
+                localMediaId = id,
+                clientUploadId = record.clientUploadId,
+                metadata = mapOf(
+                    "local_state" to "LOCAL_TRASHED",
+                    "cloud_state" to "UNCHANGED",
+                    "reason" to "trashed_by_user"
+                )
+            )
+            UploadLog.uploadFailed(id, "trashed_by_user")
+            syncRepository.updateState(
+                id = id,
+                state = BackupState.CANCELLED,
+                errorMessage = "This item is in Trash."
+            )
+            return ItemOutcome.Continue
+        }
 
         val queueEntity = queueLookup(id)
         // A persisted row is only probed when its own URI is a local source. The

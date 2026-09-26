@@ -24,6 +24,7 @@ import com.mydrive.app.data.local.MediaCatalogStore
 import com.mydrive.app.data.local.MediaSyncCursorStore
 import com.mydrive.app.data.local.SyncRecord
 import com.mydrive.app.data.local.TelegramSettingsStore
+import com.mydrive.app.data.local.TrashedIdentity
 import com.mydrive.app.data.local.toMediaItem
 import com.mydrive.app.data.media.FullImageLoader
 import com.mydrive.app.data.media.LibraryVisibilityRules
@@ -402,7 +403,11 @@ class MediaRepository(
                 }
                 return
             }
-            _media.value = rows.map { it.toMediaItem(favorites.ids.value) }.resolveAlbums()
+            // A cold start restores the persisted catalog directly, so it is also a
+            // place where a trashed media could come back: the withheld media is
+            // dropped here, before anything is rendered.
+            val restored = withoutTrashedMedia(rows.map { it.toMediaItem(favorites.ids.value) }).resolveAlbums()
+            _media.value = restored
             _albums.value = buildAlbums(_media.value)
             updateStorage(_media.value)
             _loadState.update { it.copy(isLoading = false, isRestoring = false, errorMessage = null) }
@@ -414,6 +419,7 @@ class MediaRepository(
                     "media" to _media.value.size.toString(),
                     "albums" to _albums.value.size.toString(),
                     "rows" to rows.size.toString(),
+                    "withheld_trashed" to (rows.size - restored.size).toString(),
                     "duration_ms" to (System.currentTimeMillis() - startedAt).toString()
                 )
             )
@@ -451,7 +457,7 @@ class MediaRepository(
                 _loadState.update { it.copy(isRestoring = false) }
                 return
             }
-            _media.value = rows.map { it.toMediaItem(favorites.ids.value) }.resolveAlbums()
+            _media.value = withoutTrashedMedia(rows.map { it.toMediaItem(favorites.ids.value) }).resolveAlbums()
             _albums.value = buildAlbums(_media.value)
             updateStorage(_media.value)
             _loadState.update { it.copy(isLoading = false, isRestoring = false, errorMessage = null) }
@@ -479,11 +485,47 @@ class MediaRepository(
         // Album identity is resolved once, here, for every path that reaches the
         // UI: composition, the local-overlay pass and the cloud-only fallback.
         val resolved = items.resolveAlbums()
-        _media.value = resolved
-        _albums.value = buildAlbums(resolved)
-        updateStorage(resolved)
-        scheduleCatalogPersist(previous, resolved, prune)
+        // THE INVARIANT, enforced at the one point every publish path funnels
+        // through: media the user moved to Trash is never rendered as active. The
+        // composition already excludes it, but the interactive overlay, the
+        // cloud-preservation pass and the cold-start hydration of the persisted
+        // catalog all reach the UI through here, and each of them used to be able to
+        // put a deleted media back on screen while its device copy was still in
+        // Android Trash. Only an explicit Restore clears the Trash record.
+        val visible = withoutTrashedMedia(resolved)
+        if (visible.size != resolved.size) {
+            DeveloperLogger.warn(
+                category = LogCategory.DATABASE,
+                event = "TRASHED_MEDIA_WITHHELD",
+                message = "Withheld media the user moved to Trash from the active library",
+                metadata = mapOf(
+                    "withheld" to (resolved.size - visible.size).toString(),
+                    "stage" to "publish"
+                )
+            )
+        }
+        _media.value = visible
+        _albums.value = buildAlbums(visible)
+        updateStorage(visible)
+        scheduleCatalogPersist(previous, visible, prune)
     }
+
+    /** Drops media the user moved to Trash, from any library being published. */
+    private fun withoutTrashedMedia(items: List<MediaItem>): List<MediaItem> {
+        if (items.isEmpty()) return items
+        val identities = visibilityStore.trashedIdentities()
+        if (identities.isEmpty()) return items
+        return LibraryVisibilityRules.withoutTrashed(
+            items = items,
+            hiddenLocalIds = visibilityStore.hiddenLocalIds(),
+            trashed = identities.values
+        )
+    }
+
+    /** Whether the user has moved this local media to Trash and not restored it. */
+    fun isTrashedLocally(localId: String): Boolean =
+        localId.isNotBlank() &&
+            (visibilityStore.isHidden(localId) || visibilityStore.trashedIdentities().containsKey(localId))
 
     /**
      * Applies one local operation to the rendered library and the persisted
@@ -1737,6 +1779,11 @@ class MediaRepository(
         remoteRows: List<com.mydrive.app.data.remote.dto.MediaAssetRow>
     ): List<MediaItem> {
         val hidden = HashSet(visibilityStore.hiddenLocalIds())
+        // The durable Trash record. Consulted alongside the hidden set because a
+        // deleted media's cloud rows must stay out of the library even when its
+        // local copy is not in either scan — an expired Android Trash entry, a
+        // partial scan, or a row written by a different install.
+        val trashedIdentities = visibilityStore.trashedIdentities().values
         // One snapshot of the persisted catalog for the whole composition. An
         // incremental page can now carry rows that left the library, so the
         // hidden mapping and the cloud-only pass both need it; looking it up per
@@ -1803,6 +1850,10 @@ class MediaRepository(
         val presentRemoteIds = HashSet<String>()
         for (item in deviceItems) {
             if (item.id in hidden) continue
+            // A MediaStore row is not evidence that the user still wants the media:
+            // until an explicit Restore, a media with a Trash record stays out of the
+            // gallery even if its file is (or is again) active on the device.
+            if (LibraryVisibilityRules.isTrashedItem(item, hidden, trashedIdentities)) continue
             val record = records[item.id]
             val row = matchRow(item, record)
             library += item.copy(
@@ -1831,6 +1882,11 @@ class MediaRepository(
         val deviceIds = deviceItems.mapTo(HashSet()) { it.id }
         for (item in trashed) {
             if (item.id in hidden || item.id in present || item.id in deviceIds) continue
+            // Media the user deleted in My Drive is in Trash on purpose: promoting it
+            // here (which is right for a media another app trashed, where My Drive
+            // still holds the only copy) would put a deleted photo back into
+            // Photos/Albums while its device copy is still in Android Trash.
+            if (LibraryVisibilityRules.isTrashedItem(item, hidden, trashedIdentities)) continue
             val record = records[item.id]
             val row = matchRow(item, record)
             val cloud = cloudCache[item.id]
@@ -1848,6 +1904,17 @@ class MediaRepository(
             if (localId in hidden || localId in present || localId in deviceIds ||
                 entry.remoteMediaId in byRemoteId
             ) continue
+            // A cloud-index entry written before the delete (or under a `cloud-…`
+            // tile id) is not proof the media is still wanted.
+            if (LibraryVisibilityRules.matchesTrashedIdentity(
+                    remoteMediaId = entry.remoteMediaId,
+                    localMediaId = null,
+                    clientUploadId = null,
+                    trashed = trashedIdentities
+                )
+            ) {
+                continue
+            }
             library += entry.toMediaItem(favoriteIds, records[localId])
             presentRemoteIds += entry.remoteMediaId
         }
@@ -1864,6 +1931,18 @@ class MediaRepository(
         for (row in visibleRows) {
             if (!row.isCloudAvailable || row.id in presentRemoteIds) continue
             if (LibraryVisibilityRules.isSuppressedByLocalHide(row, hiddenMediaStoreIds)) continue
+            // A row of a media the user deleted must not become a cloud-only tile
+            // (nor earn a cloud-index entry that would recreate it later), whichever
+            // of the media's identities this row carries.
+            if (LibraryVisibilityRules.matchesTrashedIdentity(
+                    remoteMediaId = row.id,
+                    localMediaId = row.localMediaId,
+                    clientUploadId = row.clientUploadId,
+                    trashed = trashedIdentities
+                )
+            ) {
+                continue
+            }
             val cached = cachedByRemoteId[row.id]
             val cloudId = cached?.localId ?: "cloud-${row.id}"
             // The media's OWN folder, remembered from when its local copy was
@@ -2702,7 +2781,9 @@ class MediaRepository(
                 )
             )
         }
+        // Explicit Restore is the only thing that may end the Trash lifecycle.
         ids.forEach { visibilityStore.unhideLocal(it) }
+        visibilityStore.forgetTrashedIdentities(ids)
         locallyHiddenIds.removeAll(idSet)
         _trashedMedia.update { items -> items.filter { it.id !in idSet } }
         publishTrash(_trashedMedia.value)
@@ -2712,9 +2793,11 @@ class MediaRepository(
     suspend fun finalizePermanentTrashDelete(ids: Collection<String>) = withContext(Dispatchers.IO) {
         if (ids.isEmpty()) return@withContext
         val idSet = ids.toSet()
-        // Permanent deletion ends the lifecycle: no visibility retry may survive it.
+        // Permanent deletion ends the lifecycle: no visibility retry and no Trash
+        // record may survive it.
         visibilityStore.removePendingCloudTrash(idSet)
         visibilityStore.removePendingCloudRestore(idSet)
+        visibilityStore.forgetTrashedIdentities(idSet)
         locallyHiddenIds.removeAll(idSet)
         _trashedMedia.update { items -> items.filter { it.id !in idSet } }
         publishTrash(_trashedMedia.value)
@@ -2746,9 +2829,9 @@ class MediaRepository(
         val item = itemSnapshot ?: lookupAnyItem(id)
         val record = syncRepository.records.value[id]
         val remoteId = item?.remoteMediaId ?: record?.remoteMediaId
-        val localMediaId = item?.mediaStoreId?.takeIf { it > 0L }
+        val localMediaId = resolveLocalMediaId(item, remoteId)
 
-        applyLocalTrash(id, remoteId, item)
+        applyLocalTrash(id, remoteId, item, record?.clientUploadId, localMediaId)
 
         val result = mediaAssetsRepository.hideMatchingAsset(
             remoteMediaId = remoteId,
@@ -2834,8 +2917,46 @@ class MediaRepository(
      * persisted hidden set is merged into every composition, and the cloud rows that
      * carry this media's MediaStore id are skipped by `composeLibrary`.
      */
-    private fun applyLocalTrash(id: String, remoteId: String?, item: MediaItem?) {
-        visibilityStore.hideLocal(id)
+    /**
+     * The MediaStore id behind a delete, whichever representation was deleted.
+     *
+     * A delete can land on a cloud-only tile (a `cloud-…` id) after an earlier
+     * reinstall left one on screen. The tile has no MediaStore id of its own, so it
+     * is resolved from whichever local or known item carries the same cloud row —
+     * otherwise the Trash record could not recognise that media's sibling rows and
+     * they would compose it back into the gallery.
+     */
+    private fun resolveLocalMediaId(item: MediaItem?, remoteId: String?): Long? {
+        item?.mediaStoreId?.takeIf { it > 0L }?.let { return it }
+        if (remoteId.isNullOrBlank()) return null
+        return sequenceOf(_deviceMedia.value, _trashedMedia.value, _media.value)
+            .flatMap { it.asSequence() }
+            .firstOrNull { it.remoteMediaId == remoteId }
+            ?.mediaStoreId
+            ?.takeIf { it > 0L }
+    }
+
+    private fun applyLocalTrash(
+        id: String,
+        remoteId: String?,
+        item: MediaItem?,
+        clientUploadId: String?,
+        localMediaId: Long?
+    ) {
+        // The deletion intent becomes durable here, in full: the gallery handle, the
+        // MediaStore _ID it was deleted under, and the cloud identities. Recorded
+        // before the cloud is asked anything, so a process death, a partial scan or
+        // an expired Android Trash entry can no longer lose the fact that the user
+        // deleted this media.
+        visibilityStore.markTrashed(
+            TrashedIdentity(
+                localId = id,
+                localMediaId = localMediaId ?: 0L,
+                remoteMediaIds = listOfNotNull(remoteId?.takeIf { it.isNotBlank() }),
+                clientUploadId = clientUploadId,
+                trashedAtMillis = System.currentTimeMillis()
+            )
+        )
         // Trashing supersedes an unconfirmed restore: a stale retry must never drag
         // the media back out of Trash.
         visibilityStore.removePendingCloudRestore(listOf(id))

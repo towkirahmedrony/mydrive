@@ -1,5 +1,6 @@
 package com.mydrive.app.data.media
 
+import com.mydrive.app.data.local.TrashedIdentity
 import com.mydrive.app.data.model.MediaItem
 import com.mydrive.app.data.model.MediaType
 import com.mydrive.app.data.remote.dto.MediaAssetRow
@@ -154,5 +155,74 @@ class LibraryVisibilityRulesTest {
         assertTrue(
             LibraryVisibilityRules.hiddenMediaStoreIds(emptySet(), listOf(item("img-100", 100))).isEmpty()
         )
+    }
+
+    // ── the durable Trash record: the resurrection guard ─────────────────────
+
+    /** `img-100` deleted: MediaStore id 100, cloud row `m1`, upload id `cu-1`. */
+    private val trashed = TrashedIdentity(
+        localId = "img-100",
+        localMediaId = 100L,
+        remoteMediaIds = listOf("m1"),
+        clientUploadId = "cu-1"
+    )
+
+    @Test
+    fun `a cloud row of a deleted media is recognised by any of its identities`() {
+        val identities = listOf(trashed)
+        // The row the delete resolved.
+        assertTrue(LibraryVisibilityRules.matchesTrashedIdentity("m1", null, null, identities))
+        // A sibling row of the same media, which the old single-row hide missed.
+        assertTrue(LibraryVisibilityRules.matchesTrashedIdentity("sibling", 100L, null, identities))
+        // The same upload identity, from any install.
+        assertTrue(LibraryVisibilityRules.matchesTrashedIdentity(null, null, "cu-1", identities))
+        // Unrelated media is untouched.
+        assertFalse(LibraryVisibilityRules.matchesTrashedIdentity("m2", 101L, "cu-2", identities))
+        assertFalse(LibraryVisibilityRules.matchesTrashedIdentity("m1", 100L, "cu-1", emptyList()))
+    }
+
+    @Test
+    fun `a deleted media stays out of the gallery however its tile is keyed`() {
+        // The local tile (MediaStore id), the tile that keeps the local id, and the
+        // cloud-only tile created under a synthetic id: all three are the same
+        // deleted media and all three must be withheld.
+        val localTile = item("img-100", 100)
+        val cloudTile = item("cloud-uuid", 0L).copy(remoteMediaId = "m1")
+        val siblingTile = item("cloud-sibling", 0L).copy(remoteMediaId = "sibling", mediaStoreId = 100L)
+        assertTrue(LibraryVisibilityRules.isTrashedItem(localTile, emptySet(), listOf(trashed)))
+        assertTrue(LibraryVisibilityRules.isTrashedItem(cloudTile, emptySet(), listOf(trashed)))
+        assertTrue(LibraryVisibilityRules.isTrashedItem(siblingTile, emptySet(), listOf(trashed)))
+        // Still withheld by the hidden set alone, even with no identity recorded.
+        assertTrue(LibraryVisibilityRules.isTrashedItem(localTile, setOf("img-100"), emptyList()))
+        // Other media is not affected.
+        assertFalse(LibraryVisibilityRules.isTrashedItem(item("img-101", 101), setOf("img-100"), listOf(trashed)))
+    }
+
+    @Test
+    fun `the invariant holds for every publish path`() {
+        val library = listOf(
+            item("img-101", 101),
+            item("img-100", 100),
+            item("cloud-uuid", 0L).copy(remoteMediaId = "m1"),
+            item("img-102", 102)
+        )
+        val visible = LibraryVisibilityRules.withoutTrashed(library, emptySet(), listOf(trashed))
+        assertEquals(listOf("img-101", "img-102"), visible.map { it.id })
+    }
+
+    @Test
+    fun `an explicit restore stops withholding the media`() {
+        // Restore forgets the Trash record, and only Restore does: with the record
+        // gone the media is composed as active again.
+        val library = listOf(item("img-100", 100), item("cloud-uuid", 0L).copy(remoteMediaId = "m1"))
+        assertTrue(LibraryVisibilityRules.withoutTrashed(library, emptySet(), listOf(trashed)).isEmpty())
+        assertEquals(2, LibraryVisibilityRules.withoutTrashed(library, emptySet(), emptyList()).size)
+    }
+
+    @Test
+    fun `a queued upload of a deleted media is refused`() {
+        // Test 9/Test 14: the upload gate asks the same question, so a job that was
+        // already queued when the user deleted the media cannot re-upload it.
+        assertTrue(LibraryVisibilityRules.isTrashedItem(item("img-100", 100), setOf("img-100"), emptyList()))
     }
 }

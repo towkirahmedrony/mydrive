@@ -1,5 +1,6 @@
 package com.mydrive.app.data.media
 
+import com.mydrive.app.data.local.TrashedIdentity
 import com.mydrive.app.data.model.MediaItem
 import com.mydrive.app.data.remote.dto.MediaAssetRow
 
@@ -63,5 +64,73 @@ object LibraryVisibilityRules {
         if (hiddenMediaStoreIds.isEmpty()) return false
         val localMediaId = row.localMediaId?.takeIf { it > 0L } ?: return false
         return localMediaId in hiddenMediaStoreIds
+    }
+
+    /**
+     * Whether a cloud row belongs to a media the user moved to Trash.
+     *
+     * Matched on every identity the media has — the `media_assets` id, the
+     * MediaStore `_ID` it was deleted under, and the queue's upload identity — so the
+     * answer does not depend on the local copy still being discoverable. This is the
+     * guard that keeps a deleted media's cloud rows out of Photos/Albums even when
+     * its Android Trash entry has expired, when a scan is partial, or when the row
+     * came from a different install.
+     */
+    fun matchesTrashedIdentity(
+        remoteMediaId: String?,
+        localMediaId: Long?,
+        clientUploadId: String?,
+        trashed: Collection<TrashedIdentity>
+    ): Boolean {
+        if (trashed.isEmpty()) return false
+        val remote = remoteMediaId?.takeIf { it.isNotBlank() }
+        val local = localMediaId?.takeIf { it > 0L }
+        val client = clientUploadId?.takeIf { it.isNotBlank() }
+        return trashed.any { identity ->
+            (remote != null && remote in identity.remoteMediaIds) ||
+                (local != null && identity.localMediaId == local) ||
+                (client != null && identity.clientUploadId == client)
+        }
+    }
+
+    /**
+     * Whether a composed gallery item is a media the user moved to Trash.
+     *
+     * Deliberately broader than the local hidden set: a cloud-only tile carries a
+     * `cloud-…` id rather than the local one, so it is recognised through its remote
+     * id instead. A trashed media must never be composed as active, whichever of
+     * those handles the tile happens to carry.
+     */
+    fun isTrashedItem(
+        item: MediaItem,
+        hiddenLocalIds: Set<String>,
+        trashed: Collection<TrashedIdentity>
+    ): Boolean {
+        if (item.id in hiddenLocalIds) return true
+        if (trashed.isEmpty()) return false
+        if (trashed.containsKey(item.id)) return true
+        val remote = item.remoteMediaId?.takeIf { it.isNotBlank() }
+        val local = item.mediaStoreId.takeIf { it > 0L }
+        return trashed.values.any { identity ->
+            (remote != null && remote in identity.remoteMediaIds) ||
+                (local != null && identity.localMediaId == local)
+        }
+    }
+
+    /**
+     * Drops every item that must not be shown as active.
+     *
+     * The gallery has several publish paths — composition, the interactive overlay,
+     * the cold-start hydration of the persisted catalog — and this is the one place
+     * they all funnel through, so the invariant holds for all of them rather than
+     * for the one path that happened to be fixed.
+     */
+    fun withoutTrashed(
+        items: List<MediaItem>,
+        hiddenLocalIds: Set<String>,
+        trashed: Collection<TrashedIdentity>
+    ): List<MediaItem> {
+        if (hiddenLocalIds.isEmpty() && trashed.isEmpty()) return items
+        return items.filterNot { isTrashedItem(it, hiddenLocalIds, trashed) }
     }
 }

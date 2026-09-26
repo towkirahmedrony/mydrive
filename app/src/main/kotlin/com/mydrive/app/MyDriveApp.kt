@@ -149,6 +149,9 @@ class MyDriveApp : Application() {
             // asked before every upload, so a page-limited local view of the catalog
             // can never cause an already-uploaded media to be sent again.
             verifyCloudBackedUp = { candidates -> mediaAssetsRepository.verifyCloudBackedUp(candidates) },
+            // Media the user moved to Trash is never uploaded again: the upload gate
+            // asks the durable Trash state before touching a source or the network.
+            isTrashed = { id -> mediaRepository.isTrashedLocally(id) },
             scheduleUploadWork = {
                 val prefs = mediaRepository.preferences.value
                 UploadWorkScheduler.schedule(
