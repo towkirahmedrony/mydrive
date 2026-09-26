@@ -5,6 +5,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.mydrive.app.data.local.VaultDao
 import com.mydrive.app.data.local.VaultItemEntity
+import com.mydrive.app.data.vault.VaultBiometricGate
 import com.mydrive.app.data.vault.VaultPinCrypto
 import com.mydrive.app.data.vault.VaultPinManager
 import com.mydrive.app.data.vault.VaultSession
@@ -16,27 +17,37 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /**
- * State for the Private Vault screen.
+ * State for the Private Vault.
  *
- * The security rule this ViewModel exists to enforce: [VaultUiState.items] is **only
- * ever populated while the vault session is unlocked**, and it is cleared the moment
- * the vault locks. The screen therefore has nothing to render before
- * authentication — the locked state cannot leak a thumbnail, a file name or a count.
+ * Security contract this ViewModel exists to enforce:
+ *  - [VaultUiState.items] is **only** ever populated in [Phase.UNLOCKED]. Every
+ *    other phase — including [Phase.LOCKED] and [Phase.AUTHENTICATING], which is
+ *    what is on screen while the system biometric prompt is up — carries an empty
+ *    list, and the row is read from [VaultDao] only after [VaultSession] reports
+ *    unlocked. The locked screen therefore has no thumbnail, file name, count or
+ *    preview it *could* render, even for a frame;
+ *  - a lock ([onBackgrounded], [onLockRequested], timeout) tears down first
+ *    ([Phase.LOCKING]), purges any decrypted transient preview, then publishes
+ *    [Phase.LOCKED] — the teardown order matters, so the media never lingers;
+ *  - authentication is delegated to the existing vault layer ([VaultPinManager]
+ *    for the PIN, [VaultBiometricGate]/`BiometricPrompt` for biometrics, and
+ *    [VaultSession] for authorisation). Nothing is re-implemented here and no
+ *    biometric data is ever read.
  *
- * Authentication reuses the existing vault layer ([VaultPinManager] for the PIN,
- * [VaultSession] for the unlocked state); nothing is re-implemented here.
- *
- * Configured vs empty is independent of whether any media is hidden:
- *  - not configured → PIN enrolment
- *  - configured + locked → biometric and/or PIN
- *  - configured + unlocked + no items → empty Private Vault
- *  - configured + unlocked + items → hidden media grid
+ * Configured vs empty stays independent of whether any media is hidden:
+ *  - not configured           → PIN enrolment
+ *  - PIN just created         → optional biometric enrolment
+ *  - configured + locked      → biometric and/or PIN
+ *  - authenticating           → locked background, no media
+ *  - configured + unlocked    → hidden media gallery
  */
 class VaultViewModel(
     private val vaultDao: VaultDao,
     private val pinManager: VaultPinManager,
     private val session: VaultSession,
-    private val biometricAvailable: () -> Boolean
+    private val biometricAvailable: () -> Boolean,
+    /** Purges any decrypted transient preview files held while unlocked. */
+    private val clearPreviews: () -> Unit = {}
 ) : ViewModel() {
 
     enum class Phase {
@@ -46,140 +57,92 @@ class VaultViewModel(
         /** PIN just saved; optional biometric enrolment. */
         SETUP_BIOMETRIC,
 
-        /** Configured and locked: authentication required. */
+        /** Configured and locked: authentication required. No media is loaded. */
         LOCKED,
 
-        /** Authenticated session. */
-        UNLOCKED
+        /** The system biometric prompt is up over the locked background. */
+        AUTHENTICATING,
+
+        /** Authenticated session: the media gallery may be composed. */
+        UNLOCKED,
+
+        /** Transient teardown state while decrypted state is released. */
+        LOCKING
     }
 
     data class VaultUiState(
         val phase: Phase = Phase.SETUP_PIN,
-        val unlocked: Boolean = false,
         /** True once a vault PIN exists; independent of whether media is hidden. */
         val pinConfigured: Boolean = false,
         val biometricHardwareAvailable: Boolean = false,
         val biometricUnlockEnabled: Boolean = false,
-        val pinLength: Int = 0,
+        val lockTimeoutSeconds: Int = VaultSession.DEFAULT_TIMEOUT_SECONDS,
         val error: String? = null,
         val lockoutRemainingSeconds: Long = 0L,
+        /** Never populated outside [Phase.UNLOCKED]. */
         val items: List<VaultItemEntity> = emptyList()
-    )
+    ) {
+        val isUnlocked: Boolean get() = phase == Phase.UNLOCKED
+    }
 
     private val _uiState = MutableStateFlow(initialState())
     val uiState: StateFlow<VaultUiState> = _uiState.asStateFlow()
 
+    /** True once the automatic prompt has been offered for this lock cycle. */
     private var biometricPromptRequested = false
+
+    /** True while the system prompt is up, so backgrounding does not double-lock. */
     private var biometricPromptActive = false
 
-    /** Called when the screen appears. Never loads media while locked. */
+    init {
+        session.timeoutSeconds = pinManager.lockTimeoutSeconds()
+    }
+
+    /**
+     * Called when the screen appears. Never loads media unless the session is
+     * already unlocked per the existing lock policy.
+     */
     fun onScreenShown() {
+        session.timeoutSeconds = pinManager.lockTimeoutSeconds()
         session.onForegrounded()
-        if (session.isUnlocked()) {
-            loadItems()
-        } else if (_uiState.value.phase == Phase.SETUP_BIOMETRIC && pinManager.isPinConfigured()) {
-            return
-        } else {
-            publishLocked()
-        }
-    }
-
-    fun refreshConfiguration() {
-        val configured = pinManager.isPinConfigured()
-        val biometricHw = biometricAvailable()
-        val biometricOn = pinManager.isBiometricUnlockEnabled()
         val current = _uiState.value
-        val phase = when {
-            current.phase == Phase.SETUP_BIOMETRIC && configured -> Phase.SETUP_BIOMETRIC
-            session.isUnlocked() && configured -> Phase.UNLOCKED
-            configured -> Phase.LOCKED
-            else -> Phase.SETUP_PIN
+        when {
+            current.phase == Phase.SETUP_BIOMETRIC && pinManager.isPinConfigured() -> refreshConfig()
+            session.isUnlocked() && pinManager.isPinConfigured() -> loadItems()
+            else -> publishLocked()
         }
-        _uiState.value = current.copy(
-            phase = phase,
-            unlocked = session.isUnlocked() && configured,
-            pinConfigured = configured,
-            biometricHardwareAvailable = biometricHw,
-            biometricUnlockEnabled = biometricOn,
-            items = if (session.isUnlocked() && configured) current.items else emptyList()
-        )
     }
 
-    fun shouldPromptBiometric(): Boolean {
-        val state = _uiState.value
-        if (biometricPromptRequested) return false
-        if (state.phase != Phase.LOCKED) return false
-        if (!state.biometricUnlockEnabled) return false
-        if (!state.biometricHardwareAvailable) return false
-        if (pinManager.isLockedOut()) return false
-        biometricPromptRequested = true
-        biometricPromptActive = true
-        return true
-    }
+    // ── setup ────────────────────────────────────────────────────────────────
 
-    fun onBiometricPromptActive() {
-        biometricPromptActive = true
-    }
-
-    fun onBiometricPromptFinished() {
-        biometricPromptActive = false
-    }
-
-    fun onPinChanged(length: Int) {
-        _uiState.value = _uiState.value.copy(pinLength = length, error = null)
-    }
-
-    fun appendPinDigit(digit: Char) {
-        if (!digit.isDigit()) return
-        val current = pinBuffer
-        if (current.length >= VaultPinCrypto.MAX_PIN_LENGTH) return
-        pinBuffer = current + digit
-        onPinChanged(pinBuffer.length)
-    }
-
-    fun deletePinDigit() {
-        if (pinBuffer.isEmpty()) return
-        pinBuffer = pinBuffer.dropLast(1)
-        onPinChanged(pinBuffer.length)
-    }
-
-    fun clearPin() {
-        pinBuffer = ""
-        onPinChanged(0)
-    }
-
-    /** Enrols a vault PIN on first run. Does not leave the vault permanently unlocked. */
-    fun setPin() {
-        val pin = pinBuffer
-        if (!VaultPinCrypto.isAcceptablePin(pin.toCharArray())) {
+    /** Enrols the first vault PIN. Does not leave the vault permanently unlocked. */
+    fun setPin(pin: CharArray) {
+        if (!VaultPinCrypto.isAcceptablePin(pin)) {
             _uiState.value = _uiState.value.copy(
                 error = "Use at least ${VaultPinCrypto.MIN_PIN_LENGTH} digits"
             )
+            pin.fill('\u0000')
             return
         }
-        val chars = pin.toCharArray()
         viewModelScope.launch {
-            val ok = withContext(Dispatchers.IO) { pinManager.setPin(chars) }
-            chars.fill('\u0000')
-            clearPin()
-            if (ok) {
-                val offerBiometric = biometricAvailable()
-                if (offerBiometric) {
-                    _uiState.value = _uiState.value.copy(
-                        phase = Phase.SETUP_BIOMETRIC,
-                        pinConfigured = true,
-                        biometricHardwareAvailable = true,
-                        biometricUnlockEnabled = false,
-                        error = null,
-                        unlocked = false,
-                        items = emptyList()
-                    )
-                } else {
-                    pinManager.setBiometricUnlockEnabled(false)
-                    unlockAndLoad()
-                }
+            val ok = withContext(Dispatchers.IO) { pinManager.setPin(pin) }
+            pin.fill('\u0000')
+            if (!ok) {
+                _uiState.value = _uiState.value.copy(error = "Could not save the Vault PIN")
+                return@launch
+            }
+            if (biometricAvailable()) {
+                _uiState.value = _uiState.value.copy(
+                    phase = Phase.SETUP_BIOMETRIC,
+                    pinConfigured = true,
+                    biometricHardwareAvailable = true,
+                    biometricUnlockEnabled = false,
+                    error = null,
+                    items = emptyList()
+                )
             } else {
-                _uiState.value = _uiState.value.copy(error = "Could not save the vault PIN")
+                pinManager.setBiometricUnlockEnabled(false)
+                unlockAndLoad()
             }
         }
     }
@@ -196,6 +159,101 @@ class VaultViewModel(
         unlockAndLoad()
     }
 
+    // ── authentication ───────────────────────────────────────────────────────
+
+    /**
+     * Verifies the entered PIN and, on success, unlocks the session and loads the
+     * gallery. The PIN is passed as a CharArray and wiped afterwards; it is never
+     * stored in state, never logged and never placed in a saved-state bundle.
+     */
+    fun submitPin(pin: CharArray) {
+        if (pin.isEmpty()) return
+        viewModelScope.launch {
+            val result = withContext(Dispatchers.IO) { pinManager.verify(pin) }
+            pin.fill('\u0000')
+            when (result) {
+                is VaultPinManager.VerifyResult.Success -> unlockAndLoad()
+                is VaultPinManager.VerifyResult.Failure ->
+                    _uiState.value = lockedState().copy(
+                        error = "Incorrect PIN. ${result.attemptsRemaining} attempt(s) left."
+                    )
+                is VaultPinManager.VerifyResult.LockedOut ->
+                    _uiState.value = lockedState().copy(
+                        error = "Too many attempts. Try again later.",
+                        lockoutRemainingSeconds = result.remainingMillis / 1000L
+                    )
+                VaultPinManager.VerifyResult.NotConfigured ->
+                    _uiState.value = _uiState.value.copy(
+                        phase = Phase.SETUP_PIN,
+                        pinConfigured = false,
+                        error = "No Vault PIN is set"
+                    )
+                VaultPinManager.VerifyResult.InvalidInput ->
+                    _uiState.value = _uiState.value.copy(error = "Enter your Vault PIN")
+            }
+        }
+    }
+
+    /**
+     * Offers the automatic prompt once per lock cycle, and only when the vault is
+     * genuinely locked. Returns true when the caller should show the system prompt;
+     * the state moves to [Phase.AUTHENTICATING], which still renders the locked
+     * background and never media.
+     */
+    fun shouldAutoPromptBiometric(): Boolean {
+        val state = _uiState.value
+        if (biometricPromptRequested) return false
+        if (state.phase != Phase.LOCKED) return false
+        if (!state.biometricUnlockEnabled || !state.biometricHardwareAvailable) return false
+        if (pinManager.isLockedOut()) return false
+        beginAuthenticating()
+        return true
+    }
+
+    /** Explicit "Unlock with biometrics" tap; always allowed while locked. */
+    fun prepareBiometricPrompt(): Boolean {
+        val state = _uiState.value
+        if (state.phase == Phase.UNLOCKED || state.phase == Phase.AUTHENTICATING) return false
+        if (!state.biometricUnlockEnabled || !state.biometricHardwareAvailable) return false
+        if (pinManager.isLockedOut()) return false
+        beginAuthenticating()
+        return true
+    }
+
+    private fun beginAuthenticating() {
+        biometricPromptRequested = true
+        biometricPromptActive = true
+        _uiState.value = _uiState.value.copy(phase = Phase.AUTHENTICATING, error = null)
+    }
+
+    /**
+     * Called by the UI after the system prompt reports an outcome. The app only
+     * ever learns success/failure — never biometric data.
+     */
+    fun onBiometricResult(outcome: VaultBiometricGate.Outcome) {
+        biometricPromptActive = false
+        biometricPromptRequested = true
+        when (outcome) {
+            VaultBiometricGate.Outcome.AUTHENTICATED ->
+                if (pinManager.isPinConfigured()) unlockAndLoad() else publishLocked()
+            VaultBiometricGate.Outcome.LOCKED_OUT ->
+                _uiState.value = lockedState().copy(
+                    error = "Biometric unlock is temporarily unavailable. Enter your Vault PIN.",
+                    lockoutRemainingSeconds = pinManager.remainingLockMillis() / 1000L
+                )
+            VaultBiometricGate.Outcome.CANCELLED -> _uiState.value = lockedState()
+            VaultBiometricGate.Outcome.UNAVAILABLE ->
+                _uiState.value = lockedState().copy(
+                    error = "Biometric unlock is unavailable. Enter your Vault PIN.",
+                    biometricHardwareAvailable = biometricAvailable()
+                )
+            VaultBiometricGate.Outcome.UNSUPPORTED,
+            VaultBiometricGate.Outcome.ERROR -> _uiState.value = lockedState()
+        }
+    }
+
+    // ── settings ─────────────────────────────────────────────────────────────
+
     fun setBiometricUnlockEnabled(enabled: Boolean) {
         if (!session.isUnlocked() || !pinManager.isPinConfigured()) return
         if (enabled && !biometricAvailable()) return
@@ -206,85 +264,58 @@ class VaultViewModel(
         )
     }
 
-    /**
-     * Verifies the entered PIN and, on success, unlocks the session and loads items.
-     *
-     * The PIN is passed as a CharArray and wiped afterwards; it is never stored in
-     * state, never logged and never placed in a saved-state bundle.
-     */
-    fun submitPin() {
-        if (pinBuffer.isEmpty()) return
-        val chars = pinBuffer.toCharArray()
-        viewModelScope.launch {
-            val result = withContext(Dispatchers.IO) { pinManager.verify(chars) }
-            chars.fill('\u0000')
-            clearPin()
-            when (result) {
-                is VaultPinManager.VerifyResult.Success -> unlockAndLoad()
-                is VaultPinManager.VerifyResult.Failure -> {
-                    _uiState.value = _uiState.value.copy(
-                        error = "Incorrect PIN. ${result.attemptsRemaining} attempt(s) left."
-                    )
-                }
-                is VaultPinManager.VerifyResult.LockedOut -> {
-                    _uiState.value = _uiState.value.copy(
-                        error = "Too many attempts. Try again later.",
-                        lockoutRemainingSeconds = result.remainingMillis / 1000L
-                    )
-                }
-                VaultPinManager.VerifyResult.NotConfigured ->
-                    _uiState.value = _uiState.value.copy(
-                        phase = Phase.SETUP_PIN,
-                        pinConfigured = false,
-                        error = "No vault PIN is set"
-                    )
-                VaultPinManager.VerifyResult.InvalidInput ->
-                    _uiState.value = _uiState.value.copy(error = "Enter your vault PIN")
-            }
+    fun setLockTimeoutSeconds(seconds: Int) {
+        pinManager.setLockTimeoutSeconds(seconds)
+        session.timeoutSeconds = pinManager.lockTimeoutSeconds()
+        _uiState.value = _uiState.value.copy(lockTimeoutSeconds = pinManager.lockTimeoutSeconds())
+    }
+
+    /** Re-reads configuration after returning from the separate settings screen. */
+    fun refreshConfig() {
+        val current = _uiState.value
+        val configured = pinManager.isPinConfigured()
+        session.timeoutSeconds = pinManager.lockTimeoutSeconds()
+        val phase = when {
+            current.phase == Phase.SETUP_BIOMETRIC && configured -> Phase.SETUP_BIOMETRIC
+            session.isUnlocked() && configured -> Phase.UNLOCKED
+            configured -> Phase.LOCKED
+            else -> Phase.SETUP_PIN
         }
-    }
-
-    /**
-     * Called by the UI after a successful biometric result. The UI only ever passes a
-     * success/failure outcome — the app never sees biometric data.
-     */
-    fun onBiometricAuthenticated() {
-        if (!pinManager.isPinConfigured()) return
-        unlockAndLoad()
-    }
-
-    fun onBiometricUnavailable() {
-        biometricPromptRequested = true
-        _uiState.value = _uiState.value.copy(
-            error = null,
-            biometricHardwareAvailable = false
+        _uiState.value = current.copy(
+            phase = phase,
+            pinConfigured = configured,
+            biometricHardwareAvailable = biometricAvailable(),
+            biometricUnlockEnabled = pinManager.isBiometricUnlockEnabled(),
+            lockTimeoutSeconds = pinManager.lockTimeoutSeconds(),
+            items = if (session.isUnlocked() && configured) current.items else emptyList()
         )
     }
 
-    fun onBiometricCancelled() {
-        biometricPromptRequested = true
-    }
-
-    fun onBiometricLockout() {
-        biometricPromptRequested = true
-        _uiState.value = _uiState.value.copy(
-            error = "Biometric unavailable. Enter your vault PIN."
-        )
-    }
+    // ── locking ──────────────────────────────────────────────────────────────
 
     /**
-     * The app left the foreground (or the user tapped Lock): drop the session and the
-     * loaded items immediately, so nothing vaulted stays in memory or on screen.
+     * The app left the foreground. Drops the session and the loaded items
+     * immediately, so nothing vaulted stays in memory or on screen. The teardown
+     * runs before the state is published: clear → lock → LOCKED.
      */
     fun onBackgrounded() {
         if (biometricPromptActive) return
+        clearPreviews()
         session.onBackgrounded()
-        clearPin()
-        biometricPromptRequested = false
         publishLocked()
     }
 
-    fun onLockRequested() = onBackgrounded()
+    /**
+     * Explicit "Lock vault". Locks and suppresses the automatic prompt until the
+     * next foreground cycle, so tapping Lock does not immediately re-open the
+     * biometric prompt the user just dismissed.
+     */
+    fun onLockRequested() {
+        clearPreviews()
+        session.lock()
+        publishLocked()
+        biometricPromptRequested = true
+    }
 
     private fun unlockAndLoad() {
         session.unlock()
@@ -303,10 +334,10 @@ class VaultViewModel(
             _uiState.value = if (session.isUnlocked()) {
                 _uiState.value.copy(
                     phase = Phase.UNLOCKED,
-                    unlocked = true,
                     pinConfigured = true,
                     biometricHardwareAvailable = biometricAvailable(),
                     biometricUnlockEnabled = pinManager.isBiometricUnlockEnabled(),
+                    lockTimeoutSeconds = pinManager.lockTimeoutSeconds(),
                     items = items,
                     error = null
                 )
@@ -316,7 +347,14 @@ class VaultViewModel(
         }
     }
 
+    /**
+     * Releases decrypted/session state, then publishes the locked state. The
+     * media list is emptied in the same step so the UI cannot render a stale
+     * frame behind the authentication surface.
+     */
     private fun publishLocked() {
+        biometricPromptActive = false
+        biometricPromptRequested = false
         _uiState.value = lockedState()
     }
 
@@ -324,10 +362,10 @@ class VaultViewModel(
         val configured = pinManager.isPinConfigured()
         return _uiState.value.copy(
             phase = if (configured) Phase.LOCKED else Phase.SETUP_PIN,
-            unlocked = false,
             pinConfigured = configured,
             biometricHardwareAvailable = biometricAvailable(),
             biometricUnlockEnabled = pinManager.isBiometricUnlockEnabled(),
+            lockTimeoutSeconds = pinManager.lockTimeoutSeconds(),
             items = emptyList()
         )
     }
@@ -336,32 +374,41 @@ class VaultViewModel(
         val configured = pinManager.isPinConfigured()
         return VaultUiState(
             phase = if (configured) Phase.LOCKED else Phase.SETUP_PIN,
-            unlocked = false,
             pinConfigured = configured,
             biometricHardwareAvailable = biometricAvailable(),
-            biometricUnlockEnabled = pinManager.isBiometricUnlockEnabled()
+            biometricUnlockEnabled = pinManager.isBiometricUnlockEnabled(),
+            lockTimeoutSeconds = pinManager.lockTimeoutSeconds()
         )
     }
 
+    /**
+     * The vault screen left the back stack: release decrypted state and lock the
+     * session, so returning to Hidden Photos always starts from the locked screen.
+     */
     override fun onCleared() {
-        clearPin()
+        clearPreviews()
+        session.lock()
         super.onCleared()
     }
-
-    /** Held only between keystrokes and wiped after verification. */
-    private var pinBuffer: String = ""
 
     companion object {
         fun factory(
             vaultDao: VaultDao,
             pinManager: VaultPinManager,
             session: VaultSession,
-            biometricAvailable: () -> Boolean
+            biometricAvailable: () -> Boolean,
+            clearPreviews: () -> Unit = {}
         ): ViewModelProvider.Factory =
             object : ViewModelProvider.Factory {
                 @Suppress("UNCHECKED_CAST")
                 override fun <T : ViewModel> create(modelClass: Class<T>): T {
-                    return VaultViewModel(vaultDao, pinManager, session, biometricAvailable) as T
+                    return VaultViewModel(
+                        vaultDao,
+                        pinManager,
+                        session,
+                        biometricAvailable,
+                        clearPreviews
+                    ) as T
                 }
             }
     }

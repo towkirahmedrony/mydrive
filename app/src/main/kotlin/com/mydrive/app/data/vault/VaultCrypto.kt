@@ -47,11 +47,41 @@ class VaultCrypto(context: Context) {
 
     private val vaultDir: File = File(context.filesDir, VAULT_DIR_NAME).apply { mkdirs() }
 
+    /**
+     * Where a decrypted preview may live *transiently* while the vault is open.
+     * It sits under the app's private cache (never a public/shared directory,
+     * never `cacheDir`'s top level where an image library could adopt it), is
+     * emptied whenever the vault locks, and is not read by the normal
+     * Photos/Albums thumbnail pipeline.
+     */
+    private val previewDir: File = File(context.cacheDir, PREVIEW_DIR_NAME).apply { mkdirs() }
+
     /** The app-private directory holding ciphertext. Never a public/shared path. */
     fun vaultDirectory(): File = vaultDir
 
     /** Absolute file for a vault item's ciphertext. */
     fun ciphertextFile(vaultItemId: String): File = File(vaultDir, "$vaultItemId$FILE_SUFFIX")
+
+    /**
+     * Destination for a decrypted preview / temporary restore file. Only ever used
+     * while the vault session is unlocked, and purged by [clearTransientPreviews].
+     */
+    fun previewFile(vaultItemId: String): File = File(previewDir, "$vaultItemId$PREVIEW_SUFFIX")
+
+    /**
+     * Deletes every decrypted transient file. Called on lock, on background and on
+     * vault exit so no readable vault copy survives the unlocked session.
+     */
+    fun clearTransientPreviews() {
+        runCatching {
+            previewDir.listFiles()?.forEach { file -> file.delete() }
+        }
+        runCatching {
+            vaultDir.listFiles()
+                ?.filter { it.name.endsWith(PART_SUFFIX) || it.name.endsWith(PREVIEW_SUFFIX) }
+                ?.forEach { it.delete() }
+        }
+    }
 
     /**
      * Encrypts [plaintext] into the vault, returns the ciphertext metadata.
@@ -290,8 +320,10 @@ class VaultCrypto(context: Context) {
         private const val KEY_SIZE_BITS = 256
         private const val STREAM_BUFFER_BYTES = 64 * 1024
         private const val VAULT_DIR_NAME = "vault"
+        private const val PREVIEW_DIR_NAME = "vault_previews"
         private const val FILE_SUFFIX = ".vault"
         private const val PART_SUFFIX = ".part"
+        private const val PREVIEW_SUFFIX = ".preview"
         private val HEADER_MAGIC = byteArrayOf(0x4D, 0x56, 0x4C, 0x54) // "MVLT"
         private const val HEADER_VERSION = 1
         private const val HEADER_VERSION_INT = 1

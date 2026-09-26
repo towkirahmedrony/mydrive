@@ -64,6 +64,21 @@ class VaultPinManager(
         prefs.edit().putBoolean(KEY_BIOMETRIC_ENABLED, enabled).apply()
     }
 
+    /**
+     * The foreground inactivity timeout for an unlocked vault, in seconds. Mirrors
+     * `media_vault_settings.lock_timeout_seconds` but is kept on the device: it is
+     * non-sensitive, and the vault must still lock correctly with no network.
+     */
+    fun lockTimeoutSeconds(): Int =
+        prefs.getInt(KEY_LOCK_TIMEOUT_SECONDS, VaultSession.DEFAULT_TIMEOUT_SECONDS)
+            .coerceIn(MIN_LOCK_TIMEOUT_SECONDS, MAX_LOCK_TIMEOUT_SECONDS)
+
+    fun setLockTimeoutSeconds(seconds: Int) {
+        prefs.edit()
+            .putInt(KEY_LOCK_TIMEOUT_SECONDS, seconds.coerceIn(MIN_LOCK_TIMEOUT_SECONDS, MAX_LOCK_TIMEOUT_SECONDS))
+            .apply()
+    }
+
     fun isLockedOut(): Boolean = policy.isLocked(clock())
 
     fun remainingLockMillis(): Long = policy.remainingLockMillis(clock())
@@ -148,5 +163,8 @@ class VaultPinManager(
         const val KEY_ITERATIONS = "pin_iterations"
         const val KEY_CONFIGURED = "vault_configured"
         const val KEY_BIOMETRIC_ENABLED = "biometric_unlock_enabled"
+        const val KEY_LOCK_TIMEOUT_SECONDS = "lock_timeout_seconds"
+        const val MIN_LOCK_TIMEOUT_SECONDS = 0
+        const val MAX_LOCK_TIMEOUT_SECONDS = 3600
     }
 }

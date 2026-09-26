@@ -76,6 +76,9 @@ import com.mydrive.app.ui.settings.SettingsViewModel
 import com.mydrive.app.ui.settings.TelegramSettingsScreen
 import com.mydrive.app.data.vault.VaultBiometricGate
 import com.mydrive.app.ui.vault.VaultScreen
+import com.mydrive.app.ui.vault.VaultSecureWindow
+import com.mydrive.app.ui.vault.VaultSettingsScreen
+import com.mydrive.app.ui.vault.VaultSettingsViewModel
 import com.mydrive.app.ui.vault.VaultViewModel
 import com.mydrive.app.ui.sync.SyncScreen
 import com.mydrive.app.ui.sync.SyncViewModel
@@ -117,12 +120,17 @@ fun AppNavHost(
     val isViewer = currentDestination?.route?.startsWith("viewer") == true ||
         currentDestination?.route?.startsWith("trash-viewer") == true
     val isDeveloperConsole = currentDestination?.route == AppDestination.DeveloperConsole.route
+    val isVaultRoute = currentDestination?.route == AppDestination.HiddenPhotos.route ||
+        currentDestination?.route == AppDestination.VaultSettings.route
     val showBottomBar = !isViewer && !isDeveloperConsole && currentDestination?.route in bottomDestinations.map { it.route }
     val colors = MaterialTheme.colorScheme
     var developerFabOffset by remember { mutableStateOf(Offset.Zero) }
     val permissionScope = rememberCoroutineScope()
     val loadState by repository.loadState.collectAsStateWithLifecycle()
     val appContext = LocalContext.current.applicationContext as MyDriveApp
+    // Vault-only screen protection: FLAG_SECURE while either vault route is on
+    // screen, cleared everywhere else so normal screenshots keep working.
+    VaultSecureWindow(enabled = isVaultRoute)
     MediaAccessRequest(
         needsPermission = loadState.needsPermission,
         permissions = repository.requiredPermissions(),
@@ -333,12 +341,41 @@ fun AppNavHost(
                         vaultDao = app.vaultDao,
                         pinManager = app.vaultPinManager,
                         session = app.vaultSession,
-                        biometricAvailable = { VaultBiometricGate.canOfferBiometric(app) }
+                        biometricAvailable = { VaultBiometricGate.canOfferBiometric(app) },
+                        clearPreviews = app.vaultCrypto::clearTransientPreviews
                     )
                 )
                 // Reuses the existing vault authentication/session layer: this route
-                // adds navigation only, no second auth implementation.
-                VaultScreen(viewModel = vm, onBack = { navController.popBackStack() })
+                // adds navigation only, no second auth implementation. The media
+                // gallery is only composed once the session is actually unlocked.
+                VaultScreen(
+                    viewModel = vm,
+                    onBack = { navController.popBackStack() },
+                    onOpenSettings = { navController.navigate(AppDestination.VaultSettings.route) },
+                    onBrowsePhotos = {
+                        navController.navigate(AppDestination.Photos.route) {
+                            popUpTo(navController.graph.findStartDestination().id) {
+                                saveState = true
+                            }
+                            launchSingleTop = true
+                            restoreState = true
+                        }
+                    }
+                )
+            }
+            composable(AppDestination.VaultSettings.route) {
+                val app = LocalContext.current.applicationContext as MyDriveApp
+                val vm: VaultSettingsViewModel = viewModel(
+                    factory = VaultSettingsViewModel.factory(
+                        pinManager = app.vaultPinManager,
+                        session = app.vaultSession,
+                        biometricAvailable = { VaultBiometricGate.canOfferBiometric(app) }
+                    )
+                )
+                VaultSettingsScreen(
+                    viewModel = vm,
+                    onBack = { navController.popBackStack() }
+                )
             }
                 composable(AppDestination.DeveloperConsole.route) {
                 val app = LocalContext.current.applicationContext as MyDriveApp

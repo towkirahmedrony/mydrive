@@ -32,4 +32,13 @@ class AppDestinationsTest {
         assertEquals("sync", AppDestination.Sync.route)
         assertEquals("settings", AppDestination.Settings.route)
     }
+
+    @Test
+    fun vaultSettingsIsASeparateRouteFromTheMediaGallery() {
+        assertEquals("settings/hidden-photos", AppDestination.HiddenPhotos.route)
+        assertEquals("settings/hidden-photos/settings", AppDestination.VaultSettings.route)
+        assertFalse(bottomDestinations.contains(AppDestination.HiddenPhotos))
+        assertFalse(bottomDestinations.contains(AppDestination.VaultSettings))
+        assertFalse(galleryDestinations.contains(AppDestination.VaultSettings))
+    }
 }

@@ -34,6 +34,12 @@ sealed class AppDestination(val route: String) {
      * discoverable from the normal Photos/Albums navigation.
      */
     data object HiddenPhotos : AppDestination("settings/hidden-photos")
+
+    /**
+     * Dedicated Vault Settings screen, opened from inside the unlocked Vault. It is
+     * a separate route so the media gallery never hosts security/PIN configuration.
+     */
+    data object VaultSettings : AppDestination("settings/hidden-photos/settings")
 }
 
 val bottomDestinations = listOf(
