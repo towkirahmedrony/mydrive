@@ -25,6 +25,13 @@ data class NormalizedRect(
     }
 }
 
+enum class EditorStickerCategory(val label: String) {
+    SHAPES("Shapes"),
+    NATURE("Nature"),
+    FUN("Fun"),
+    MARKS("Marks")
+}
+
 data class EditorAdjustments(
     val brightness: Float = 0f,
     val contrast: Float = 0f,
@@ -126,14 +133,33 @@ data class PhotoEditorRecipe(
 enum class EditorStickerKind(
     val id: String,
     val label: String,
-    val drawableName: String
+    val drawableName: String,
+    val category: EditorStickerCategory
 ) {
-    HEART("heart", "Heart", "editor_sticker_heart"),
-    STAR("star", "Star", "editor_sticker_star"),
-    SUN("sun", "Sun", "editor_sticker_sun"),
-    SMILE("smile", "Smile", "editor_sticker_smile"),
-    LEAF("leaf", "Leaf", "editor_sticker_leaf"),
-    SPARK("spark", "Spark", "editor_sticker_spark");
+    HEART("heart", "Heart", "editor_sticker_heart", EditorStickerCategory.SHAPES),
+    STAR("star", "Star", "editor_sticker_star", EditorStickerCategory.SHAPES),
+    SPARK("spark", "Spark", "editor_sticker_spark", EditorStickerCategory.SHAPES),
+    CIRCLE("circle", "Circle", "editor_sticker_circle", EditorStickerCategory.SHAPES),
+    DIAMOND("diamond", "Diamond", "editor_sticker_diamond", EditorStickerCategory.SHAPES),
+    TRIANGLE("triangle", "Triangle", "editor_sticker_triangle", EditorStickerCategory.SHAPES),
+    HEXAGON("hexagon", "Hexagon", "editor_sticker_hexagon", EditorStickerCategory.SHAPES),
+    SUN("sun", "Sun", "editor_sticker_sun", EditorStickerCategory.NATURE),
+    LEAF("leaf", "Leaf", "editor_sticker_leaf", EditorStickerCategory.NATURE),
+    MOON("moon", "Moon", "editor_sticker_moon", EditorStickerCategory.NATURE),
+    CLOUD("cloud", "Cloud", "editor_sticker_cloud", EditorStickerCategory.NATURE),
+    FLOWER("flower", "Flower", "editor_sticker_flower", EditorStickerCategory.NATURE),
+    DROP("drop", "Drop", "editor_sticker_drop", EditorStickerCategory.NATURE),
+    SMILE("smile", "Smile", "editor_sticker_smile", EditorStickerCategory.FUN),
+    WINK("wink", "Wink", "editor_sticker_wink", EditorStickerCategory.FUN),
+    LAUGH("laugh", "Laugh", "editor_sticker_laugh", EditorStickerCategory.FUN),
+    COOL("cool", "Cool", "editor_sticker_cool", EditorStickerCategory.FUN),
+    HEART_EYES("heart_eyes", "Love", "editor_sticker_heart_eyes", EditorStickerCategory.FUN),
+    CHECK("check", "Check", "editor_sticker_check", EditorStickerCategory.MARKS),
+    ARROW("arrow", "Arrow", "editor_sticker_arrow", EditorStickerCategory.MARKS),
+    PIN("pin", "Pin", "editor_sticker_pin", EditorStickerCategory.MARKS),
+    BADGE("badge", "Badge", "editor_sticker_badge", EditorStickerCategory.MARKS),
+    BURST("burst", "Burst", "editor_sticker_burst", EditorStickerCategory.MARKS),
+    FRAME("frame", "Frame", "editor_sticker_frame", EditorStickerCategory.MARKS);
 
     companion object {
         fun fromId(id: String): EditorStickerKind =

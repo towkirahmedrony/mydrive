@@ -24,8 +24,23 @@ object EditorPreviewPipeline {
         renderSync(source, recipe)
     }
 
-    fun renderSync(source: Bitmap, recipe: PhotoEditorRecipe): Bitmap {
-        val cropped = crop(source, recipe.crop)
+    suspend fun renderFilterThumb(source: Bitmap, filter: EditorFilter, sizePx: Int = 96): Bitmap =
+        withContext(Dispatchers.Default) {
+            val square = squareThumb(source, sizePx)
+            val recipe = PhotoEditorRecipe(
+                sourceUri = "",
+                mediaId = "",
+                filter = filter
+            )
+            val rendered = renderSync(square, recipe)
+            if (rendered !== square && !square.isRecycled) {
+                square.recycle()
+            }
+            rendered
+        }
+
+    fun renderSync(source: Bitmap, recipe: PhotoEditorRecipe, applyCrop: Boolean = true): Bitmap {
+        val cropped = if (applyCrop) crop(source, recipe.crop) else source
         val transformed = transform(cropped, recipe.rotationDegrees, recipe.flipHorizontal, recipe.flipVertical)
         if (cropped !== source && cropped !== transformed && !cropped.isRecycled) {
             cropped.recycle()
@@ -140,6 +155,19 @@ object EditorPreviewPipeline {
         }
         canvas.drawRect(Rect(0, 0, source.width, source.height), paint)
         return output
+    }
+
+    private fun squareThumb(source: Bitmap, sizePx: Int): Bitmap {
+        val size = sizePx.coerceAtLeast(32)
+        val edge = min(source.width, source.height).coerceAtLeast(1)
+        val left = ((source.width - edge) / 2).coerceAtLeast(0)
+        val top = ((source.height - edge) / 2).coerceAtLeast(0)
+        val cropped = Bitmap.createBitmap(source, left, top, edge, edge)
+        val scaled = Bitmap.createScaledBitmap(cropped, size, size, true)
+        if (scaled !== cropped && !cropped.isRecycled) {
+            cropped.recycle()
+        }
+        return scaled
     }
 
     private fun clampColor(value: Float): Int = min(255, max(0, value.roundToInt()))

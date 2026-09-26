@@ -13,6 +13,7 @@ import androidx.compose.foundation.gestures.calculatePan
 import androidx.compose.foundation.gestures.calculateRotation
 import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
@@ -21,9 +22,13 @@ import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
@@ -31,17 +36,20 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.Crop
+import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.DeleteSweep
+import androidx.compose.material.icons.outlined.EmojiEmotions
 import androidx.compose.material.icons.outlined.FilterVintage
 import androidx.compose.material.icons.outlined.Flip
 import androidx.compose.material.icons.outlined.Gesture
+import androidx.compose.material.icons.outlined.Redo
 import androidx.compose.material.icons.outlined.RestartAlt
 import androidx.compose.material.icons.outlined.Rotate90DegreesCcw
 import androidx.compose.material.icons.outlined.Rotate90DegreesCw
@@ -50,8 +58,6 @@ import androidx.compose.material.icons.outlined.SwapVert
 import androidx.compose.material.icons.outlined.TextFields
 import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material.icons.outlined.Undo
-import androidx.compose.material.icons.outlined.EmojiEmotions
-import androidx.compose.material.icons.outlined.Redo
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
@@ -77,6 +83,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
@@ -147,6 +155,7 @@ fun PhotoEditorScreen(
         modifier = Modifier
             .fillMaxSize()
             .background(Color.Black)
+            .imePadding()
     ) {
         Column(modifier = Modifier.fillMaxSize()) {
             EditorTopBar(
@@ -210,7 +219,7 @@ fun PhotoEditorScreen(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .navigationBarsPadding()
-                .padding(bottom = 188.dp)
+                .padding(bottom = 72.dp)
         ) { data ->
             Snackbar(
                 snackbarData = data,
@@ -327,6 +336,20 @@ private fun EditorPreviewStage(
         val density = LocalDensity.current
         val drawWidthDp = with(density) { drawWidth.toDp() }
         val drawHeightDp = with(density) { drawHeight.toDp() }
+        val displayCrop = remember(
+            state.recipe.crop,
+            state.recipe.rotationDegrees,
+            state.recipe.flipHorizontal,
+            state.recipe.flipVertical
+        ) {
+            EditorCropMath.mapRectToDisplay(
+                state.recipe.crop,
+                state.recipe.rotationDegrees,
+                state.recipe.flipHorizontal,
+                state.recipe.flipVertical
+            )
+        }
+        val displayAspect = imageWidth / imageHeight
 
         Box(
             modifier = Modifier
@@ -340,14 +363,27 @@ private fun EditorPreviewStage(
                 modifier = Modifier.fillMaxSize(),
                 contentScale = ContentScale.Fit
             )
-            DrawingLayer(
+            if (state.selectedTool != EditorTool.CROP && state.eyedropperEnabled) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .pointerInput(preview) {
+                            detectTapGestures { offset ->
+                                val x = (offset.x / size.width).coerceIn(0f, 1f)
+                                val y = (offset.y / size.height).coerceIn(0f, 1f)
+                                viewModel.sampleDisplayedColor(x, y)
+                            }
+                        }
+                )
+            }
+            if (state.selectedTool != EditorTool.CROP) DrawingLayer(
                 strokes = state.recipe.strokes,
-                enabled = state.selectedTool == EditorTool.DRAW,
+                enabled = state.selectedTool == EditorTool.DRAW && !state.eyedropperEnabled,
                 onBegin = viewModel::beginStroke,
                 onMove = viewModel::appendStroke,
                 onEnd = viewModel::endStroke
             )
-            OverlayLayer(
+            if (state.selectedTool != EditorTool.CROP) OverlayLayer(
                 texts = state.recipe.texts,
                 stickers = state.recipe.stickers,
                 selectedTextId = state.selectedTextId,
@@ -362,6 +398,15 @@ private fun EditorPreviewStage(
                 onTransformSticker = viewModel::transformSticker,
                 onEndGesture = viewModel::endOverlayGesture
             )
+            if (state.selectedTool == EditorTool.CROP) {
+                EditorCropOverlay(
+                    crop = displayCrop,
+                    aspect = state.cropAspect,
+                    imageAspect = displayAspect,
+                    onChange = viewModel::updateDisplayCrop,
+                    onChangeFinished = viewModel::commitLiveChange
+                )
+            }
         }
     }
 }
@@ -558,6 +603,8 @@ private fun EditorBottomPanel(
     state: PhotoEditorUiState,
     viewModel: PhotoEditorViewModel
 ) {
+    val density = LocalDensity.current
+    val imeVisible = WindowInsets.ime.getBottom(density) > 0
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -570,7 +617,13 @@ private fun EditorBottomPanel(
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(188.dp)
+                .then(
+                    if (state.selectedTool == EditorTool.TEXT && imeVisible) {
+                        Modifier.heightIn(min = 120.dp, max = 240.dp)
+                    } else {
+                        Modifier.height(220.dp)
+                    }
+                )
                 .padding(horizontal = Spacing.md)
         ) {
             when (state.selectedTool) {
@@ -579,14 +632,16 @@ private fun EditorBottomPanel(
                 EditorTool.FILTERS -> FiltersPanel(state = state, viewModel = viewModel)
                 EditorTool.DRAW -> DrawPanel(state = state, viewModel = viewModel)
                 EditorTool.TEXT -> TextPanel(state = state, viewModel = viewModel)
-                EditorTool.STICKERS -> StickersPanel(viewModel = viewModel)
+                EditorTool.STICKERS -> StickersPanel(state = state, viewModel = viewModel)
             }
         }
-        Spacer(Modifier.height(Spacing.xs))
-        ToolRail(
-            selected = state.selectedTool,
-            onSelect = viewModel::selectTool
-        )
+        if (!imeVisible) {
+            Spacer(Modifier.height(Spacing.xs))
+            ToolRail(
+                selected = state.selectedTool,
+                onSelect = viewModel::selectTool
+            )
+        }
     }
 }
 
@@ -647,27 +702,31 @@ private fun CropPanel(state: PhotoEditorUiState, viewModel: PhotoEditorViewModel
             EditorChip("Flip V", Icons.Outlined.SwapVert) { viewModel.flipVertical() }
             EditorChip("Reset crop", Icons.Outlined.RestartAlt) { viewModel.resetCrop() }
         }
-        EditorSlider(
-            label = "Crop width",
-            value = state.recipe.crop.width,
-            valueRange = NormalizedRect.MIN_SIZE..1f,
-            onChange = { width ->
-                val current = state.recipe.crop
-                val left = current.left.coerceAtMost(1f - width)
-                viewModel.updateCrop(current.copy(left = left, right = left + width))
-            },
-            onChangeFinished = viewModel::commitLiveChange
-        )
-        EditorSlider(
-            label = "Crop height",
-            value = state.recipe.crop.height,
-            valueRange = NormalizedRect.MIN_SIZE..1f,
-            onChange = { height ->
-                val current = state.recipe.crop
-                val top = current.top.coerceAtMost(1f - height)
-                viewModel.updateCrop(current.copy(top = top, bottom = top + height))
-            },
-            onChangeFinished = viewModel::commitLiveChange
+        val ratios = rememberScrollState()
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(ratios),
+            horizontalArrangement = Arrangement.spacedBy(Spacing.xs)
+        ) {
+            CropAspectPreset.entries.forEach { preset ->
+                val active = state.cropAspect == preset
+                Text(
+                    text = preset.label,
+                    color = if (active) Ink else Ivory,
+                    style = MaterialTheme.typography.labelSmall,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(Radius.pill))
+                        .background(if (active) Copper else Color.White.copy(alpha = 0.08f))
+                        .clickable { viewModel.setCropAspect(preset) }
+                        .padding(horizontal = Spacing.sm, vertical = Spacing.xs)
+                )
+            }
+        }
+        Text(
+            text = "Drag the frame, edges, or corners to crop.",
+            color = Ivory.copy(alpha = 0.7f),
+            style = MaterialTheme.typography.bodySmall
         )
     }
 }
@@ -763,6 +822,7 @@ private fun FiltersPanel(state: PhotoEditorUiState, viewModel: PhotoEditorViewMo
     ) {
         EditorFilter.entries.forEach { filter ->
             val selected = state.recipe.filter == filter
+            val thumb = state.filterThumbs[filter]
             Column(
                 modifier = Modifier
                     .width(84.dp)
@@ -781,11 +841,32 @@ private fun FiltersPanel(state: PhotoEditorUiState, viewModel: PhotoEditorViewMo
                     modifier = Modifier
                         .size(56.dp)
                         .clip(RoundedCornerShape(Radius.sm))
-                        .background(filterSwatch(filter)),
+                        .background(Color.White.copy(alpha = 0.08f)),
                     contentAlignment = Alignment.Center
                 ) {
+                    if (thumb != null && !thumb.isRecycled) {
+                        Image(
+                            bitmap = thumb.asImageBitmap(),
+                            contentDescription = filter.displayName,
+                            modifier = Modifier.fillMaxSize(),
+                            contentScale = ContentScale.Crop
+                        )
+                    } else {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(16.dp),
+                            color = Copper,
+                            strokeWidth = 2.dp
+                        )
+                    }
                     if (selected) {
-                        Icon(Icons.Outlined.Check, contentDescription = null, tint = Ink, modifier = Modifier.size(18.dp))
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .background(Color.Black.copy(alpha = 0.28f)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(Icons.Outlined.Check, contentDescription = null, tint = Ivory, modifier = Modifier.size(18.dp))
+                        }
                     }
                 }
                 Spacer(Modifier.height(Spacing.xs))
@@ -803,24 +884,15 @@ private fun FiltersPanel(state: PhotoEditorUiState, viewModel: PhotoEditorViewMo
 
 @Composable
 private fun DrawPanel(state: PhotoEditorUiState, viewModel: PhotoEditorViewModel) {
-    Column(verticalArrangement = Arrangement.spacedBy(Spacing.sm)) {
+    Column(verticalArrangement = Arrangement.spacedBy(Spacing.xs)) {
         EditorSlider("Brush size", state.brushSize, 0.006f..0.08f, viewModel::setBrushSize)
+        EditorColorSelector(
+            selected = state.brushColor,
+            eyedropperEnabled = state.eyedropperEnabled,
+            onSelect = viewModel::setBrushColor,
+            onToggleEyedropper = { viewModel.setEyedropperEnabled(!state.eyedropperEnabled) }
+        )
         Row(horizontalArrangement = Arrangement.spacedBy(Spacing.sm)) {
-            listOf(0xFFFFFFFF, 0xFFD4A574, 0xFFD97858, 0xFF8FADA0, 0xFF0B0C0E).forEach { color ->
-                Box(
-                    modifier = Modifier
-                        .size(28.dp)
-                        .clip(CircleShape)
-                        .background(Color(color))
-                        .border(
-                            width = if (state.brushColor == color) 2.dp else 1.dp,
-                            color = if (state.brushColor == color) Copper else Color.White.copy(alpha = 0.3f),
-                            shape = CircleShape
-                        )
-                        .clickable { viewModel.setBrushColor(color) }
-                )
-            }
-            Spacer(Modifier.weight(1f))
             EditorChip("Undo stroke", Icons.Outlined.Undo) { viewModel.undoStroke() }
             EditorChip("Clear", Icons.Outlined.DeleteSweep) { viewModel.clearStrokes() }
         }
@@ -830,16 +902,32 @@ private fun DrawPanel(state: PhotoEditorUiState, viewModel: PhotoEditorViewModel
 @Composable
 private fun TextPanel(state: PhotoEditorUiState, viewModel: PhotoEditorViewModel) {
     val selected = state.recipe.texts.firstOrNull { it.id == state.selectedTextId }
-    Column(verticalArrangement = Arrangement.spacedBy(Spacing.sm)) {
+    val focusRequester = remember { FocusRequester() }
+    LaunchedEffect(selected?.id) {
+        if (selected != null) {
+            runCatching { focusRequester.requestFocus() }
+        }
+    }
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState()),
+        verticalArrangement = Arrangement.spacedBy(Spacing.xs)
+    ) {
         Row(horizontalArrangement = Arrangement.spacedBy(Spacing.sm)) {
             EditorChip("Add text", Icons.Outlined.Add, viewModel::addText)
+            if (selected != null) {
+                EditorChip("Delete", Icons.Outlined.Delete) { viewModel.removeText(selected.id) }
+            }
         }
         if (selected != null) {
             OutlinedTextField(
                 value = selected.text,
                 onValueChange = { viewModel.updateText(selected.id, it) },
                 singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .focusRequester(focusRequester),
                 textStyle = MaterialTheme.typography.bodyLarge,
                 colors = OutlinedTextFieldDefaults.colors(
                     focusedBorderColor = Copper,
@@ -848,37 +936,75 @@ private fun TextPanel(state: PhotoEditorUiState, viewModel: PhotoEditorViewModel
                     unfocusedTextColor = Ivory
                 )
             )
+            EditorColorSelector(
+                selected = selected.color,
+                eyedropperEnabled = state.eyedropperEnabled,
+                onSelect = { viewModel.setTextColor(selected.id, it) },
+                onToggleEyedropper = { viewModel.setEyedropperEnabled(!state.eyedropperEnabled) }
+            )
         } else {
-            Text("Add text, then drag to move or pinch to scale.", color = Ivory.copy(alpha = 0.7f), style = MaterialTheme.typography.bodySmall)
+            Text(
+                "Add text, then drag to move or pinch to scale.",
+                color = Ivory.copy(alpha = 0.7f),
+                style = MaterialTheme.typography.bodySmall
+            )
         }
     }
 }
 
 @Composable
-private fun StickersPanel(viewModel: PhotoEditorViewModel) {
-    val scroll = rememberScrollState()
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .horizontalScroll(scroll),
-        horizontalArrangement = Arrangement.spacedBy(Spacing.sm)
-    ) {
-        EditorStickerKind.entries.forEach { kind ->
-            Column(
-                modifier = Modifier
-                    .clip(RoundedCornerShape(Radius.md))
-                    .background(Color.White.copy(alpha = 0.06f))
-                    .clickable { viewModel.addSticker(kind) }
-                    .padding(Spacing.sm),
-                horizontalAlignment = Alignment.CenterHorizontally
-            ) {
-                Image(
-                    painter = painterResource(id = stickerDrawable(kind)),
-                    contentDescription = kind.label,
-                    modifier = Modifier.size(48.dp)
+private fun StickersPanel(state: PhotoEditorUiState, viewModel: PhotoEditorViewModel) {
+    var category by remember { mutableStateOf(EditorStickerCategory.SHAPES) }
+    Column(verticalArrangement = Arrangement.spacedBy(Spacing.xs)) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(Spacing.xs)
+        ) {
+            EditorStickerCategory.entries.forEach { item ->
+                val active = item == category
+                Text(
+                    text = item.label,
+                    color = if (active) Ink else Ivory,
+                    style = MaterialTheme.typography.labelSmall,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(Radius.pill))
+                        .background(if (active) Copper else Color.White.copy(alpha = 0.08f))
+                        .clickable { category = item }
+                        .padding(horizontal = Spacing.sm, vertical = Spacing.xs)
                 )
-                Spacer(Modifier.height(4.dp))
-                Text(kind.label, color = Ivory, style = MaterialTheme.typography.labelSmall)
+            }
+            if (state.selectedStickerId != null) {
+                EditorChip("Delete", Icons.Outlined.Delete) {
+                    viewModel.removeSticker(state.selectedStickerId)
+                }
+            }
+        }
+        val scroll = rememberScrollState()
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(scroll),
+            horizontalArrangement = Arrangement.spacedBy(Spacing.sm)
+        ) {
+            EditorStickerKind.entries.filter { it.category == category }.forEach { kind ->
+                Column(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(Radius.md))
+                        .background(Color.White.copy(alpha = 0.06f))
+                        .clickable { viewModel.addSticker(kind) }
+                        .padding(Spacing.sm),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Image(
+                        painter = painterResource(id = stickerDrawable(kind)),
+                        contentDescription = kind.label,
+                        modifier = Modifier.size(48.dp)
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(kind.label, color = Ivory, style = MaterialTheme.typography.labelSmall)
+                }
             }
         }
     }
@@ -940,22 +1066,29 @@ private fun toolIcon(tool: EditorTool): ImageVector = when (tool) {
     EditorTool.STICKERS -> Icons.Outlined.EmojiEmotions
 }
 
-private fun filterSwatch(filter: EditorFilter): Color = when (filter) {
-    EditorFilter.ORIGINAL -> Color(0xFFC9C3B8)
-    EditorFilter.MONO -> Color(0xFF8B909A)
-    EditorFilter.FADE -> Color(0xFFB7AFA3)
-    EditorFilter.WARM_GLOW -> Color(0xFFD4A574)
-    EditorFilter.COOL_MIST -> Color(0xFF8AA4C4)
-    EditorFilter.VINTAGE -> Color(0xFFC48A5A)
-    EditorFilter.DRAMATIC -> Color(0xFF5E636C)
-    EditorFilter.SOFT -> Color(0xFFEDE7DC)
-}
-
 private fun stickerDrawable(kind: EditorStickerKind): Int = when (kind) {
     EditorStickerKind.HEART -> R.drawable.editor_sticker_heart
     EditorStickerKind.STAR -> R.drawable.editor_sticker_star
-    EditorStickerKind.SUN -> R.drawable.editor_sticker_sun
-    EditorStickerKind.SMILE -> R.drawable.editor_sticker_smile
-    EditorStickerKind.LEAF -> R.drawable.editor_sticker_leaf
     EditorStickerKind.SPARK -> R.drawable.editor_sticker_spark
+    EditorStickerKind.CIRCLE -> R.drawable.editor_sticker_circle
+    EditorStickerKind.DIAMOND -> R.drawable.editor_sticker_diamond
+    EditorStickerKind.TRIANGLE -> R.drawable.editor_sticker_triangle
+    EditorStickerKind.HEXAGON -> R.drawable.editor_sticker_hexagon
+    EditorStickerKind.SUN -> R.drawable.editor_sticker_sun
+    EditorStickerKind.LEAF -> R.drawable.editor_sticker_leaf
+    EditorStickerKind.MOON -> R.drawable.editor_sticker_moon
+    EditorStickerKind.CLOUD -> R.drawable.editor_sticker_cloud
+    EditorStickerKind.FLOWER -> R.drawable.editor_sticker_flower
+    EditorStickerKind.DROP -> R.drawable.editor_sticker_drop
+    EditorStickerKind.SMILE -> R.drawable.editor_sticker_smile
+    EditorStickerKind.WINK -> R.drawable.editor_sticker_wink
+    EditorStickerKind.LAUGH -> R.drawable.editor_sticker_laugh
+    EditorStickerKind.COOL -> R.drawable.editor_sticker_cool
+    EditorStickerKind.HEART_EYES -> R.drawable.editor_sticker_heart_eyes
+    EditorStickerKind.CHECK -> R.drawable.editor_sticker_check
+    EditorStickerKind.ARROW -> R.drawable.editor_sticker_arrow
+    EditorStickerKind.PIN -> R.drawable.editor_sticker_pin
+    EditorStickerKind.BADGE -> R.drawable.editor_sticker_badge
+    EditorStickerKind.BURST -> R.drawable.editor_sticker_burst
+    EditorStickerKind.FRAME -> R.drawable.editor_sticker_frame
 }

@@ -12,6 +12,7 @@ import com.mydrive.app.data.model.MediaType
 import com.mydrive.app.data.repository.MediaRepository
 import java.io.File
 import java.util.UUID
+import kotlin.coroutines.cancellation.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.ensureActive
@@ -30,6 +31,10 @@ data class PhotoEditorUiState(
     val selectedStickerId: String? = null,
     val brushSize: Float = 0.018f,
     val brushColor: Long = 0xFFFFFFFF,
+    val cropAspect: CropAspectPreset = CropAspectPreset.FREE,
+    val sourceAspect: Float = 1f,
+    val filterThumbs: Map<EditorFilter, Bitmap> = emptyMap(),
+    val eyedropperEnabled: Boolean = false,
     val canUndo: Boolean = false,
     val canRedo: Boolean = false,
     val isEdited: Boolean = false,
@@ -57,6 +62,7 @@ class PhotoEditorViewModel(
     )
     private var sourcePreview: Bitmap? = null
     private var renderJob: Job? = null
+    private var thumbJob: Job? = null
     private var drawingStroke: EditorDrawStroke? = null
     private var overlayBefore: PhotoEditorRecipe? = null
 
@@ -75,12 +81,17 @@ class PhotoEditorViewModel(
 
     fun selectTool(tool: EditorTool) {
         commitLiveChange()
+        val previous = _uiState.value.selectedTool
         _uiState.update {
             it.copy(
                 selectedTool = tool,
                 selectedTextId = if (tool == EditorTool.TEXT) it.selectedTextId else null,
-                selectedStickerId = if (tool == EditorTool.STICKERS) it.selectedStickerId else null
+                selectedStickerId = if (tool == EditorTool.STICKERS) it.selectedStickerId else null,
+                eyedropperEnabled = if (tool == EditorTool.DRAW || tool == EditorTool.TEXT) it.eyedropperEnabled else false
             )
+        }
+        if ((previous == EditorTool.CROP) != (tool == EditorTool.CROP)) {
+            requestRender()
         }
     }
 
@@ -99,6 +110,7 @@ class PhotoEditorViewModel(
     fun reset() {
         overlayBefore = null
         store.reset()
+        _uiState.update { it.copy(cropAspect = CropAspectPreset.FREE, eyedropperEnabled = false) }
         publishRecipe(rerender = true)
     }
 
@@ -107,9 +119,40 @@ class PhotoEditorViewModel(
     fun flipHorizontal() = commit { it.copy(flipHorizontal = !it.flipHorizontal) }
     fun flipVertical() = commit { it.copy(flipVertical = !it.flipVertical) }
 
-    fun updateCrop(crop: NormalizedRect) = previewChange { it.copy(crop = crop.coerced()) }
+    fun updateCrop(crop: NormalizedRect) = previewChange(rerender = false) { it.copy(crop = crop.coerced()) }
 
-    fun resetCrop() = commit { it.copy(crop = NormalizedRect.Full) }
+    fun updateDisplayCrop(displayCrop: NormalizedRect) {
+        val recipe = store.current
+        val sourceCrop = EditorCropMath.mapRectToSource(
+            displayCrop.coerced(),
+            recipe.rotationDegrees,
+            recipe.flipHorizontal,
+            recipe.flipVertical
+        )
+        updateCrop(sourceCrop)
+    }
+
+    fun setCropAspect(preset: CropAspectPreset) {
+        _uiState.update { it.copy(cropAspect = preset) }
+        if (preset == CropAspectPreset.FREE) return
+        val recipe = store.current
+        val rotation = ((recipe.rotationDegrees % 360) + 360) % 360
+        val sourceAspect = _uiState.value.sourceAspect.coerceAtLeast(0.0001f)
+        val displayAspect = if (rotation == 90 || rotation == 270) 1f / sourceAspect else sourceAspect
+        val displayFitted = EditorCropMath.fitPreset(preset, displayAspect)
+        val sourceCrop = EditorCropMath.mapRectToSource(
+            displayFitted,
+            recipe.rotationDegrees,
+            recipe.flipHorizontal,
+            recipe.flipVertical
+        )
+        commit(rerender = false) { it.copy(crop = sourceCrop) }
+    }
+
+    fun resetCrop() {
+        _uiState.update { it.copy(cropAspect = CropAspectPreset.FREE) }
+        commit(rerender = false) { it.copy(crop = NormalizedRect.Full) }
+    }
 
     fun updateAdjustment(transform: (EditorAdjustments) -> EditorAdjustments) {
         previewChange { recipe -> recipe.copy(adjustments = transform(recipe.adjustments)) }
@@ -131,7 +174,26 @@ class PhotoEditorViewModel(
     }
 
     fun setBrushColor(color: Long) {
-        _uiState.update { it.copy(brushColor = color) }
+        _uiState.update { it.copy(brushColor = EditorPalette.argb(color), eyedropperEnabled = false) }
+    }
+
+    fun setEyedropperEnabled(enabled: Boolean) {
+        _uiState.update { it.copy(eyedropperEnabled = enabled) }
+    }
+
+    fun sampleDisplayedColor(x: Float, y: Float) {
+        val preview = _uiState.value.preview ?: return
+        if (preview.isRecycled) return
+        val color = EditorPalette.sampleNormalized(preview.width, preview.height, x, y) { px, py ->
+            preview.getPixel(px, py)
+        }
+        val state = _uiState.value
+        if (state.selectedTool == EditorTool.TEXT) {
+            val textId = state.selectedTextId ?: return
+            setTextColor(textId, color)
+        } else {
+            setBrushColor(color)
+        }
     }
 
     fun beginStroke(x: Float, y: Float) {
@@ -195,6 +257,24 @@ class PhotoEditorViewModel(
         }
     }
 
+    fun setTextColor(id: String, color: Long) {
+        commit(rerender = false) { recipe ->
+            recipe.copy(texts = recipe.texts.map { overlay ->
+                if (overlay.id == id) overlay.copy(color = EditorPalette.argb(color)) else overlay
+            })
+        }
+        _uiState.update { it.copy(eyedropperEnabled = false) }
+    }
+
+    fun removeText(id: String) {
+        commit(rerender = false) { recipe ->
+            recipe.copy(texts = recipe.texts.filterNot { it.id == id })
+        }
+        _uiState.update { state ->
+            state.copy(selectedTextId = state.selectedTextId.takeUnless { it == id })
+        }
+    }
+
     fun selectText(id: String?) {
         _uiState.update { it.copy(selectedTextId = id, selectedStickerId = null) }
     }
@@ -253,6 +333,15 @@ class PhotoEditorViewModel(
         publishRecipe(rerender = false)
     }
 
+    fun removeSticker(id: String) {
+        commit(rerender = false) { recipe ->
+            recipe.copy(stickers = recipe.stickers.filterNot { it.id == id })
+        }
+        _uiState.update { state ->
+            state.copy(selectedStickerId = state.selectedStickerId.takeUnless { it == id })
+        }
+    }
+
     fun savePreview() {
         val preview = _uiState.value.preview
         if (preview == null) {
@@ -304,7 +393,13 @@ class PhotoEditorViewModel(
                 )
             }
             if (bitmap != null) {
+                _uiState.update {
+                    it.copy(
+                        sourceAspect = bitmap.width.toFloat() / bitmap.height.toFloat().coerceAtLeast(1f)
+                    )
+                }
                 requestRender()
+                generateFilterThumbs(bitmap)
             }
         }
     }
@@ -340,13 +435,35 @@ class PhotoEditorViewModel(
         if (rerender) requestRender()
     }
 
+    private fun generateFilterThumbs(source: Bitmap) {
+        thumbJob?.cancel()
+        thumbJob = viewModelScope.launch {
+            val generated = linkedMapOf<EditorFilter, Bitmap>()
+            try {
+                EditorFilter.entries.forEach { filter ->
+                    ensureActive()
+                    generated[filter] = EditorPreviewPipeline.renderFilterThumb(source, filter)
+                }
+                _uiState.update { it.copy(filterThumbs = generated) }
+            } catch (cancelled: CancellationException) {
+                generated.values.forEach { bitmap ->
+                    if (!bitmap.isRecycled) bitmap.recycle()
+                }
+                throw cancelled
+            }
+        }
+    }
+
     private fun requestRender() {
         val source = sourcePreview ?: return
         val recipe = store.current
+        val applyCrop = _uiState.value.selectedTool != EditorTool.CROP
         renderJob?.cancel()
         _uiState.update { it.copy(isRendering = true) }
         renderJob = viewModelScope.launch {
-            val rendered = EditorPreviewPipeline.render(source, recipe)
+            val rendered = withContext(Dispatchers.Default) {
+                EditorPreviewPipeline.renderSync(source, recipe, applyCrop = applyCrop)
+            }
             ensureActive()
             val previous = _uiState.value.preview
             _uiState.update { it.copy(preview = rendered, isRendering = false) }
@@ -358,6 +475,10 @@ class PhotoEditorViewModel(
 
     override fun onCleared() {
         renderJob?.cancel()
+        thumbJob?.cancel()
+        _uiState.value.filterThumbs.values.forEach { bitmap ->
+            if (!bitmap.isRecycled) bitmap.recycle()
+        }
         val preview = _uiState.value.preview
         if (preview != null && preview !== sourcePreview && !preview.isRecycled) {
             preview.recycle()

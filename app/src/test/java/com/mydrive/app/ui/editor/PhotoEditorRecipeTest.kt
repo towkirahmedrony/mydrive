@@ -77,5 +77,7 @@ class PhotoEditorRecipeTest {
         assertEquals("heart", recipe.stickers.single().stickerId)
         assertEquals(2, recipe.strokes.single().points.size)
         assertTrue(recipe.strokes.single().points.all { it.x in 0f..1f && it.y in 0f..1f })
+        assertTrue(EditorStickerKind.entries.size >= 20)
+        assertEquals(EditorStickerCategory.NATURE, EditorStickerKind.LEAF.category)
     }
 }
