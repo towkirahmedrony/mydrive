@@ -242,18 +242,20 @@ class MediaViewerViewModel(
                     currentIndex = currentIndex,
                     message = "Moved to Trash"
                 )
-                RemoveFromLibraryResult.Unauthorized -> {
-                    pendingDeleteCompletion = null
-                    showUserMessage("Sign in to move this item to Trash.")
-                }
-                RemoveFromLibraryResult.NotFound -> {
-                    pendingDeleteCompletion = null
-                    showUserMessage("This item could not be moved to Trash.")
-                }
-                RemoveFromLibraryResult.Failed -> {
-                    pendingDeleteCompletion = null
-                    showUserMessage("Couldn't move this item to Trash.")
-                }
+                // The item is out of Photos/Albums and in Trash at this point — the
+                // device half of the move is committed before the cloud is asked, so
+                // these branches report the *sync* state, not a failed delete, and
+                // the viewer leaves the item behind like any other trashed media.
+                RemoveFromLibraryResult.Unauthorized -> completeRemoval(
+                    itemId = itemId,
+                    currentIndex = currentIndex,
+                    message = "Moved to Trash. Sign in to sync it to My Drive Trash."
+                )
+                RemoveFromLibraryResult.NotFound, RemoveFromLibraryResult.Failed -> completeRemoval(
+                    itemId = itemId,
+                    currentIndex = currentIndex,
+                    message = "Moved to Trash. My Drive Trash is pending and will retry."
+                )
             }
         }
     }
@@ -269,14 +271,19 @@ class MediaViewerViewModel(
                             currentIndex = currentIndex,
                             message = "Moved to Trash"
                         )
-                        RemoveFromLibraryResult.Unauthorized -> {
-                            pendingDeleteCompletion = null
-                            showUserMessage("Moved to device Trash, but sign in is required to move it to My Drive Trash.")
-                        }
-                        RemoveFromLibraryResult.NotFound, RemoveFromLibraryResult.Failed -> {
-                            pendingDeleteCompletion = null
-                            showUserMessage("Moved to device Trash, but it could not be moved to My Drive Trash.")
-                        }
+                        // Same rule as above: the device trash already succeeded and is
+                        // never rolled back, so a cloud half that is not confirmed is
+                        // reported as pending (and retried), not as a failed delete.
+                        RemoveFromLibraryResult.Unauthorized -> completeRemoval(
+                            itemId = itemId,
+                            currentIndex = currentIndex,
+                            message = "Moved to device Trash. Sign in to sync it to My Drive Trash."
+                        )
+                        RemoveFromLibraryResult.NotFound, RemoveFromLibraryResult.Failed -> completeRemoval(
+                            itemId = itemId,
+                            currentIndex = currentIndex,
+                            message = "Moved to device Trash. My Drive Trash is pending and will retry."
+                        )
                     }
             } else {
                 pendingDeleteCompletion = null

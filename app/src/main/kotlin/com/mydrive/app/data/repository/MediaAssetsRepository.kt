@@ -5,6 +5,7 @@ import com.mydrive.app.data.auth.PreparedAuth
 import com.mydrive.app.data.media.CloudBackupCandidate
 import com.mydrive.app.data.media.CloudBackupLookup
 import com.mydrive.app.data.media.CloudBackupMatch
+import com.mydrive.app.data.media.LibraryVisibilityRules
 import com.mydrive.app.data.media.MediaAssetsPage
 import com.mydrive.app.data.media.MediaLibraryPaging
 import com.mydrive.app.data.media.MediaPageCursor
@@ -33,11 +34,10 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.intOrNull
-import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
-import java.time.Instant
 
 sealed class HideMediaResult {
     data object Success : HideMediaResult()
@@ -477,30 +477,44 @@ class MediaAssetsRepository(
     }
 
     suspend fun hideFromLibrary(remoteMediaId: String): HideMediaResult =
-        updateHiddenAt(remoteMediaId, Instant.now().toString())
+        hideMatchingAsset(remoteMediaId = remoteMediaId, localMediaId = null, clientUploadId = null)
 
     suspend fun unhideFromLibrary(remoteMediaId: String): HideMediaResult =
-        updateHiddenAt(remoteMediaId, hiddenAt = null)
+        unhideMatchingAsset(remoteMediaId = remoteMediaId, localMediaId = null, clientUploadId = null)
 
+    /**
+     * Moves every `media_assets` row that represents this media into the My Drive
+     * Trash lifecycle (`user_hidden_at`).
+     *
+     * The identity is resolved to *all* owned rows rather than one. Production holds
+     * several rows per `local_media_id` — the same photo uploaded again from each
+     * successive install — and hiding a single row left its siblings `READY` with
+     * `user_hidden_at IS NULL`, so the media still qualified for the active catalog
+     * and came straight back into Photos/Albums after the delete.
+     */
     suspend fun hideMatchingAsset(
         remoteMediaId: String?,
         localMediaId: Long?,
         clientUploadId: String?
-    ): HideMediaResult {
-        val resolvedId = resolveRemoteId(remoteMediaId, localMediaId, clientUploadId)
-            ?: return HideMediaResult.NotFound
-        return hideFromLibrary(resolvedId)
-    }
+    ): HideMediaResult = setLibraryVisibility(
+        identity = ownedRowsForIdentity(remoteMediaId, localMediaId, clientUploadId),
+        hidden = true
+    )
 
+    /**
+     * Clears `user_hidden_at` on every `media_assets` row that represents this media.
+     *
+     * Restore had the same two defects as Trash: it targeted one row out of several,
+     * and it could report a failure for a change the server had already applied.
+     */
     suspend fun unhideMatchingAsset(
         remoteMediaId: String?,
         localMediaId: Long?,
         clientUploadId: String?
-    ): HideMediaResult {
-        val resolvedId = resolveRemoteId(remoteMediaId, localMediaId, clientUploadId)
-            ?: return HideMediaResult.NotFound
-        return unhideFromLibrary(resolvedId)
-    }
+    ): HideMediaResult = setLibraryVisibility(
+        identity = ownedRowsForIdentity(remoteMediaId, localMediaId, clientUploadId),
+        hidden = false
+    )
 
     /**
      * Permanently deletes the given media through the server-side lifecycle.
@@ -546,13 +560,235 @@ class MediaAssetsRepository(
         }
     }
 
-    private suspend fun resolveRemoteId(
+    /** The outcome of resolving a media to the rows that represent it. */
+    private sealed interface IdentityRows {
+        data class Found(val rows: List<MediaAssetRow>) : IdentityRows
+
+        /** Nobody is signed in, so ownership cannot be established. */
+        data object Unauthorized : IdentityRows
+
+        /** The identity could not be read. Deliberately NOT "no rows". */
+        data object Unavailable : IdentityRows
+    }
+
+    /**
+     * Reads every owned `media_assets` row for one media.
+     *
+     * Matched by `id`, by the queue's `client_upload_id`, and by `local_media_id` —
+     * the last one also expanded from whichever rows the first two returned, so an
+     * identity given as a single remote id still reaches that media's siblings.
+     * A read failure is reported as [IdentityRows.Unavailable] rather than as an
+     * empty result: "could not ask" must never be mistaken for "nothing there",
+     * which is what turns a transient error into a false success or a false
+     * failure.
+     */
+    private suspend fun ownedRowsForIdentity(
         remoteMediaId: String?,
         localMediaId: Long?,
         clientUploadId: String?
-    ): String? {
-        if (!remoteMediaId.isNullOrBlank()) return remoteMediaId
-        return findMatchingAsset(remoteMediaId, localMediaId, clientUploadId)?.id
+    ): IdentityRows = withContext(Dispatchers.IO) {
+        val supabase = client ?: return@withContext IdentityRows.Found(emptyList())
+        val userId = currentUserId() ?: return@withContext IdentityRows.Unauthorized
+        if (!network.isOnline()) return@withContext IdentityRows.Unavailable
+        try {
+            val rows = LinkedHashMap<String, MediaAssetRow>()
+            suspend fun collect(criteria: PostgrestFilterBuilder.() -> Unit) {
+                cloudRowsWhere(supabase, userId, criteria).forEach { rows[it.id] = it }
+            }
+            if (!remoteMediaId.isNullOrBlank()) collect { eq("id", remoteMediaId) }
+            if (!clientUploadId.isNullOrBlank()) collect { eq("client_upload_id", clientUploadId) }
+            val localIds = (
+                listOfNotNull(localMediaId?.takeIf { it > 0L }) +
+                    rows.values.mapNotNull { it.localMediaId?.takeIf { id -> id > 0L } }
+                ).distinct()
+            for (chunk in localIds.chunked(LOOKUP_CHUNK_SIZE)) {
+                collect { isIn("local_media_id", chunk) }
+            }
+            IdentityRows.Found(rows.values.toList())
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            DeveloperLogger.error(
+                category = LogCategory.DATABASE,
+                event = "MEDIA_LIBRARY_IDENTITY_LOOKUP_FAILED",
+                message = "Could not read the media's cloud identity; visibility not changed",
+                throwable = error,
+                metadata = mapOf(
+                    "local_media_id" to localMediaId?.toString(),
+                    "cause" to RemoteFailureClassifier.classify(error).name
+                )
+            )
+            IdentityRows.Unavailable
+        }
+    }
+
+    /** The answer the visibility RPC gave for one row. */
+    private sealed interface VisibilityRpcOutcome {
+        /** The function reported a row count (0 or 1) — understood but not required. */
+        data class Counted(val rows: Int) : VisibilityRpcOutcome
+
+        /**
+         * A 2xx response with no row count: the shape the deployed function actually
+         * has, because it is declared `RETURNS void`.
+         */
+        data object Void : VisibilityRpcOutcome
+
+        /** The function raised `media_not_found`: no owned row matched. */
+        data object Missing : VisibilityRpcOutcome
+
+        data object Unauthorized : VisibilityRpcOutcome
+
+        data class Failed(val error: Throwable?) : VisibilityRpcOutcome
+    }
+
+    /**
+     * Applies [hidden] to every row of the identity and reports what actually
+     * happened.
+     *
+     * The decision is made from the row state, not from the RPC's response body.
+     * The deployed `set_media_library_visibility` is declared `RETURNS void`, so it
+     * answers 2xx with a null body while the UPDATE has already run; the previous
+     * implementation demanded an integer row count of exactly 1 from that body and
+     * therefore reported *every* successful hide as a failure — the "could not be
+     * moved to My Drive Trash" message, and the reason the local half of the delete
+     * was skipped. An integer-returning function is still understood if the
+     * database is later aligned with the old contract.
+     */
+    private suspend fun setLibraryVisibility(
+        identity: IdentityRows,
+        hidden: Boolean
+    ): HideMediaResult {
+        val rows = when (identity) {
+            IdentityRows.Unauthorized -> return HideMediaResult.Unauthorized
+            IdentityRows.Unavailable -> return HideMediaResult.Failed
+            is IdentityRows.Found -> identity.rows
+        }
+        if (rows.isEmpty()) return HideMediaResult.NotFound
+        val pending = LibraryVisibilityRules.rowsNeedingChange(rows, hidden)
+        if (pending.isEmpty()) {
+            // Already in the requested state. A repeated delete or restore is a
+            // no-op, not a second MediaStore operation and not an error.
+            DeveloperLogger.info(
+                category = LogCategory.DATABASE,
+                event = if (hidden) "MEDIA_LIBRARY_HIDE_ALREADY_APPLIED" else "MEDIA_LIBRARY_UNHIDE_ALREADY_APPLIED",
+                message = "Library visibility already in the requested state",
+                metadata = mapOf(
+                    "media_count" to rows.size.toString(),
+                    "requested_hidden" to hidden.toString()
+                )
+            )
+            return HideMediaResult.Success
+        }
+        var unauthorized = false
+        var counted = 0
+        var error: Throwable? = null
+        for (row in pending) {
+            when (val outcome = setVisibilityRpc(row.id, hidden)) {
+                is VisibilityRpcOutcome.Counted -> counted += 1
+                VisibilityRpcOutcome.Void, VisibilityRpcOutcome.Missing -> Unit
+                VisibilityRpcOutcome.Unauthorized -> unauthorized = true
+                is VisibilityRpcOutcome.Failed -> error = outcome.error ?: error
+            }
+        }
+        val confirmed = readBackVisibility(pending.map { it.id }, hidden)
+        val metadata = mapOf(
+            "media_count" to rows.size.toString(),
+            "changed_rows" to pending.size.toString(),
+            "requested_hidden" to hidden.toString(),
+            "rpc_row_counts" to counted.toString(),
+            "confirmed_by_read" to confirmed?.toString()
+        )
+        return when {
+            confirmed == true -> {
+                DeveloperLogger.info(
+                    category = LogCategory.DATABASE,
+                    event = if (hidden) "MEDIA_LIBRARY_HIDDEN" else "MEDIA_LIBRARY_UNHIDDEN",
+                    message = if (hidden) {
+                        "Set user_hidden_at for every row of the media; archive, status and deleted_at untouched"
+                    } else {
+                        "Cleared user_hidden_at for every row of the media; archive and status untouched"
+                    },
+                    metadata = metadata
+                )
+                HideMediaResult.Success
+            }
+            // Could not re-read. Only an explicit row count for every row is enough
+            // to claim success; otherwise the caller must retry rather than assume.
+            confirmed == null && error == null && counted == pending.size -> HideMediaResult.Success
+            unauthorized -> HideMediaResult.Unauthorized
+            else -> {
+                DeveloperLogger.error(
+                    category = LogCategory.DATABASE,
+                    event = if (hidden) "MEDIA_LIBRARY_HIDE_FAILED" else "MEDIA_LIBRARY_UNHIDE_FAILED",
+                    message = "Library visibility was not confirmed for every row of the media",
+                    throwable = error,
+                    metadata = metadata
+                )
+                HideMediaResult.Failed
+            }
+        }
+    }
+
+    /**
+     * Re-reads the given rows and reports whether every one of them is in the
+     * requested visibility state, or `null` when the state could not be read.
+     */
+    private suspend fun readBackVisibility(ids: List<String>, hidden: Boolean): Boolean? {
+        if (ids.isEmpty()) return true
+        val supabase = client ?: return true
+        val userId = currentUserId() ?: return null
+        return try {
+            val byId = cloudRowsWhere(supabase, userId) { isIn("id", ids) }.associateBy { it.id }
+            LibraryVisibilityRules.isConfirmed(byId, ids, hidden)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    /** One `set_media_library_visibility` call, for one row. */
+    private suspend fun setVisibilityRpc(
+        remoteMediaId: String,
+        hidden: Boolean
+    ): VisibilityRpcOutcome = withContext(Dispatchers.IO) {
+        val supabase = client ?: return@withContext VisibilityRpcOutcome.Failed(null)
+        // media_assets no longer grants UPDATE on user_hidden_at, so the only
+        // supported way to move an item in or out of Trash is this controlled RPC.
+        // Ownership is re-checked server-side against the caller's JWT (owner or
+        // admin), so a foreign id is reported as missing rather than changed.
+        when (sessionProvider.prepare()) {
+            is PreparedAuth.Available -> Unit
+            PreparedAuth.SignedOut -> return@withContext VisibilityRpcOutcome.Unauthorized
+            PreparedAuth.NetworkError -> return@withContext VisibilityRpcOutcome.Failed(null)
+        }
+        if (remoteMediaId.isBlank()) return@withContext VisibilityRpcOutcome.Missing
+        try {
+            val rpcResult = supabase.postgrest.rpc(
+                function = RPC_SET_LIBRARY_VISIBILITY,
+                parameters = buildJsonObject {
+                    put("p_media_id", remoteMediaId)
+                    put("p_hidden", hidden)
+                }
+            )
+            when (val data = rpcResult.data) {
+                // JsonNull is a JsonPrimitive with no int: a `void` function.
+                is JsonPrimitive -> data.intOrNull
+                    ?.let { VisibilityRpcOutcome.Counted(it) }
+                    ?: VisibilityRpcOutcome.Void
+                else -> VisibilityRpcOutcome.Void
+            }
+        } catch (error: RestException) {
+            // PostgREST surfaces the RPC's P0001 "media_not_found" as a REST error
+            // body. Missing rows and foreign rows are the same signal.
+            if (error.message?.contains("media_not_found", ignoreCase = true) == true) {
+                VisibilityRpcOutcome.Missing
+            } else {
+                VisibilityRpcOutcome.Failed(error)
+            }
+        } catch (error: Exception) {
+            VisibilityRpcOutcome.Failed(error)
+        }
     }
 
     private suspend fun currentUserId(): String? {
@@ -562,99 +798,6 @@ class MediaAssetsRepository(
             else -> null
         }
     }
-
-    private suspend fun updateHiddenAt(remoteMediaId: String, hiddenAt: String?): HideMediaResult =
-        withContext(Dispatchers.IO) {
-            val supabase = client ?: return@withContext HideMediaResult.Failed
-            // media_assets no longer grants UPDATE on user_hidden_at, so the
-            // only supported way to move an item in or out of Trash is this
-            // controlled RPC. Ownership is re-checked server-side against the
-            // caller's JWT (owner, or admin).
-            when (sessionProvider.prepare()) {
-                is PreparedAuth.Available -> Unit
-                PreparedAuth.SignedOut -> return@withContext HideMediaResult.Unauthorized
-                PreparedAuth.NetworkError -> return@withContext HideMediaResult.Failed
-            }
-            if (remoteMediaId.isBlank()) return@withContext HideMediaResult.NotFound
-            try {
-                // The SECURITY DEFINER RPC returns the number of rows actually
-                // updated (0 or 1) and raises "media_not_found" when the id is
-                // missing or belongs to another user. A 2xx with no changed row
-                // is therefore treated as a real failure, never as success.
-                val rpcResult = supabase.postgrest.rpc(
-                    function = RPC_SET_LIBRARY_VISIBILITY,
-                    parameters = buildJsonObject {
-                        put("p_media_id", remoteMediaId)
-                        put("p_hidden", hiddenAt != null)
-                    }
-                )
-                val affectedRows = rpcResult.data
-                    .takeIf { it is kotlinx.serialization.json.JsonPrimitive }
-                    ?.let { (it as kotlinx.serialization.json.JsonPrimitive).jsonPrimitive.intOrNull }
-                if (affectedRows != 1) {
-                    DeveloperLogger.error(
-                        category = LogCategory.DATABASE,
-                        event = "MEDIA_LIBRARY_HIDE_FAILED",
-                        message = "Library visibility RPC affected $affectedRows row(s); expected exactly 1",
-                        metadata = mapOf(
-                            "remote_media_id" to remoteMediaId,
-                            "affected_rows" to affectedRows.toString()
-                        )
-                    )
-                    return@withContext HideMediaResult.Failed
-                }
-                DeveloperLogger.info(
-                    category = LogCategory.DATABASE,
-                    event = if (hiddenAt == null) "MEDIA_LIBRARY_UNHIDDEN" else "MEDIA_LIBRARY_HIDDEN",
-                    message = if (hiddenAt == null) {
-                        "Cleared user_hidden_at via set_media_library_visibility; archive and status untouched"
-                    } else {
-                        "Set user_hidden_at via set_media_library_visibility; archive, status and deleted_at untouched"
-                    },
-                    metadata = mapOf(
-                        "remote_media_id" to remoteMediaId,
-                        "user_hidden_at" to hiddenAt,
-                        "affected_rows" to "1"
-                    )
-                )
-                HideMediaResult.Success
-            } catch (error: RestException) {
-                // PostgREST surfaces the RPC's P0001 "media_not_found" as a
-                // REST error body. Missing rows and foreign rows are the same
-                // signal, so both map to NotFound instead of a silent success.
-                val isMediaNotFound = error.message?.contains("media_not_found", ignoreCase = true) == true
-                if (isMediaNotFound) {
-                    DeveloperLogger.warn(
-                        category = LogCategory.DATABASE,
-                        event = "MEDIA_LIBRARY_NOT_FOUND",
-                        message = "Library visibility RPC matched no owned row (missing or foreign media)",
-                        metadata = mapOf(
-                            "remote_media_id" to remoteMediaId,
-                            "user_hidden_at" to hiddenAt
-                        )
-                    )
-                    HideMediaResult.NotFound
-                } else {
-                    DeveloperLogger.error(
-                        category = LogCategory.DATABASE,
-                        event = "MEDIA_LIBRARY_HIDE_FAILED",
-                        message = "Library visibility RPC failed",
-                        throwable = error,
-                        metadata = mapOf("remote_media_id" to remoteMediaId)
-                    )
-                    HideMediaResult.Failed
-                }
-            } catch (error: Exception) {
-                DeveloperLogger.error(
-                    category = LogCategory.DATABASE,
-                    event = "MEDIA_LIBRARY_HIDE_FAILED",
-                    message = "Failed to set library visibility for media",
-                    throwable = error,
-                    metadata = mapOf("remote_media_id" to remoteMediaId)
-                )
-                HideMediaResult.Failed
-            }
-        }
 
     private fun PostgrestFilterBuilder.applyLibraryVisibility(userId: String) {
         eq("owner_id", userId)

@@ -26,6 +26,7 @@ import com.mydrive.app.data.local.SyncRecord
 import com.mydrive.app.data.local.TelegramSettingsStore
 import com.mydrive.app.data.local.toMediaItem
 import com.mydrive.app.data.media.FullImageLoader
+import com.mydrive.app.data.media.LibraryVisibilityRules
 import com.mydrive.app.data.media.MediaLibraryPaging
 import com.mydrive.app.data.media.MediaPageCursor
 import com.mydrive.app.data.media.MediaSyncCursor
@@ -201,6 +202,8 @@ class MediaRepository(
     private val sessionLock = Any()
     private var lastRefreshAt = 0L
     private val locallyHiddenIds = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+    /** Keeps the pending My Drive-trash retry single-flight across refreshes. */
+    private val cloudTrashRetryInFlight = java.util.concurrent.atomic.AtomicBoolean(false)
     @Volatile
     private var boundUserId: String? = null
     private var overlayRefreshJob: Job? = null
@@ -1012,6 +1015,28 @@ class MediaRepository(
                             hasNextPage = nextPageCursor != null,
                             errorMessage = null
                         )
+                    }
+                }
+            }
+            // Retry the My Drive halves of Move-to-Trash and Restore for media whose
+            // device half already succeeded. Fire-and-forget: the gallery is
+            // published by now, so a network retry must never delay or fail the pass
+            // it is riding on.
+            val hasPendingCloudVisibility =
+                visibilityStore.pendingCloudTrash().isNotEmpty() ||
+                    visibilityStore.pendingCloudRestore().isNotEmpty()
+            if (hasPendingCloudVisibility && cloudTrashRetryInFlight.compareAndSet(false, true)) {
+                scope.launch {
+                    try {
+                        flushPendingCloudTrash()
+                        flushPendingCloudRestore()
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (_: Exception) {
+                        // Nothing to surface here: the ids stay pending and the next
+                        // reconciliation tries again.
+                    } finally {
+                        cloudTrashRetryInFlight.set(false)
                     }
                 }
             }
@@ -1827,10 +1852,18 @@ class MediaRepository(
             presentRemoteIds += entry.remoteMediaId
         }
 
+        // A locally hidden media hides every cloud row that carries its MediaStore
+        // id. Production holds several media_assets rows per local_media_id — the same
+        // photo uploaded again from each successive install — so hiding one row left
+        // siblings that were still READY and not hidden, and those siblings were then
+        // composed straight back into Photos/Albums as an extra tile under a different
+        // id, right after the user deleted the photo.
+        val hiddenMediaStoreIds = LibraryVisibilityRules.hiddenMediaStoreIds(hidden, deviceItems + trashed)
         // MediaStore is only the local-copy index. A backed-up row remains part
         // of My Drive even after another Gallery/File Manager removes its copy.
         for (row in visibleRows) {
             if (!row.isCloudAvailable || row.id in presentRemoteIds) continue
+            if (LibraryVisibilityRules.isSuppressedByLocalHide(row, hiddenMediaStoreIds)) continue
             val cached = cachedByRemoteId[row.id]
             val cloudId = cached?.localId ?: "cloud-${row.id}"
             // The media's OWN folder, remembered from when its local copy was
@@ -2645,7 +2678,30 @@ class MediaRepository(
     suspend fun finalizeTrashRestore(ids: Collection<String>) = withContext(Dispatchers.IO) {
         if (ids.isEmpty()) return@withContext
         val idSet = ids.toSet()
-        ids.forEach { restoreCloudTrash(it) }
+        // Restoring supersedes an unconfirmed trash for the same media.
+        visibilityStore.removePendingCloudTrash(ids)
+        // NotFound means the media has no owned cloud row at all, so the device
+        // restore is the whole operation and there is nothing to retry.
+        val unconfirmed = ids.filter {
+            when (restoreCloudTrash(it)) {
+                HideMediaResult.Success, HideMediaResult.NotFound -> false
+                HideMediaResult.Unauthorized, HideMediaResult.Failed -> true
+            }
+        }
+        if (unconfirmed.isNotEmpty()) {
+            unconfirmed.forEach { visibilityStore.addPendingCloudRestore(it) }
+            DeveloperLogger.warn(
+                category = LogCategory.DATABASE,
+                event = "MEDIA_CLOUD_RESTORE_PENDING",
+                message = "Device restore succeeded; My Drive restore is pending and will be retried",
+                metadata = mapOf(
+                    "phase" to "CLOUD_TRASH",
+                    "local_state" to "LOCAL_ACTIVE",
+                    "cloud_state" to "PENDING",
+                    "count" to unconfirmed.size.toString()
+                )
+            )
+        }
         ids.forEach { visibilityStore.unhideLocal(it) }
         locallyHiddenIds.removeAll(idSet)
         _trashedMedia.update { items -> items.filter { it.id !in idSet } }
@@ -2656,13 +2712,30 @@ class MediaRepository(
     suspend fun finalizePermanentTrashDelete(ids: Collection<String>) = withContext(Dispatchers.IO) {
         if (ids.isEmpty()) return@withContext
         val idSet = ids.toSet()
+        // Permanent deletion ends the lifecycle: no visibility retry may survive it.
+        visibilityStore.removePendingCloudTrash(idSet)
+        visibilityStore.removePendingCloudRestore(idSet)
         locallyHiddenIds.removeAll(idSet)
         _trashedMedia.update { items -> items.filter { it.id !in idSet } }
         publishTrash(_trashedMedia.value)
         refresh(force = true)
     }
 
-    /** Move the cloud-backed record into the existing My Drive hidden/trash lifecycle. */
+    /**
+     * Move the cloud-backed record into the existing My Drive hidden/trash lifecycle.
+     *
+     * The two halves of "Move to Trash" are independent and are treated that way:
+     *
+     *  - the device half (the MediaStore item is already in Android Trash by the
+     *    time this runs) is committed unconditionally, because it is what the app's
+     *    own gallery is composed from. A cloud failure may therefore never leave the
+     *    media sitting in Photos/Albums — the previous implementation only hid it
+     *    locally when the server call reported success, which is why a delete could
+     *    "fail" and still leave the photo on screen everywhere;
+     *  - the cloud half is attempted, and when it is not confirmed the item is
+     *    recorded as pending so the retry survives a process death and is retried by
+     *    the next reconciliation, instead of being reported as a bare failure.
+     */
     suspend fun moveCloudToTrash(
         id: String,
         itemSnapshot: MediaItem? = null
@@ -2672,45 +2745,171 @@ class MediaRepository(
         // Android trash operation cannot lose its remote/local correlation.
         val item = itemSnapshot ?: lookupAnyItem(id)
         val record = syncRepository.records.value[id]
+        val remoteId = item?.remoteMediaId ?: record?.remoteMediaId
+        val localMediaId = item?.mediaStoreId?.takeIf { it > 0L }
+
+        applyLocalTrash(id, remoteId, item)
+
         val result = mediaAssetsRepository.hideMatchingAsset(
-            remoteMediaId = item?.remoteMediaId ?: record?.remoteMediaId,
-            localMediaId = item?.mediaStoreId?.takeIf { it > 0L },
+            remoteMediaId = remoteId,
+            localMediaId = localMediaId,
             clientUploadId = record?.clientUploadId
         )
-        if (result == HideMediaResult.Success) {
-            val remoteId = item?.remoteMediaId ?: record?.remoteMediaId
-            // Keep the local visibility overlay in sync immediately. The next
-            // refresh may still be composing from a cached page, so relying only
-            // on the server response can leave the same cloud copy visible in an
-            // album while the local copy is already in Trash.
-            visibilityStore.hideLocal(id)
-            // Remember the removal now: waiting for a future cold-start scan to
-            // notice would put the trashed item back on screen first.
-            mutateLibrary { items ->
-                items.filterNot { candidate ->
-                    candidate.id == id ||
-                        (!remoteId.isNullOrBlank() && candidate.remoteMediaId == remoteId)
-                }
+        when (result) {
+            HideMediaResult.Success -> {
+                visibilityStore.removePendingCloudTrash(listOf(id))
+                DeveloperLogger.info(
+                    category = LogCategory.DATABASE,
+                    event = "MEDIA_CLOUD_TRASH_CONFIRMED",
+                    message = "My Drive trash confirmed for every cloud row of the media",
+                    localMediaId = id,
+                    clientUploadId = record?.clientUploadId,
+                    metadata = mapOf(
+                        "phase" to "CLOUD_TRASH",
+                        "local_state" to "LOCAL_TRASHED",
+                        "cloud_state" to "HIDDEN",
+                        "media_store_id" to localMediaId?.toString(),
+                        "remote_media_id" to remoteId
+                    )
+                )
+                logThumbnailLifecycle(
+                    operation = "move_to_trash",
+                    mediaId = remoteId.orEmpty(),
+                    result = "KEPT",
+                    reason = "RESTORABLE"
+                )
             }
-            // Trash is reversible, so the persistent thumbnail is deliberately KEPT:
-            // only the permanent-delete lifecycle may purge it. Moving media to
-            // Trash must never make the thumbnail eligible for deletion.
-            logThumbnailLifecycle(
-                operation = "move_to_trash",
-                mediaId = remoteId.orEmpty(),
-                result = "KEPT",
-                reason = "RESTORABLE"
-            )
-            refresh(force = true)
-            val trashedItem = item?.copy(isTrashed = true, hiddenFromLibrary = true)
-            if (trashedItem != null && _trashedMedia.value.none { it.id == id }) {
-                publishTrash(_trashedMedia.value + trashedItem)
+            HideMediaResult.NotFound -> {
+                // No owned cloud row at all: a device-only photo. Nothing to sync,
+                // but clear a marker left by an earlier attempt.
+                visibilityStore.removePendingCloudTrash(listOf(id))
+                DeveloperLogger.info(
+                    category = LogCategory.DATABASE,
+                    event = "MEDIA_CLOUD_TRASH_NOT_APPLICABLE",
+                    message = "Media has no owned cloud row; device trash is the whole operation",
+                    localMediaId = id,
+                    metadata = mapOf(
+                        "phase" to "CLOUD_TRASH",
+                        "local_state" to "LOCAL_TRASHED",
+                        "cloud_state" to "MISSING",
+                        "media_store_id" to localMediaId?.toString()
+                    )
+                )
+            }
+            HideMediaResult.Unauthorized, HideMediaResult.Failed -> {
+                // Persist the partial state: the media stays out of Photos/Albums and
+                // its My Drive trash is retried, rather than claiming the delete
+                // failed or silently pretending the account is in sync.
+                visibilityStore.addPendingCloudTrash(id)
+                DeveloperLogger.warn(
+                    category = LogCategory.DATABASE,
+                    event = "MEDIA_CLOUD_TRASH_PENDING",
+                    message = "Device trash succeeded; My Drive trash is pending and will be retried",
+                    localMediaId = id,
+                    clientUploadId = record?.clientUploadId,
+                    metadata = mapOf(
+                        "phase" to "CLOUD_TRASH",
+                        "local_state" to "LOCAL_TRASHED",
+                        "cloud_state" to "PENDING",
+                        "media_store_id" to localMediaId?.toString(),
+                        "remote_media_id" to remoteId,
+                        "result" to result.toString(),
+                        "retryable" to "true"
+                    )
+                )
             }
         }
+        refresh(force = true)
         when (result) {
             HideMediaResult.Success, HideMediaResult.NotFound -> RemoveFromLibraryResult.Success
             HideMediaResult.Unauthorized -> RemoveFromLibraryResult.Unauthorized
             HideMediaResult.Failed -> RemoveFromLibraryResult.Failed
+        }
+    }
+
+    /**
+     * The device half of Move-to-Trash, committed before the cloud is asked.
+     *
+     * Persisted (not just in-memory) so a cold start cannot resurrect the media: the
+     * persisted hidden set is merged into every composition, and the cloud rows that
+     * carry this media's MediaStore id are skipped by `composeLibrary`.
+     */
+    private fun applyLocalTrash(id: String, remoteId: String?, item: MediaItem?) {
+        visibilityStore.hideLocal(id)
+        // Trashing supersedes an unconfirmed restore: a stale retry must never drag
+        // the media back out of Trash.
+        visibilityStore.removePendingCloudRestore(listOf(id))
+        // Remember the removal immediately: waiting for a later scan to notice would
+        // put the trashed item back on screen first. Both the id and the remote id
+        // are matched, because the composed tile can be keyed by either.
+        mutateLibrary { items ->
+            items.filterNot { candidate ->
+                candidate.id == id ||
+                    (!remoteId.isNullOrBlank() && candidate.remoteMediaId == remoteId)
+            }
+        }
+        val trashedItem = item?.copy(isTrashed = true, hiddenFromLibrary = true)
+        if (trashedItem != null && _trashedMedia.value.none { it.id == id }) {
+            publishTrash(_trashedMedia.value + trashedItem)
+        }
+        DeveloperLogger.info(
+            category = LogCategory.MEDIASTORE,
+            event = "MEDIA_LOCAL_TRASH_COMMITTED",
+            message = "Committed the device half of Move-to-Trash before the cloud call",
+            localMediaId = id,
+            metadata = mapOf(
+                "phase" to "LOCAL_TRASH",
+                "local_state" to "LOCAL_TRASHED",
+                "media_store_id" to item?.mediaStoreId?.toString(),
+                "remote_media_id" to remoteId
+            )
+        )
+    }
+
+    /**
+     * Retries My Drive trash for media whose device half succeeded earlier.
+     *
+     * Called from the reconciliation pass, so a delete that was interrupted between
+     * the two halves (or that failed offline) converges on the next refresh instead
+     * of leaving the device and the account permanently divergent. Single-flight and
+     * idempotent: the server call is only made for ids still recorded as pending,
+     * and a repeated attempt for an already-hidden media succeeds without changing
+     * anything.
+     */
+    suspend fun flushPendingCloudTrash() {
+        val pending = visibilityStore.pendingCloudTrash()
+        if (pending.isEmpty()) return
+        for (id in pending) {
+            val item = lookupAnyItem(id)
+            val record = syncRepository.records.value[id]
+            val remoteId = item?.remoteMediaId ?: record?.remoteMediaId
+            val localMediaId = item?.mediaStoreId?.takeIf { it > 0L }
+            when (
+                mediaAssetsRepository.hideMatchingAsset(
+                    remoteMediaId = remoteId,
+                    localMediaId = localMediaId,
+                    clientUploadId = record?.clientUploadId
+                )
+            ) {
+                HideMediaResult.Success, HideMediaResult.NotFound -> {
+                    visibilityStore.removePendingCloudTrash(listOf(id))
+                    DeveloperLogger.info(
+                        category = LogCategory.DATABASE,
+                        event = "MEDIA_CLOUD_TRASH_RETRIED",
+                        message = "Pending My Drive trash completed during reconciliation",
+                        localMediaId = id,
+                        clientUploadId = record?.clientUploadId,
+                        metadata = mapOf(
+                            "phase" to "RECONCILIATION",
+                            "cloud_state" to "HIDDEN",
+                            "media_store_id" to localMediaId?.toString(),
+                            "remote_media_id" to remoteId
+                        )
+                    )
+                }
+                HideMediaResult.Unauthorized -> return
+                HideMediaResult.Failed -> Unit
+            }
         }
     }
 
@@ -2895,14 +3094,49 @@ class MediaRepository(
             append("serverPurgeResult=").append(result)
         }
 
-    private suspend fun restoreCloudTrash(id: String) {
+    /** The cloud half of Restore; the caller decides what an unconfirmed result means. */
+    private suspend fun restoreCloudTrash(id: String): HideMediaResult {
         val item = lookupAnyItem(id)
         val record = syncRepository.records.value[id]
-        mediaAssetsRepository.unhideMatchingAsset(
+        return mediaAssetsRepository.unhideMatchingAsset(
             remoteMediaId = item?.remoteMediaId ?: record?.remoteMediaId,
             localMediaId = item?.mediaStoreId?.takeIf { it > 0L },
             clientUploadId = record?.clientUploadId
         )
+    }
+
+    /**
+     * Retries the My Drive half of Restore for media whose device half succeeded.
+     *
+     * Mirrors [flushPendingCloudTrash], and is driven by the same reconciliation
+     * pass, so a restore performed offline converges instead of leaving the account
+     * with the media still hidden there.
+     */
+    suspend fun flushPendingCloudRestore() {
+        val pending = visibilityStore.pendingCloudRestore()
+        if (pending.isEmpty()) return
+        for (id in pending) {
+            // The user may have trashed it again in the meantime; that action clears
+            // this entry, so an id still here is genuinely awaiting a restore.
+            if (visibilityStore.isHidden(id)) {
+                visibilityStore.removePendingCloudRestore(listOf(id))
+                continue
+            }
+            when (restoreCloudTrash(id)) {
+                HideMediaResult.Success, HideMediaResult.NotFound -> {
+                    visibilityStore.removePendingCloudRestore(listOf(id))
+                    DeveloperLogger.info(
+                        category = LogCategory.DATABASE,
+                        event = "MEDIA_CLOUD_RESTORE_RETRIED",
+                        message = "Pending My Drive restore completed during reconciliation",
+                        localMediaId = id,
+                        metadata = mapOf("phase" to "RECONCILIATION", "cloud_state" to "VISIBLE")
+                    )
+                }
+                HideMediaResult.Unauthorized -> return
+                HideMediaResult.Failed -> Unit
+            }
+        }
     }
 
     private fun publishTrash(items: List<MediaItem>) {

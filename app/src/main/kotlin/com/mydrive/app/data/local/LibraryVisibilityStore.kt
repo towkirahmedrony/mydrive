@@ -120,6 +120,82 @@ class LibraryVisibilityStore(context: Context) {
         writeCloud(entries)
     }
 
+    /**
+     * Local ids whose Move-to-Trash succeeded on the device but whose My Drive
+     * (cloud) half was not confirmed.
+     *
+     * The two halves are allowed to fail independently. The local trash is
+     * authoritative for this device's gallery and is never rolled back, so the
+     * media disappears from Photos/Albums immediately while the cloud operation
+     * waits; this set is what makes it wait *durably*, including across a process
+     * death between the two halves.
+     */
+    @Synchronized
+    fun pendingCloudTrash(): Set<String> {
+        val userId = ownerUserId ?: return emptySet()
+        return preferences.getStringSet(UserStoreKeys.pendingCloudTrash(userId), emptySet())
+            .orEmpty()
+            .toSet()
+    }
+
+    @Synchronized
+    fun addPendingCloudTrash(localId: String) {
+        if (localId.isBlank()) return
+        val userId = ownerUserId ?: return
+        val next = HashSet(pendingCloudTrash())
+        if (next.add(localId)) {
+            preferences.edit().putStringSet(UserStoreKeys.pendingCloudTrash(userId), next).apply()
+        }
+    }
+
+    @Synchronized
+    fun removePendingCloudTrash(localIds: Collection<String>) {
+        if (localIds.isEmpty()) return
+        val userId = ownerUserId ?: return
+        val current = pendingCloudTrash()
+        val next = current - localIds.toSet()
+        if (next.size != current.size) {
+            preferences.edit().putStringSet(UserStoreKeys.pendingCloudTrash(userId), next).apply()
+        }
+    }
+
+    /**
+     * The mirror of [pendingCloudTrash] for restores: local ids whose device-side
+     * restore succeeded but whose My Drive (cloud) half was not confirmed.
+     *
+     * Kept separately from the trash set because the two are opposites. An action
+     * clears the other's pending entry, so a photo restored and then trashed again
+     * can never be dragged back by a stale retry.
+     */
+    @Synchronized
+    fun pendingCloudRestore(): Set<String> {
+        val userId = ownerUserId ?: return emptySet()
+        return preferences.getStringSet(UserStoreKeys.pendingCloudRestore(userId), emptySet())
+            .orEmpty()
+            .toSet()
+    }
+
+    @Synchronized
+    fun addPendingCloudRestore(localId: String) {
+        if (localId.isBlank()) return
+        val userId = ownerUserId ?: return
+        val next = HashSet(pendingCloudRestore())
+        if (next.add(localId)) {
+            preferences.edit().putStringSet(UserStoreKeys.pendingCloudRestore(userId), next).apply()
+        }
+    }
+
+    @Synchronized
+    fun removePendingCloudRestore(localIds: Collection<String>) {
+        if (localIds.isEmpty()) return
+        val userId = ownerUserId ?: return
+        val current = pendingCloudRestore()
+        val next = current - localIds.toSet()
+        if (next.size != current.size) {
+            preferences.edit().putStringSet(UserStoreKeys.pendingCloudRestore(userId), next).apply()
+        }
+    }
+
     @Synchronized
     fun clearSession() {
         ownerUserId = null

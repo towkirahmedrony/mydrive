@@ -15,4 +15,20 @@ object UserStoreKeys {
      * for another account would either skip or repeat that account's changes.
      */
     fun mediaSyncCursor(userId: String) = "media_sync_cursor/$userId"
+
+    /**
+     * Local ids whose device-side Move-to-Trash succeeded but whose My Drive
+     * (cloud) half has not been confirmed yet.
+     *
+     * Account-scoped like the other per-user keys, and persisted rather than
+     * in-memory so an app killed between the two halves resumes the cloud half
+     * instead of leaving the device and the account permanently divergent.
+     */
+    fun pendingCloudTrash(userId: String) = "pending_cloud_trash/$userId"
+
+    /**
+     * Local ids whose device-side Restore succeeded but whose My Drive (cloud) half
+     * has not been confirmed yet. The mirror of [pendingCloudTrash].
+     */
+    fun pendingCloudRestore(userId: String) = "pending_cloud_restore/$userId"
 }
