@@ -562,16 +562,25 @@ class BackupRepository(
         fileSize = queueEntity?.fileSize ?: 0L
     )
 
-    /** `READY` / `PENDING` / `MISSING`, or `UNKNOWN` when nothing was proven. */
+    /**
+     * The cloud state as the Developer Console should show it:
+     * `READY`, `CHANGED` (a finished cloud row exists for this identity but its
+     * size no longer matches the local file), `PENDING` (a row exists that never
+     * finished), `MISSING`, or `UNKNOWN` when nothing was proven.
+     */
     private fun cloudStateLabel(
         lookup: CloudBackupLookup,
         candidate: CloudBackupCandidate
     ): String = when (lookup) {
         CloudBackupLookup.Unavailable -> "UNKNOWN"
-        is CloudBackupLookup.Checked -> when {
-            lookup.rowFor(candidate) != null -> "READY"
-            lookup.hasAnyRecordFor(candidate) -> "PENDING"
-            else -> "MISSING"
+        is CloudBackupLookup.Checked -> {
+            val status = lookup.statusOf(candidate)
+            when {
+                lookup.rowFor(candidate) != null -> "READY"
+                status == null -> "MISSING"
+                status == "READY" -> "CHANGED"
+                else -> "PENDING"
+            }
         }
     }
 
