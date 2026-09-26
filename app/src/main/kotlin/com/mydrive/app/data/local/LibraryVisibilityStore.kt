@@ -19,8 +19,15 @@ data class CloudLibraryEntry(
     val height: Int = 0,
     val durationMillis: Long? = null,
     val capturedAtMillis: Long = 0L,
-    val albumId: String = "mydrive",
-    val albumName: String = "My Drive",
+    /**
+     * The media's own device folder. Defaults to ungrouped, never to the storage
+     * provider: this entry is the album metadata a cloud-only item keeps after its
+     * local copy is gone, and "My Drive" is where the media is stored, not a
+     * folder the user put it in. Entries written by an earlier build carry
+     * `"mydrive"` and are mapped to the ungrouped album on read.
+     */
+    val albumId: String = "",
+    val albumName: String = "",
     val type: String = "PHOTO",
     /**
      * The ORIGINAL's cloud URL, kept apart from [thumbnailUrl] (the persistent

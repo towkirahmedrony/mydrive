@@ -24,10 +24,8 @@ import com.mydrive.app.data.local.MediaCatalogStore
 import com.mydrive.app.data.local.MediaSyncCursorStore
 import com.mydrive.app.data.local.SyncRecord
 import com.mydrive.app.data.local.TelegramSettingsStore
-import com.mydrive.app.data.local.toAlbumStats
 import com.mydrive.app.data.local.toMediaItem
 import com.mydrive.app.data.media.FullImageLoader
-import com.mydrive.app.data.media.MediaAlbumStats
 import com.mydrive.app.data.media.MediaLibraryPaging
 import com.mydrive.app.data.media.MediaPageCursor
 import com.mydrive.app.data.media.MediaSyncCursor
@@ -47,9 +45,13 @@ import com.mydrive.app.data.model.AlbumFolder
 import com.mydrive.app.data.model.BackupOverview
 import com.mydrive.app.data.model.BackupPreferences
 import com.mydrive.app.data.model.BackupState
+import com.mydrive.app.data.model.MediaAlbumRef
 import com.mydrive.app.data.model.MediaItem
 import com.mydrive.app.data.model.MediaLoadState
 import com.mydrive.app.data.model.MediaType
+import com.mydrive.app.data.model.UNGROUPED_ALBUM_NAME
+import com.mydrive.app.data.model.resolveAlbum
+import com.mydrive.app.data.model.resolveAlbums
 import com.mydrive.app.data.model.StorageSummary
 import com.mydrive.app.data.model.SyncSummary
 import com.mydrive.app.data.model.TelegramSettings
@@ -204,7 +206,6 @@ class MediaRepository(
     private var catalogEpoch = 0
     private var nextPageCursor: MediaPageCursor? = null
     private var loadedRemoteRows: List<MediaAssetRow> = emptyList()
-    private var cloudAlbumStats: MediaAlbumStats = MediaAlbumStats()
 
     /**
      * The account whose persisted catalog is already in memory. Guarantees the
@@ -326,8 +327,6 @@ class MediaRepository(
         catalogEpoch += 1
         nextPageCursor = null
         loadedRemoteRows = emptyList()
-        cloudAlbumStats = MediaAlbumStats()
-        persistedAlbumStats = null
         cloudSnapshotFallback = null
         _media.value = emptyList()
         _deviceMedia.value = emptyList()
@@ -364,34 +363,41 @@ class MediaRepository(
         if (catalogHydratedOwner == userId) return
         catalogHydratedOwner = userId
         val rows = mediaCatalogStore.snapshotBlocking(userId)
-        val meta = if (rows.isNullOrEmpty()) null else mediaCatalogStore.metaBlocking(userId)
         synchronized(sessionLock) {
             if (boundUserId != userId) return
             // The cloud snapshot is only a synchronization seed and a failure
             // fallback; it is never the gallery.
             seedCloudRowsFromCache()
             if (rows.isNullOrEmpty()) {
+                // `rows == null` means "not known yet" (the blocking read was
+                // refused because this bind is running on the main thread) — never
+                // "empty". Keep restoring and finish off-thread; a loading state
+                // here would be a spinner over a gallery that may well exist.
+                if (rows == null) {
+                    _loadState.update { it.copy(isRestoring = true) }
+                    scope.launch { hydrateLocalCatalogAsync(userId) }
+                    return
+                }
                 // Nothing persisted for this account yet: a first launch, a fresh
                 // install, or an install upgrading from a build without the
                 // catalog. This is the one case where a loading state is honest —
                 // publishing the cloud-only subset here would be the very
                 // "partial dataset, then a different dataset" flicker.
                 _loadState.update {
-                    it.copy(isLoading = true, isRefreshing = false, isLoadingMore = false, errorMessage = null)
+                    it.copy(
+                        isLoading = true,
+                        isRestoring = false,
+                        isRefreshing = false,
+                        isLoadingMore = false,
+                        errorMessage = null
+                    )
                 }
-                // `rows == null` means "not known yet" (the blocking read was
-                // refused, e.g. on the main thread) — never "empty".
-                if (rows == null) scope.launch { hydrateLocalCatalogAsync(userId) }
                 return
             }
-            cloudAlbumStats = meta.toAlbumStats()
-            // What was just rendered is exactly what is on disk, so nothing is
-            // dirty. The next reconciliation diffs against these rows normally.
-            persistedAlbumStats = cloudAlbumStats
-            _media.value = rows.map { it.toMediaItem(favorites.ids.value) }
-            _albums.value = buildAlbums(_media.value, cloudAlbumStats)
+            _media.value = rows.map { it.toMediaItem(favorites.ids.value) }.resolveAlbums()
+            _albums.value = buildAlbums(_media.value)
             updateStorage(_media.value)
-            _loadState.update { it.copy(isLoading = false, errorMessage = null) }
+            _loadState.update { it.copy(isLoading = false, isRestoring = false, errorMessage = null) }
             DeveloperLogger.info(
                 category = LogCategory.DATABASE,
                 event = "CATALOG_HYDRATED",
@@ -411,16 +417,30 @@ class MediaRepository(
      */
     private suspend fun hydrateLocalCatalogAsync(userId: String) {
         val rows = mediaCatalogStore.snapshot(userId)
-        val meta = if (rows.isEmpty()) null else mediaCatalogStore.meta(userId)
         synchronized(sessionLock) {
-            if (boundUserId != userId || _media.value.isNotEmpty()) return
-            if (rows.isEmpty()) return
-            cloudAlbumStats = meta.toAlbumStats()
-            persistedAlbumStats = cloudAlbumStats
-            _media.value = rows.map { it.toMediaItem(favorites.ids.value) }
-            _albums.value = buildAlbums(_media.value, cloudAlbumStats)
+            if (boundUserId != userId || _media.value.isNotEmpty()) {
+                _loadState.update { it.copy(isRestoring = false) }
+                return
+            }
+            if (rows.isEmpty()) {
+                // Genuinely nothing cached for this account. Whether that deserves
+                // a loading state is now the refresh's decision, not ours.
+                _loadState.update { it.copy(isRestoring = false) }
+                return
+            }
+            _media.value = rows.map { it.toMediaItem(favorites.ids.value) }.resolveAlbums()
+            _albums.value = buildAlbums(_media.value)
             updateStorage(_media.value)
-            _loadState.update { it.copy(isLoading = false, errorMessage = null) }
+            _loadState.update { it.copy(isLoading = false, isRestoring = false, errorMessage = null) }
+            DeveloperLogger.info(
+                category = LogCategory.DATABASE,
+                event = "CATALOG_HYDRATED",
+                message = "Gallery restored from the local catalog before any scan or network pass",
+                metadata = mapOf(
+                    "restored_media" to _media.value.size.toString(),
+                    "albums" to _albums.value.size.toString()
+                )
+            )
         }
     }
 
@@ -433,10 +453,13 @@ class MediaRepository(
      */
     private fun publishLibrary(items: List<MediaItem>) {
         val previous = _media.value
-        _media.value = items
-        _albums.value = buildAlbums(items, cloudAlbumStats)
-        updateStorage(items)
-        scheduleCatalogPersist(previous, items)
+        // Album identity is resolved once, here, for every path that reaches the
+        // UI: composition, the local-overlay pass and the cloud-only fallback.
+        val resolved = items.resolveAlbums()
+        _media.value = resolved
+        _albums.value = buildAlbums(resolved)
+        updateStorage(resolved)
+        scheduleCatalogPersist(previous, resolved)
     }
 
     /**
@@ -448,11 +471,9 @@ class MediaRepository(
      */
     private fun scheduleCatalogPersist(previous: List<MediaItem>, next: List<MediaItem>) {
         val owner = boundUserId?.takeIf { it.isNotBlank() } ?: return
-        val rowsChanged = !MediaCatalogReconciler.diff(owner, previous, next).isEmpty
-        val statsChanged = cloudAlbumStats != persistedAlbumStats
-        if (!rowsChanged && !statsChanged) {
-            // Neither the rendered library nor the album numbers moved: there is
-            // nothing to write, so no coroutine is started at all.
+        if (MediaCatalogReconciler.diff(owner, previous, next).isEmpty) {
+            // The rendered library did not change: nothing to write, and no
+            // coroutine is started at all.
             return
         }
         catalogDirty = true
@@ -465,17 +486,13 @@ class MediaRepository(
                     catalogDirty = false
                     val snapshotPrevious = pendingCatalogPrevious
                     val snapshotNext = pendingCatalogNext
-                    val snapshotStats = cloudAlbumStats
                     if (boundUserId != owner) return@withLock
                     runCatching {
                         mediaCatalogStore.save(
                             ownerUserId = owner,
                             previous = snapshotPrevious,
-                            next = snapshotNext,
-                            albumStats = snapshotStats
+                            next = snapshotNext
                         )
-                    }.onSuccess {
-                        persistedAlbumStats = snapshotStats
                     }.onFailure { error ->
                         // A cache write failure is not a gallery failure: the screen
                         // keeps the content it already has.
@@ -504,12 +521,7 @@ class MediaRepository(
     @Volatile
     private var cloudSnapshotFallback: List<MediaItem>? = null
 
-    /**
-     * The album numbers as they are on disk, so a write happens when they move and
-     * does not happen when they have not.
-     */
-    @Volatile
-    private var persistedAlbumStats: MediaAlbumStats? = null
+
 
     /**
      * Seeds the in-memory cloud rows from the persisted per-account cloud snapshot.
@@ -564,7 +576,7 @@ class MediaRepository(
         val fallback = cloudSnapshotFallback
         if (fallback.isNullOrEmpty()) return false
         _media.value = fallback
-        _albums.value = buildAlbums(fallback, cloudAlbumStats)
+        _albums.value = buildAlbums(fallback)
         updateStorage(fallback)
         DeveloperLogger.info(
             category = LogCategory.DATABASE,
@@ -710,7 +722,11 @@ class MediaRepository(
                 // kept so a failed refresh leaves pagination exactly as it was.
                 catalogEpoch += 1
             }
-            val showSpinner = !localOverlayOnly && _media.value.isEmpty()
+            // A blocking loading state is only honest when there is genuinely
+            // nothing to show: not while the persisted gallery is still being read
+            // off disk, and not while content is on screen.
+            val showSpinner = !localOverlayOnly && _media.value.isEmpty() &&
+                !_loadState.value.isRestoring
             _loadState.update {
                 it.copy(
                     isLoading = showSpinner,
@@ -948,7 +964,10 @@ class MediaRepository(
         records: Map<String, SyncRecord>,
         now: Long
     ) {
-        val replacing = _media.value.isNotEmpty()
+        // "Replacing" means the user already has something on screen — content, or
+        // a catalog still being restored from disk. Both make a full-screen loading
+        // state wrong.
+        val replacing = _media.value.isNotEmpty() || _loadState.value.isRestoring
         _loadState.update {
             it.copy(
                 isLoading = !replacing,
@@ -960,21 +979,10 @@ class MediaRepository(
         val epoch = catalogEpoch
         try {
             val page = mediaAssetsRepository.loadOwnerAssetsPage()
-            // null means the aggregation could not be read; an actual empty
-            // result is MediaAlbumStats() with zero counts. Only the latter may
-            // replace the known cloud-only stats.
-            val albumStats = try {
-                mediaAssetsRepository.loadCloudAlbumStats()
-            } catch (cancelled: CancellationException) {
-                throw cancelled
-            } catch (_: Exception) {
-                null
-            }
             synchronized(sessionLock) {
                 if (!sessionStillCurrent(session, ownerId) || epoch != catalogEpoch) return
                 loadedRemoteRows = page.rows
                 nextPageCursor = page.nextCursor
-                if (albumStats != null) cloudAlbumStats = albumStats
                 // The newest `updated_at` that was actually read and processed
                 // becomes this account's synchronization position. It is written
                 // here — after the page and its processing succeeded — and only
@@ -1188,7 +1196,7 @@ class MediaRepository(
 
     private fun initialLoadState(): MediaLoadState {
         val access = permissions.access()
-        return MediaLoadState(accessGranted = access == MediaAccess.GRANTED, accessPartial = access == MediaAccess.PARTIAL, needsPermission = access == MediaAccess.NEEDS_REQUEST, permissionDenied = access == MediaAccess.DENIED, isLoading = true)
+        return MediaLoadState(accessGranted = access == MediaAccess.GRANTED, accessPartial = access == MediaAccess.PARTIAL, needsPermission = access == MediaAccess.NEEDS_REQUEST, permissionDenied = access == MediaAccess.DENIED, isLoading = true, isRestoring = true)
     }
 
     private fun applyAccessState() {
@@ -1483,47 +1491,38 @@ class MediaRepository(
         }
     }
 
-    private fun buildAlbums(
-        items: List<MediaItem>,
-        cloudStats: MediaAlbumStats = cloudAlbumStats
-    ): List<AlbumFolder> {
-        val grouped = items.groupBy { it.albumId }.map { (albumId, albumItems) ->
-            val newest = albumItems.maxByOrNull { it.capturedAtMillis }
-            // The cover keeps its cloud fallback so a device URI whose MediaStore
-            // row disappeared does not blank out the album; the stored delivery
-            // URL is also what the resolver rewrites to a small Cloudinary
-            // derivative instead of downloading a full-size original.
-            val cover = AlbumCoverResolver.select(albumItems)
-            val count = if (albumId == "mydrive") {
-                maxOf(albumItems.size, cloudStats.cloudOnlyCount)
-            } else {
-                albumItems.size
+    /**
+     * Groups the library into the user's own folders.
+     *
+     * There is deliberately no "cloud" folder and no synthetic album of any kind:
+     * an album is a device folder, and the only entries here are folders that at
+     * least one item actually belongs to. A photo backed up to My Drive is still
+     * a Camera photo, and cloud-only media is filed under the folder it originally
+     * came from — see [resolveAlbum].
+     */
+    private fun buildAlbums(items: List<MediaItem>): List<AlbumFolder> {
+        return items
+            .groupBy { resolveAlbum(it.albumId, it.albumName).id }
+            .map { (albumId, albumItems) ->
+                val newest = albumItems.maxByOrNull { it.capturedAtMillis }
+                // The cover keeps its cloud fallback so a device URI whose MediaStore
+                // row disappeared does not blank out the album; the stored delivery
+                // URL is also what the resolver rewrites to a small Cloudinary
+                // derivative instead of downloading a full-size original.
+                val cover = AlbumCoverResolver.select(albumItems)
+                AlbumFolder(
+                    id = albumId,
+                    name = newest?.let { resolveAlbum(it.albumId, it.albumName).name }
+                        ?: UNGROUPED_ALBUM_NAME,
+                    coverSeed = cover?.seed ?: 0,
+                    coverType = cover?.type ?: MediaType.PHOTO,
+                    mediaCount = albumItems.size,
+                    coverUri = cover?.uri.orEmpty(),
+                    coverPreviewUri = cover?.previewUri,
+                    coverRemoteMediaId = cover?.remoteMediaId
+                )
             }
-            AlbumFolder(
-                id = albumId,
-                name = newest?.albumName?.ifBlank { "Other" } ?: "Other",
-                coverSeed = cover?.seed ?: 0,
-                coverType = cover?.type ?: MediaType.PHOTO,
-                mediaCount = count,
-                coverUri = cover?.uri.orEmpty(),
-                coverPreviewUri = cover?.previewUri,
-                coverRemoteMediaId = cover?.remoteMediaId
-            )
-        }.toMutableList()
-        if (cloudStats.cloudOnlyCount > 0 && grouped.none { it.id == "mydrive" }) {
-            val cover = cloudStats.cover
-            val preview = cover?.cloudinarySourceUrl.orEmpty()
-            grouped += AlbumFolder(
-                id = "mydrive",
-                name = "My Drive",
-                coverSeed = cover?.id.hashCode(),
-                coverType = if (cover?.mimeType?.startsWith("video/") == true) MediaType.VIDEO else MediaType.PHOTO,
-                mediaCount = cloudStats.cloudOnlyCount,
-                coverUri = preview,
-                coverRemoteMediaId = cover?.id
-            )
-        }
-        return grouped.sortedByDescending { it.mediaCount }
+            .sortedByDescending { it.mediaCount }
     }
 
     private fun updateStorage(items: List<MediaItem>) {
@@ -1682,8 +1681,13 @@ class MediaRepository(
             if (!row.isCloudAvailable || row.id in presentRemoteIds) continue
             val cached = cachedByRemoteId[row.id]
             val cloudId = cached?.localId ?: "cloud-${row.id}"
-            library += row.toCloudOnlyMediaItem(cloudId, favoriteIds)
-            rememberCloudFromRow(row, cloudId)
+            // The media's OWN folder, remembered from when its local copy was
+            // still indexable. The storage provider is not a folder, so a row
+            // whose original folder is unknown is ungrouped rather than filed
+            // under "My Drive".
+            val album = resolveAlbum(cached?.albumId, cached?.albumName)
+            library += row.toCloudOnlyMediaItem(cloudId, favoriteIds, album)
+            rememberCloudFromRow(row, cloudId, album)
             presentRemoteIds += row.id
         }
         return library
@@ -1820,7 +1824,8 @@ class MediaRepository(
 
     private fun com.mydrive.app.data.remote.dto.MediaAssetRow.toCloudOnlyMediaItem(
         stableId: String,
-        favoriteIds: Set<String>
+        favoriteIds: Set<String>,
+        album: MediaAlbumRef
     ): MediaItem {
         val mediaType = if (mimeType?.startsWith("video/") == true) MediaType.VIDEO else MediaType.PHOTO
         // The persistent thumbnail drives the tile; the original drives full
@@ -1853,8 +1858,10 @@ class MediaRepository(
             remoteMediaId = id,
             thumbnailUrl = preview,
             originLocal = false,
-            albumId = "mydrive",
-            albumName = "My Drive",
+            // Cloud storage is where this media lives, not somewhere the user put
+            // it: `device` records the source, the album stays the real folder.
+            albumId = album.id,
+            albumName = album.name,
             originalUrl = original
         )
     }
@@ -1864,6 +1871,9 @@ class MediaRepository(
         val record = syncRepository.records.value[id]
         val remoteId = item.remoteMediaId ?: record?.remoteMediaId.orEmpty()
         if (remoteId.isBlank()) return
+        // Remember the folder, never the storage provider: this entry is the only
+        // album metadata a cloud-only item will have once the local copy is gone.
+        val resolved = resolveAlbum(item.albumId, item.albumName)
         val preview = item.thumbnailUrl
             ?: record?.cloudinarySecureUrl
             ?: item.uri.takeIf { it.startsWith("http") }
@@ -1885,8 +1895,8 @@ class MediaRepository(
                 height = item.height,
                 durationMillis = item.durationMillis,
                 capturedAtMillis = item.capturedAtMillis,
-                albumId = item.albumId,
-                albumName = item.albumName,
+                albumId = resolved.albumId,
+                albumName = resolved.albumName,
                 type = item.type.name
             )
         )
@@ -1924,7 +1934,8 @@ class MediaRepository(
 
     private fun rememberCloudFromRow(
         row: com.mydrive.app.data.remote.dto.MediaAssetRow,
-        stableId: String
+        stableId: String,
+        album: MediaAlbumRef
     ) {
         if (!row.isCloudAvailable) return
         val original = row.originalCloudUrl
@@ -1947,8 +1958,11 @@ class MediaRepository(
                 height = row.height ?: 0,
                 durationMillis = row.durationMs,
                 capturedAtMillis = captured,
-                albumId = "mydrive",
-                albumName = "My Drive",
+                // Only ever the media's real folder. Writing the provider here is
+                // what used to make every cloud-only item claim a "My Drive" album;
+                // an unknown folder is remembered as ungrouped instead.
+                albumId = album.id,
+                albumName = album.name,
                 type = mediaType.name
             )
         )
@@ -3112,6 +3126,6 @@ class MediaRepository(
         try { context.contentResolver.query(uri, projection, null, null, null)?.use { cursor -> if (cursor.moveToFirst()) { val idx = cursor.getColumnIndex(MediaStore.MediaColumns.DATA); if (idx >= 0) cursor.getString(idx) else null } else null } } catch (_: Exception) { null }
     }
 
-    private fun rebuildAlbums() { _albums.value = buildAlbums(_media.value, cloudAlbumStats) }
+    private fun rebuildAlbums() { _albums.value = buildAlbums(_media.value) }
 
 }

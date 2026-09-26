@@ -26,6 +26,7 @@ import com.mydrive.app.data.backup.AutomaticBackupCoordinator
 import com.mydrive.app.data.backup.BackupDiscoveryReason
 import com.mydrive.app.data.worker.BackupDiscoveryScheduler
 import com.mydrive.app.data.worker.UploadWorkScheduler
+import com.mydrive.app.data.local.LastAccountProfileStore
 import com.mydrive.app.data.local.LibraryVisibilityStore
 import com.mydrive.app.data.local.MediaCatalogStore
 import com.mydrive.app.data.local.MediaSyncCursorStore
@@ -192,6 +193,9 @@ class MyDriveApp : Application() {
             sessionProvider = sessionProvider,
             deviceIdStore = DeviceIdStore(this),
             network = networkMonitor,
+            // Lets a launch render the last known account's gallery from local
+            // state instead of waiting on session and profile round trips.
+            lastProfileStore = LastAccountProfileStore(this),
             scope = applicationScope,
             onSignedOut = accountSessionCoordinator::onSignedOut,
             onAuthenticated = accountSessionCoordinator::onAuthenticated

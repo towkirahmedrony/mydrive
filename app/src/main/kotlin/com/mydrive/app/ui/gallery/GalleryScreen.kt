@@ -162,7 +162,10 @@ fun GalleryScreen(
         )
 
         when {
-            state.isLoading && !state.hasMedia -> {
+            // Existing content, or a catalog still being restored, always wins over
+            // a loading state. Only a launch with genuinely nothing to show may
+            // block the gallery behind a skeleton.
+            state.isLoading && !state.hasMedia && !state.isRestoring -> {
                 MediaGrid(
                     groups = emptyList(),
                     onMediaClick = onMediaClick,

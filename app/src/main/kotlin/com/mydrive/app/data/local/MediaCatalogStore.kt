@@ -5,13 +5,10 @@ import androidx.room.Dao
 import androidx.room.Entity
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
-import androidx.room.PrimaryKey
 import androidx.room.Query
-import com.mydrive.app.data.media.MediaAlbumStats
 import com.mydrive.app.data.model.BackupState
 import com.mydrive.app.data.model.MediaItem
 import com.mydrive.app.data.model.MediaType
-import com.mydrive.app.data.remote.dto.MediaAssetRow
 
 /**
  * One rendered row of the local gallery catalog.
@@ -22,6 +19,9 @@ import com.mydrive.app.data.remote.dto.MediaAssetRow
  * stays authoritative for the cloud; this table only remembers what the
  * composition produced, so a cold start can draw the gallery from disk before
  * any scan, network request or reconciliation runs.
+ *
+ * Nothing about the *provider* is stored as album identity: [albumId] is always
+ * an item's real device folder (or the ungrouped album), never "My Drive".
  *
  * It is deliberately part of the app's existing Room database
  * ([UploadQueueDatabase]) rather than a second database, and it is scoped by
@@ -69,22 +69,6 @@ data class MediaCatalogEntity(
     val errorMessage: String? = null
 )
 
-/**
- * The album-level numbers the composition needed that do not live on a row:
- * how many cloud-only media the account has in total, and the cover of the
- * synthetic "My Drive" folder. Persisting them keeps the first frame after a
- * cold start identical to the last frame before it.
- */
-@Entity(tableName = "media_catalog_meta")
-data class MediaCatalogMetaEntity(
-    @PrimaryKey val ownerUserId: String,
-    val cloudOnlyCount: Int = 0,
-    val coverMediaId: String? = null,
-    val coverMimeType: String? = null,
-    val coverSourceUrl: String? = null,
-    val updatedAt: Long = 0L
-)
-
 @Dao
 interface MediaCatalogDao {
 
@@ -95,12 +79,6 @@ interface MediaCatalogDao {
     @Query("SELECT * FROM media_catalog WHERE ownerUserId = :ownerUserId ORDER BY capturedAtMillis DESC, mediaId ASC")
     suspend fun snapshot(ownerUserId: String): List<MediaCatalogEntity>
 
-    @Query("SELECT * FROM media_catalog_meta WHERE ownerUserId = :ownerUserId LIMIT 1")
-    fun metaNow(ownerUserId: String): MediaCatalogMetaEntity?
-
-    @Query("SELECT * FROM media_catalog_meta WHERE ownerUserId = :ownerUserId LIMIT 1")
-    suspend fun meta(ownerUserId: String): MediaCatalogMetaEntity?
-
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsertAll(rows: List<MediaCatalogEntity>)
 
@@ -109,9 +87,6 @@ interface MediaCatalogDao {
 
     @Query("DELETE FROM media_catalog WHERE ownerUserId = :ownerUserId")
     suspend fun deleteFor(ownerUserId: String)
-
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun putMeta(meta: MediaCatalogMetaEntity)
 }
 
 /**
@@ -175,20 +150,9 @@ class MediaCatalogStore(private val dao: MediaCatalogDao) {
         return runCatching { dao.snapshotNow(owner) }.getOrElse { null }
     }
 
-    fun metaBlocking(ownerUserId: String): MediaCatalogMetaEntity? {
-        val owner = ownerUserId.takeIf { it.isNotBlank() } ?: return null
-        if (Looper.myLooper() == Looper.getMainLooper()) return null
-        return runCatching { dao.metaNow(owner) }.getOrElse { null }
-    }
-
     suspend fun snapshot(ownerUserId: String): List<MediaCatalogEntity> {
         val owner = ownerUserId.takeIf { it.isNotBlank() } ?: return emptyList()
         return runCatching { dao.snapshot(owner) }.getOrDefault(emptyList())
-    }
-
-    suspend fun meta(ownerUserId: String): MediaCatalogMetaEntity? {
-        val owner = ownerUserId.takeIf { it.isNotBlank() } ?: return null
-        return runCatching { dao.meta(owner) }.getOrElse { null }
     }
 
     /**
@@ -200,14 +164,12 @@ class MediaCatalogStore(private val dao: MediaCatalogDao) {
     suspend fun save(
         ownerUserId: String,
         previous: List<MediaItem>,
-        next: List<MediaItem>,
-        albumStats: MediaAlbumStats
+        next: List<MediaItem>
     ): Boolean {
         val owner = ownerUserId.takeIf { it.isNotBlank() } ?: return false
         val diff = MediaCatalogReconciler.diff(owner, previous, next)
         if (diff.upserts.isNotEmpty()) dao.upsertAll(diff.upserts)
         if (diff.removedIds.isNotEmpty()) dao.deleteByIds(owner, diff.removedIds)
-        dao.putMeta(albumStats.toMetaEntity(owner))
         return !diff.isEmpty
     }
 
@@ -302,29 +264,3 @@ fun MediaCatalogEntity.toMediaItem(favoriteIds: Set<String> = emptySet()): Media
     cloudBackedUp = cloudBackedUp
 )
 
-internal fun MediaAlbumStats.toMetaEntity(ownerUserId: String): MediaCatalogMetaEntity =
-    MediaCatalogMetaEntity(
-        ownerUserId = ownerUserId,
-        cloudOnlyCount = cloudOnlyCount,
-        coverMediaId = cover?.id,
-        coverMimeType = cover?.mimeType,
-        coverSourceUrl = cover?.cloudinarySourceUrl,
-        updatedAt = System.currentTimeMillis()
-    )
-
-internal fun MediaCatalogMetaEntity?.toAlbumStats(): MediaAlbumStats {
-    if (this == null) return MediaAlbumStats()
-    val coverId = coverMediaId
-    return MediaAlbumStats(
-        cloudOnlyCount = cloudOnlyCount,
-        cover = if (coverId.isNullOrBlank()) {
-            null
-        } else {
-            MediaAssetRow(
-                id = coverId,
-                mimeType = coverMimeType,
-                storageUrl = coverSourceUrl
-            )
-        }
-    )
-}

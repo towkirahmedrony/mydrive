@@ -87,11 +87,6 @@ data class MediaSyncPage(
     val hasNextPage: Boolean
 )
 
-data class MediaAlbumStats(
-    val cloudOnlyCount: Int = 0,
-    val cover: MediaAssetRow? = null
-)
-
 object MediaLibraryPaging {
     const val PAGE_SIZE = 80
 

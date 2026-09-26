@@ -7,6 +7,7 @@ import com.mydrive.app.data.auth.AuthenticatedSessionProvider
 import com.mydrive.app.data.auth.PreparedAuth
 import com.mydrive.app.data.local.DeviceIdStore
 import com.mydrive.app.data.local.DeviceInfoFactory
+import com.mydrive.app.data.local.LastAccountProfileStore
 import com.mydrive.app.data.remote.NetworkMonitor
 import com.mydrive.app.data.remote.SupabaseConfig
 import com.mydrive.app.debug.DeveloperLogger
@@ -45,6 +46,7 @@ class AuthRepository(
     private val sessionProvider: AuthenticatedSessionProvider,
     private val deviceIdStore: DeviceIdStore,
     private val network: NetworkMonitor,
+    private val lastProfileStore: LastAccountProfileStore,
     private val scope: CoroutineScope,
     private val onSignedOut: (previousUserId: String?) -> Unit = {},
     private val onAuthenticated: (userId: String) -> Unit = {}
@@ -61,17 +63,56 @@ class AuthRepository(
     private var watcherJob: Job? = null
     private var pendingFullName: String? = null
 
+    /**
+     * The account whose gallery is already on screen from local state, before
+     * Supabase has confirmed anything. Non-null means the media catalog has been
+     * bound and hydrated and the UI is showing it.
+     */
+    @Volatile
+    private var localSessionUserId: String? = null
+
     init {
+        restoreLastKnownAccount()
         restoreSession()
         watchSession()
+    }
+
+    /**
+     * Binds and renders the last known account before the network is consulted.
+     *
+     * This is the difference between a Gallery and a dashboard: the persisted
+     * media catalog is only useful if we know whose it is, and waiting for
+     * Supabase to say so meant every launch paid for `awaitInitialization`, a
+     * possible refresh retry, and a `profiles` round trip before a single tile
+     * could be drawn. [onAuthenticated] binds the account and hydrates the
+     * catalog synchronously, so the first Photos/Albums frame is real content.
+     *
+     * [restoreSession] then confirms it. If the stored session is gone the state
+     * drops to [AuthState.Unauthenticated] and the cached identity is discarded;
+     * if it belongs to a different account the gallery is re-bound to the new one.
+     */
+    private fun restoreLastKnownAccount() {
+        if (!SupabaseConfig.isConfigured || client == null) return
+        val cached = lastProfileStore.read() ?: return
+        if (cached.isSuspended) return
+        localSessionUserId = cached.id
+        onAuthenticated(cached.id)
+        _state.value = AuthState.Authenticated(cached)
+        DeveloperLogger.info(
+            category = LogCategory.AUTH,
+            event = "LOCAL_SESSION_RESTORED",
+            message = "Rendered the last known account from local state; confirming the session in the background",
+            metadata = mapOf("user_id" to SecretRedactor.maskUserId(cached.id).orEmpty())
+        )
     }
 
     fun restoreSession() {
         sessionJob?.cancel()
         sessionJob = scope.launch {
-            _state.value = AuthState.Loading
+            // Only a launch with nothing to show may present a loading state.
+            if (localSessionUserId == null) _state.value = AuthState.Loading
             if (!SupabaseConfig.isConfigured || client == null) {
-                _state.value = AuthState.Unauthenticated
+                publishUnauthenticated()
                 return@launch
             }
             try {
@@ -94,20 +135,60 @@ class AuthRepository(
                             message = "Session restore hit refresh failure",
                             metadata = mapOf("error_source" to "supabase_client")
                         )
+                        if (localSessionUserId != null &&
+                            resolved.cause is RefreshFailureCause.NetworkError
+                        ) {
+                            // The stored session is intact and the device is simply
+                            // offline. Signing the user out of a gallery that is
+                            // already rendering from local state would be a
+                            // regression, so the gallery stays and the session is
+                            // re-checked on the next foreground.
+                            DeveloperLogger.info(
+                                category = LogCategory.AUTH,
+                                event = "SESSION_RESTORE_DEFERRED_OFFLINE",
+                                message = "Token refresh needs the network; keeping the local gallery visible",
+                                metadata = mapOf("user_id" to SecretRedactor.maskUserId(localSessionUserId).orEmpty())
+                            )
+                            return@launch
+                        }
                         if (shouldClearRefreshFailure(resolved.cause)) {
                             runCatching { client.auth.signOut() }
                         }
-                        _state.value = AuthState.Unauthenticated
+                        publishUnauthenticated()
                     }
-                    else -> _state.value = AuthState.Unauthenticated
+                    else -> publishUnauthenticated()
                 }
             } catch (error: Throwable) {
                 if (AuthErrorMapper.isSessionExpired(error)) {
                     runCatching { client.auth.signOut() }
+                    publishUnauthenticated()
+                } else if (localSessionUserId != null) {
+                    // A transient failure — offline, a backend hiccup — must not
+                    // take away a gallery that is already on screen.
+                    DeveloperLogger.warn(
+                        category = LogCategory.AUTH,
+                        event = "SESSION_CONFIRM_FAILED_KEEPING_LOCAL",
+                        message = "Could not confirm the stored session; keeping the local gallery visible",
+                        throwable = error,
+                        metadata = mapOf("failure" to error.javaClass.simpleName)
+                    )
+                } else {
+                    publishUnauthenticated()
                 }
-                _state.value = AuthState.Unauthenticated
             }
         }
+    }
+
+    /**
+     * The session is genuinely gone: stop rendering this account and forget it.
+     *
+     * Clearing the cached identity is what keeps a signed-out device from
+     * optimistically restoring the previous user's gallery on the next launch.
+     */
+    private fun publishUnauthenticated() {
+        localSessionUserId = null
+        lastProfileStore.clear()
+        _state.value = AuthState.Unauthenticated
     }
 
     suspend fun login(email: String, password: String): Result<Unit> {
@@ -225,12 +306,12 @@ class AuthRepository(
             client?.auth?.signOut()
             Unit
         }.also {
-            _state.value = AuthState.Unauthenticated
+            publishUnauthenticated()
         }.fold(
             onSuccess = { Result.success(Unit) },
             onFailure = {
                 runCatching { client?.auth?.clearSession() }
-                _state.value = AuthState.Unauthenticated
+                publishUnauthenticated()
                 Result.success(Unit)
             }
         )
@@ -276,7 +357,10 @@ class AuthRepository(
                             registeredDeviceId = null
                             lastSeenAtMillis = 0L
                             onSignedOut(previousUserId)
-                            _state.value = AuthState.Unauthenticated
+                            // Forget the cached identity too, otherwise the next
+                            // launch would optimistically restore an account whose
+                            // session the backend just said is gone.
+                            publishUnauthenticated()
                             DeveloperLogger.info(
                                 category = LogCategory.AUTH,
                                 event = "SIGNED_OUT",
@@ -295,6 +379,7 @@ class AuthRepository(
     }
 
     private suspend fun completeAuthenticatedSession(pendingFullName: String?) {
+        var refreshProfileAfterLock = false
         sessionMutex.withLock {
             val supabase = client ?: throw IllegalStateException(notConfiguredMessage())
             runCatching { supabase.auth.awaitInitialization() }
@@ -309,7 +394,14 @@ class AuthRepository(
                 onSignedOut(previousUserId)
             }
             val already = previousUserId == userId
-            if (already) return
+            if (already) {
+                // This account is bound and its gallery is already being drawn from
+                // the persisted catalog. Only the display profile can be stale, so
+                // it is refreshed behind the UI — a `profiles` round trip must never
+                // sit between the user and their photos.
+                refreshProfileAfterLock = true
+                return@withLock
+            }
             val profile = try {
                 loadProfile(userId, pendingFullName)
             } catch (error: CancellationException) {
@@ -333,9 +425,15 @@ class AuthRepository(
             }
             onAuthenticated(userId)
             if (profile.isSuspended) {
+                // A suspended account is never cached: it must pass the real check
+                // on every launch instead of being restored optimistically.
+                lastProfileStore.clear()
+                localSessionUserId = null
                 _state.value = AuthState.Suspended(profile)
                 return
             }
+            localSessionUserId = userId
+            lastProfileStore.save(profile)
             _state.value = AuthState.Authenticated(profile)
             DeveloperLogger.info(
                 category = LogCategory.AUTH,
@@ -348,9 +446,64 @@ class AuthRepository(
                 )
             )
         }
+        if (refreshProfileAfterLock) {
+            // Deliberately outside the session lock: a stale display name must not
+            // make a sign-in wait behind a slow `profiles` request.
+            val userId = localSessionUserId ?: return
+            refreshProfileBehindGallery(userId, pendingFullName)
+            return
+        }
         scope.launch {
             runCatching { touchDevice(force = true) }
         }
+    }
+
+    /**
+     * Re-reads the display profile for an account whose gallery is already on
+     * screen.
+     *
+     * Failure is expected and harmless: offline, or a backend hiccup, leaves the
+     * last known profile and the visible gallery exactly as they are. Only a
+     * genuinely expired session propagates, because that has to sign the user out.
+     */
+    private suspend fun refreshProfileBehindGallery(userId: String, pendingFullName: String?) {
+        val profile = try {
+            loadProfile(userId, pendingFullName)
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Throwable) {
+            if (AuthErrorMapper.isSessionExpired(error)) throw error
+            DeveloperLogger.warn(
+                category = LogCategory.AUTH,
+                event = "PROFILE_REFRESH_DEFERRED",
+                message = "Kept the last known profile; the gallery stays visible",
+                throwable = error,
+                metadata = mapOf("user_id" to SecretRedactor.maskUserId(userId).orEmpty())
+            )
+            return
+        }
+        if (localSessionUserId != userId) return
+        if (profile.isSuspended) {
+            lastProfileStore.clear()
+            localSessionUserId = null
+            _state.value = AuthState.Suspended(profile)
+            return
+        }
+        lastProfileStore.save(profile)
+        // Unchanged profiles compare equal, so StateFlow emits nothing and the UI
+        // is not disturbed.
+        _state.value = AuthState.Authenticated(profile)
+        DeveloperLogger.info(
+            category = LogCategory.AUTH,
+            event = "SIGNED_IN",
+            message = "Authenticated session established",
+            metadata = mapOf(
+                "user_id" to SecretRedactor.maskUserId(userId).orEmpty(),
+                "role" to profile.role,
+                "status" to profile.status
+            )
+        )
+        scope.launch { runCatching { touchDevice(force = true) } }
     }
 
     private suspend fun loadProfile(userId: String, pendingFullName: String?): AuthUserProfile {

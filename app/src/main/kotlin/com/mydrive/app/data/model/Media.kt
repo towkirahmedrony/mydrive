@@ -160,6 +160,65 @@ data class TrashSummary(
     val totalSizeBytes: Long = 0L
 )
 
+/**
+ * The album of media whose real device folder is not known.
+ *
+ * It is the existing fallback this app already used for a blank album name, kept
+ * under a stable id so it can also be opened and filtered.
+ */
+const val UNGROUPED_ALBUM_ID = "ungrouped"
+const val UNGROUPED_ALBUM_NAME = "Other"
+
+/**
+ * Album ids that name the *storage provider* rather than a folder.
+ *
+ * MediaStore bucket ids are numeric (`BUCKET_ID.toString()`) or, when a bucket
+ * has no id, the bucket's display name — so the literal `"mydrive"` can only come
+ * from an app that wrote it, never from a device folder. Cloud backup state and
+ * the storage provider are therefore never a source of album identity; this is
+ * the single place that decision is made, and every consumer funnels through it.
+ */
+private const val STORAGE_PROVIDER_ALBUM_ID = "mydrive"
+
+/**
+ * Where a media item belongs, as the user's own folders define it.
+ *
+ * An album is a *place on a device* — Camera, Screenshots, WhatsApp Images,
+ * Downloads. A photo that happens to be backed up to My Drive is still a Camera
+ * photo, and one that only exists in the cloud belongs in whatever folder it came
+ * from. Only when that folder is genuinely unknown does it become [UNGROUPED_ALBUM_ID].
+ */
+data class MediaAlbumRef(val id: String, val name: String)
+
+/**
+ * Resolves the album of a media item, discarding storage-provider identity.
+ *
+ * Falls back to the ungrouped album — never to a folder named after the provider,
+ * because a provider is not somewhere the user put their photos.
+ */
+fun resolveAlbum(albumId: String?, albumName: String?): MediaAlbumRef {
+    val id = albumId?.trim().orEmpty()
+    if (id.isBlank() || id.equals(STORAGE_PROVIDER_ALBUM_ID, ignoreCase = true)) {
+        return MediaAlbumRef(UNGROUPED_ALBUM_ID, UNGROUPED_ALBUM_NAME)
+    }
+    return MediaAlbumRef(id, albumName?.trim().orEmpty().ifBlank { UNGROUPED_ALBUM_NAME })
+}
+
+/** This item, filed under an album the UI is allowed to show. */
+fun MediaItem.withAlbum(album: MediaAlbumRef): MediaItem =
+    if (albumId == album.id && albumName == album.name) this
+    else copy(albumId = album.id, albumName = album.name)
+
+/**
+ * Files every item under its resolved album.
+ *
+ * Applied at the boundary where a library becomes the UI's state, so no path into
+ * the gallery — composition, disk restore, cloud-only composition — can leave an
+ * item claiming a storage provider as its folder.
+ */
+fun List<MediaItem>.resolveAlbums(): List<MediaItem> =
+    map { it.withAlbum(resolveAlbum(it.albumId, it.albumName)) }
+
 data class AlbumFolder(
     val id: String,
     val name: String,
@@ -247,6 +306,16 @@ data class MediaLoadState(
     val needsPermission: Boolean = true,
     val permissionDenied: Boolean = false,
     val isLoading: Boolean = false,
+    /**
+     * The persisted gallery is being read for the first time in this process.
+     *
+     * Distinct from [isLoading] on purpose: it is not yet known whether there is
+     * anything to show, and the answer arrives from local disk in milliseconds. A
+     * full-screen loading state is wrong for that window — it would be the
+     * spinner this app must not show over a gallery it already has — so the UI
+     * draws its content area instead.
+     */
+    val isRestoring: Boolean = false,
     val isRefreshing: Boolean = false,
     val isLoadingMore: Boolean = false,
     val hasNextPage: Boolean = false,

@@ -2,7 +2,6 @@ package com.mydrive.app.data.repository
 
 import com.mydrive.app.data.auth.AuthenticatedSessionProvider
 import com.mydrive.app.data.auth.PreparedAuth
-import com.mydrive.app.data.media.MediaAlbumStats
 import com.mydrive.app.data.media.MediaAssetsPage
 import com.mydrive.app.data.media.MediaLibraryPaging
 import com.mydrive.app.data.media.MediaPageCursor
@@ -22,7 +21,6 @@ import io.github.jan.supabase.SupabaseClient
 import io.github.jan.supabase.postgrest.from
 import io.github.jan.supabase.postgrest.postgrest
 import io.github.jan.supabase.postgrest.query.Columns
-import io.github.jan.supabase.postgrest.query.Count
 import io.github.jan.supabase.postgrest.query.Order
 import io.github.jan.supabase.postgrest.query.filter.FilterOperator
 import io.github.jan.supabase.exceptions.RestException
@@ -236,63 +234,6 @@ class MediaAssetsRepository(
                 )
             }
             throw error
-        }
-    }
-
-    /**
-     * Cloud-only aggregate for the "My Drive" album.
-     *
-     * `null` means "the aggregation could not be read", which is deliberately
-     * different from [MediaAlbumStats] with zero counts ("the account has no
-     * cloud-only media"): the caller keeps its last known aggregation on null, so
-     * a failed request cannot make Drive-only media disappear from Albums.
-     */
-    suspend fun loadCloudAlbumStats(): MediaAlbumStats? = withContext(Dispatchers.IO) {
-        val supabase = client ?: return@withContext null
-        val userId = currentUserId() ?: return@withContext null
-        try {
-            val cloudOnly = remote {
-                supabase.from(TABLE)
-                    .select(columns = Columns.list("id")) {
-                        filter {
-                            applyLibraryVisibility(userId)
-                            applyAvailability()
-                            exact("local_media_id", null)
-                        }
-                        count(Count.EXACT)
-                        limit(1)
-                    }
-                    .countOrNull()?.toInt() ?: 0
-            }
-            val cover = remote {
-                supabase.from(TABLE)
-                    .select(columns = Columns.raw(MediaLibraryPaging.LISTING_COLUMNS)) {
-                        filter {
-                            applyLibraryVisibility(userId)
-                            applyAvailability()
-                            exact("local_media_id", null)
-                        }
-                        order(column = "created_at", order = Order.DESCENDING)
-                        order(column = "id", order = Order.DESCENDING)
-                        limit(1)
-                    }
-                    .decodeList<MediaAssetRow>()
-                    .firstOrNull()
-            }
-            MediaAlbumStats(cloudOnlyCount = cloudOnly, cover = cover)
-        } catch (cancelled: CancellationException) {
-            // Cancellation is not a failure of the backend and must never be
-            // converted into a state update.
-            throw cancelled
-        } catch (error: Exception) {
-            DeveloperLogger.warn(
-                category = LogCategory.DATABASE,
-                event = "MEDIA_ASSETS_ALBUM_STATS_FAILED",
-                message = "Failed to load media_assets album aggregation; keeping the last known stats",
-                throwable = error,
-                metadata = mapOf("failure" to RemoteFailureClassifier.classify(error).name)
-            )
-            null
         }
     }
 

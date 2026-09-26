@@ -19,6 +19,8 @@ data class AlbumsUiState(
     val query: String,
     val albums: List<AlbumFolder>,
     val isLoading: Boolean = false,
+    /** The persisted folders are being read; nothing is known yet, so no spinner. */
+    val isRestoring: Boolean = false,
     /** A background reconciliation is running while the folders stay on screen. */
     val isRefreshing: Boolean = false,
     val needsPermission: Boolean = false,
@@ -52,6 +54,7 @@ class AlbumsViewModel(
             query = currentQuery,
             albums = filtered,
             isLoading = load.isLoading,
+            isRestoring = load.isRestoring,
             isRefreshing = load.isRefreshing,
             needsPermission = load.needsPermission,
             permissionDenied = load.permissionDenied,
@@ -67,6 +70,7 @@ class AlbumsViewModel(
             query = "",
             albums = emptyList(),
             isLoading = repository.loadState.value.isLoading,
+            isRestoring = repository.loadState.value.isRestoring,
             isRefreshing = repository.loadState.value.isRefreshing,
             needsPermission = repository.loadState.value.needsPermission,
             permissionDenied = repository.loadState.value.permissionDenied,

@@ -66,10 +66,9 @@ interface UploadQueueDao {
     entities = [
         UploadQueueEntity::class,
         VaultItemEntity::class,
-        MediaCatalogEntity::class,
-        MediaCatalogMetaEntity::class
+        MediaCatalogEntity::class
     ],
-    version = 6,
+    version = 7,
     exportSchema = false
 )
 abstract class UploadQueueDatabase : RoomDatabase() {
@@ -229,12 +228,26 @@ abstract class UploadQueueDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * Drops the album-statistics side table.
+         *
+         * It existed only to feed a synthetic "My Drive" album from an aggregate of
+         * cloud-only media. Album identity now comes from an item's own device
+         * folder, so the aggregate has no consumer. Additive-only in every other
+         * respect: the gallery catalog and the upload queue keep their rows.
+         */
+        private val MIGRATION_6_7 = object : Migration(6, 7) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL("DROP TABLE IF EXISTS `media_catalog_meta`")
+            }
+        }
+
         fun get(context: Context): UploadQueueDatabase = instance ?: synchronized(this) {
             instance ?: Room.databaseBuilder(
                 context.applicationContext,
                 UploadQueueDatabase::class.java,
                 "upload_queue.db"
-            ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
+            ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7)
                 .build()
                 .also { instance = it }
         }

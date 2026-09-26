@@ -193,7 +193,11 @@ fun AlbumsScreen(
             verticalArrangement = Arrangement.spacedBy(Spacing.sm)
         ) {
             when {
-                state.isLoading && state.albums.isEmpty() && state.query.isBlank() -> {
+                // Folders that are still being restored from disk are not "no
+                // albums"; they are simply not known yet, and are not worth a
+                // blocking placeholder.
+                state.isLoading && !state.isRestoring &&
+                    state.albums.isEmpty() && state.query.isBlank() -> {
                     item(key = "empty-loading", span = { GridItemSpan(maxLineSpan) }, contentType = "empty") {
                         EmptyState(
                             title = "No albums found",
