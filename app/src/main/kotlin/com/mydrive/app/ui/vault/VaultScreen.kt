@@ -57,6 +57,7 @@ import androidx.compose.ui.unit.dp
 import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.mydrive.app.data.local.VaultItemEntity
 import com.mydrive.app.data.vault.VaultBiometricGate
@@ -97,6 +98,7 @@ fun VaultScreen(
     val context = LocalContext.current
     val activity = remember(context) { context.findActivity() }
     val fragmentActivity = remember(context) { context.findFragmentActivity() }
+    val lifecycleOwner = LocalLifecycleOwner.current
     val colors = MaterialTheme.colorScheme
 
     val launchBiometric: () -> Unit = {
@@ -115,7 +117,7 @@ fun VaultScreen(
     // biometric prompt is (re)offered over the neutral locked screen. Deliberately
     // tied to the Activity lifecycle, not the navigation back stack entry, so moving
     // between the vault and its settings screen does not lock the session.
-    DisposableEffect(activity, viewModel) {
+    DisposableEffect(lifecycleOwner, viewModel) {
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
                 Lifecycle.Event.ON_RESUME -> {
@@ -126,8 +128,8 @@ fun VaultScreen(
                 else -> Unit
             }
         }
-        activity?.lifecycle?.addObserver(observer)
-        onDispose { activity?.lifecycle?.removeObserver(observer) }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
     // Initial entry: the activity is already resumed, so the observer above will not
