@@ -260,9 +260,10 @@ class MediaViewerViewModel(
 
     private fun finalizeDelete(itemId: String, knownIndex: Int? = null) {
         viewModelScope.launch {
+            val itemSnapshot = uiState.value.items.firstOrNull { it.id == itemId }
             val currentIndex = knownIndex ?: uiState.value.items.indexOfFirst { it.id == itemId }
             if (repository.finalizeLocalDelete(itemId)) {
-                when (repository.moveCloudToTrash(itemId)) {
+                when (repository.moveCloudToTrash(itemId, itemSnapshot)) {
                         RemoveFromLibraryResult.Success -> completeRemoval(
                             itemId = itemId,
                             currentIndex = currentIndex,

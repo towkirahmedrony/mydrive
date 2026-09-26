@@ -2236,8 +2236,14 @@ class MediaRepository(
     }
 
     /** Move the cloud-backed record into the existing My Drive hidden/trash lifecycle. */
-    suspend fun moveCloudToTrash(id: String): RemoveFromLibraryResult = withContext(Dispatchers.IO) {
-        val item = lookupAnyItem(id)
+    suspend fun moveCloudToTrash(
+        id: String,
+        itemSnapshot: MediaItem? = null
+    ): RemoveFromLibraryResult = withContext(Dispatchers.IO) {
+        // Local MediaStore trash finalization refreshes the catalog before this
+        // cloud mutation runs. Keep the pre-refresh identity so a successful
+        // Android trash operation cannot lose its remote/local correlation.
+        val item = itemSnapshot ?: lookupAnyItem(id)
         val record = syncRepository.records.value[id]
         val result = mediaAssetsRepository.hideMatchingAsset(
             remoteMediaId = item?.remoteMediaId ?: record?.remoteMediaId,
