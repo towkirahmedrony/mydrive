@@ -22,6 +22,19 @@ data class SyncRecord(
     val ownerUserId: String? = null
 )
 
+/**
+ * The cloud identity of media that `media_assets` already holds.
+ *
+ * Adopted from the server rather than generated locally: a queue record created for
+ * media that is already in the cloud must not be given a brand-new upload identity,
+ * or finalizing it would look like a different upload and could duplicate the
+ * record.
+ */
+data class CloudBackedUpIdentity(
+    val remoteMediaId: String,
+    val clientUploadId: String? = null
+)
+
 class SyncStateStore(context: Context) {
 
     private val preferences = context.applicationContext

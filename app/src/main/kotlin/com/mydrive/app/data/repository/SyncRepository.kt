@@ -1,5 +1,6 @@
 package com.mydrive.app.data.repository
 
+import com.mydrive.app.data.local.CloudBackedUpIdentity
 import com.mydrive.app.data.local.SyncRecord
 import com.mydrive.app.data.local.SyncStateStore
 import com.mydrive.app.data.local.UploadQueueDatabase
@@ -126,6 +127,91 @@ class SyncRepository(
             upsertOwned(entity.copy(uploadState = "UPLOADED", cloudinaryAssetId = assetId, cloudinaryPublicId = publicId, cloudinarySecureUrl = secureUrl, clientUploadId = next[id]?.clientUploadId.orEmpty(), updatedAt = System.currentTimeMillis()))
         }
         commit(next)
+    }
+
+    /**
+     * Records media that `media_assets` already holds as COMPLETED, without any
+     * upload.
+     *
+     * This is the local half of the metadata reconciliation: the server was asked
+     * whether it already owns these items, and it said yes. The only work left is
+     * to adopt that identity locally — never to re-upload, and never to mint a new
+     * `client_upload_id` for media the cloud already has.
+     *
+     * Idempotent by construction: a record that is already COMPLETED for the same
+     * remote id is left exactly as it is, so repeated reconciliations write nothing
+     * and log nothing.
+     *
+     * @return the number of records that actually changed.
+     */
+    @Synchronized
+    fun adoptCloudBackedUp(identities: Map<String, CloudBackedUpIdentity>): Int {
+        val owner = ownerUserId ?: return 0
+        if (identities.isEmpty()) return 0
+        val now = System.currentTimeMillis()
+        val next = HashMap(_records.value)
+        val adopted = LinkedHashMap<String, String>()
+        for ((id, identity) in identities) {
+            if (identity.remoteMediaId.isBlank()) continue
+            val previous = next[id]
+            val previousOwner = previous?.ownerUserId
+            if (!previousOwner.isNullOrBlank() && previousOwner != owner) continue
+            val unchanged = previous?.state?.toBackupState() == BackupState.COMPLETED &&
+                previous.remoteMediaId == identity.remoteMediaId
+            if (unchanged) continue
+            next[id] = SyncRecord(
+                state = BackupState.COMPLETED.name,
+                errorMessage = null,
+                // Queue order is history, not a scheduling hint for a finished item.
+                queuedAtMillis = previous?.queuedAtMillis ?: 0L,
+                updatedAtMillis = now,
+                cloudinaryAssetId = previous?.cloudinaryAssetId,
+                cloudinaryPublicId = previous?.cloudinaryPublicId,
+                cloudinarySecureUrl = previous?.cloudinarySecureUrl,
+                cloudinaryVersion = previous?.cloudinaryVersion,
+                cloudinaryFormat = previous?.cloudinaryFormat,
+                cloudinaryResourceType = previous?.cloudinaryResourceType,
+                clientUploadId = previous?.clientUploadId?.takeIf { it.isNotBlank() }
+                    ?: identity.clientUploadId,
+                remoteMediaId = identity.remoteMediaId,
+                ownerUserId = previousOwner ?: owner
+            )
+            adopted[id] = identity.remoteMediaId
+        }
+        if (adopted.isEmpty()) return 0
+        runBlocking(Dispatchers.IO) {
+            adopted.forEach { (id, remoteMediaId) ->
+                val record = next[id] ?: return@forEach
+                val entity = dao.find(id)
+                if (entity == null) {
+                    // No queue row (the media is not in this device's MediaStore
+                    // scan). The record alone is enough: `reconcileMedia` re-creates
+                    // the row from it as COMPLETED next time the media is seen.
+                    return@forEach
+                }
+                upsertOwned(
+                    entity.copy(
+                        uploadState = "COMPLETED",
+                        lastError = null,
+                        clientUploadId = record.clientUploadId.orEmpty(),
+                        finalizedMediaId = remoteMediaId,
+                        ownerUserId = entity.ownerUserId ?: owner,
+                        updatedAt = now
+                    )
+                )
+            }
+        }
+        commit(next)
+        DeveloperLogger.info(
+            category = LogCategory.ROOM,
+            event = "CLOUD_BACKED_UP_RECONCILED",
+            message = "Media already present in the cloud was reconciled without uploading",
+            metadata = mapOf(
+                "count" to adopted.size.toString(),
+                "source" to "media_assets"
+            )
+        )
+        return adopted.size
     }
 
     @Synchronized

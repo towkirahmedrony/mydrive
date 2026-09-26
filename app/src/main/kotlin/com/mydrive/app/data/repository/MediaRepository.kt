@@ -41,6 +41,7 @@ import com.mydrive.app.data.remote.dto.MediaAssetRow
 import com.mydrive.app.data.mock.MockMediaData
 import com.mydrive.app.data.model.ActivityEvent
 import com.mydrive.app.data.media.AlbumCoverResolver
+import com.mydrive.app.data.media.classifyMediaSource
 import com.mydrive.app.data.model.AlbumFolder
 import com.mydrive.app.data.model.BackupOverview
 import com.mydrive.app.data.model.BackupPreferences
@@ -649,6 +650,35 @@ class MediaRepository(
 
     fun mediaById(id: String): MediaItem? =
         _media.value.firstOrNull { it.id == id } ?: _deviceMedia.value.firstOrNull { it.id == id }
+
+    /**
+     * The locally-sourceable representation of [id], for upload only.
+     *
+     * Deliberately separate from [mediaById]: the composed library also carries
+     * cloud-only representations whose `uri` is the Cloudinary delivery URL, which
+     * is the right thing to *display* and the wrong thing to upload. Only a local
+     * `originLocal` item with a local URI can be the body of an upload, so anything
+     * else is reported as "no local source" rather than being handed to
+     * `ContentResolver`.
+     */
+    fun localUploadSourceById(id: String): MediaItem? {
+        fun locallySourceable(item: MediaItem): Boolean =
+            item.originLocal && classifyMediaSource(item.uri, originLocal = true).isLocalUploadSource
+        return _deviceMedia.value.firstOrNull { it.id == id }?.takeIf(::locallySourceable)
+            ?: _media.value.firstOrNull { it.id == id }?.takeIf(::locallySourceable)
+    }
+
+    /**
+     * Drops persisted cloud-index entries for [localIds].
+     *
+     * Used when the server stops confirming a media the local index believed was in
+     * the cloud. Without this the stale belief would keep the media out of every
+     * future backup run, so a genuinely removed cloud copy could never be restored.
+     */
+    fun forgetCloudIndexEntries(localIds: Set<String>) {
+        if (localIds.isEmpty()) return
+        localIds.forEach { visibilityStore.removeCloud(it) }
+    }
     fun trashedMediaById(id: String): MediaItem? = _trashedMedia.value.firstOrNull { it.id == id }
     fun albumById(id: String): AlbumFolder? = _albums.value.firstOrNull { it.id == id }
     fun albums(): List<AlbumFolder> = _albums.value
@@ -1080,7 +1110,12 @@ class MediaRepository(
             val page = mediaAssetsRepository.loadOwnerAssetsPage()
             synchronized(sessionLock) {
                 if (!sessionStillCurrent(session, ownerId) || epoch != catalogEpoch) return
-                loadedRemoteRows = page.rows
+                // The freshly read page is authoritative for the newest rows, but a
+                // row that is simply not on page 1 has not stopped existing. Keeping
+                // the previously known rows is what stops one launch from shrinking
+                // the whole cloud catalog to 80 records — which is exactly how
+                // already-uploaded media used to end up looking un-backed-up.
+                loadedRemoteRows = MediaLibraryPaging.mergeRows(page.rows, loadedRemoteRows)
                 nextPageCursor = page.nextCursor
                 // The newest `updated_at` that was actually read and processed
                 // becomes this account's synchronization position. It is written
@@ -1703,6 +1738,22 @@ class MediaRepository(
                 ?: item.remoteMediaId?.let { byRemoteId[it] }
                 ?: record?.clientUploadId?.let { byClientUpload[it] }
 
+        /**
+         * Whether the persisted cloud index proves this media is in the cloud even
+         * though the loaded page does not carry its row.
+         *
+         * Consulted last so live rows always win, but consulted at all because one
+         * page cannot speak for the whole catalog: with ~1.1k cloud rows and an
+         * 80-row page, a launch that replaced its cloud evidence with page 1 marked
+         * everything outside that page as un-backed-up and uploaded it again.
+         *
+         * Entries are only ever written from an available `READY` row and are
+         * dropped when the row is hidden, trashed away or tombstoned, and backup
+         * discovery additionally prunes any entry the server stops confirming.
+         */
+        fun provenByCloudIndex(item: MediaItem): Boolean =
+            cloudCache[item.id]?.remoteMediaId?.isNotBlank() == true
+
         for (item in deviceItems + trashed) {
             val record = records[item.id]
             val row = matchRow(item, record)
@@ -1744,7 +1795,7 @@ class MediaRepository(
                 // Independent of device_id and of the install-local upload queue,
                 // so a second install or a lost queue cannot re-upload media that
                 // the cloud already holds.
-                cloudBackedUp = row != null,
+                cloudBackedUp = row != null || provenByCloudIndex(item),
                 originLocal = true,
                 hiddenFromLibrary = false
             )

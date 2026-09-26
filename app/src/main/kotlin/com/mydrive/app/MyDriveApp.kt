@@ -141,10 +141,14 @@ class MyDriveApp : Application() {
             network = networkMonitor,
             sessionProvider = sessionProvider,
             deviceIdProvider = { authRepository.ensureDeviceRegistered() },
-            mediaLookup = mediaRepository::mediaById,
+            localUploadSource = mediaRepository::localUploadSourceById,
             queueLookup = syncRepository::queueEntity,
             queuedMediaResolver = mediaStoreDataSource::resolveQueuedMedia,
             uriProbe = mediaStoreDataSource::probeUri,
+            // The authoritative answer about what the cloud already holds. It is
+            // asked before every upload, so a page-limited local view of the catalog
+            // can never cause an already-uploaded media to be sent again.
+            verifyCloudBackedUp = { candidates -> mediaAssetsRepository.verifyCloudBackedUp(candidates) },
             scheduleUploadWork = {
                 val prefs = mediaRepository.preferences.value
                 UploadWorkScheduler.schedule(
@@ -170,7 +174,12 @@ class MyDriveApp : Application() {
             startBackup = { ids, resumeIfPaused ->
                 backupRepository.startBackup(ids, resumeIfPaused = resumeIfPaused)
             },
-            isPaused = { syncRepository.paused.value }
+            isPaused = { syncRepository.paused.value },
+            // Discovery asks the cloud what it already holds before it queues
+            // anything, so already-uploaded media is reconciled instead of re-sent.
+            verifyCloudBackedUp = { candidates -> mediaAssetsRepository.verifyCloudBackedUp(candidates) },
+            adoptCloudBackedUp = { identities -> syncRepository.adoptCloudBackedUp(identities) },
+            forgetCloudIndex = { localIds -> mediaRepository.forgetCloudIndexEntries(localIds) }
         )
     }
 

@@ -2,6 +2,9 @@ package com.mydrive.app.data.repository
 
 import com.mydrive.app.data.auth.AuthenticatedSessionProvider
 import com.mydrive.app.data.auth.PreparedAuth
+import com.mydrive.app.data.media.CloudBackupCandidate
+import com.mydrive.app.data.media.CloudBackupLookup
+import com.mydrive.app.data.media.CloudBackupMatch
 import com.mydrive.app.data.media.MediaAssetsPage
 import com.mydrive.app.data.media.MediaLibraryPaging
 import com.mydrive.app.data.media.MediaPageCursor
@@ -336,6 +339,103 @@ class MediaAssetsRepository(
         }
     }
 
+    /**
+     * The authoritative "is this already in the cloud?" answer for [candidates].
+     *
+     * This is deliberately NOT the paginated library read. `media_assets` may hold
+     * far more rows than one page, and the backup gate used to be decided from the
+     * rows a single page happened to carry — so with ~1.1k cloud rows and an 80-row
+     * page, every media outside that page looked un-backed-up and was uploaded
+     * again. This asks the question per identity instead, in batches, against the
+     * server that is the source of truth.
+     *
+     * Returns [CloudBackupLookup.Unavailable] — never an empty [CloudBackupLookup.Checked]
+     * — when the question could not be answered: no session, offline, a timeout, a
+     * backend error, or one failed chunk out of several. A failed lookup must never
+     * be read as "the cloud has nothing", because that is precisely the reading that
+     * causes a duplicate upload.
+     *
+     * A build without a configured backend has no cloud catalog to reconcile
+     * against, so an empty [CloudBackupLookup.Checked] is the truthful answer there.
+     */
+    suspend fun verifyCloudBackedUp(
+        candidates: List<CloudBackupCandidate>
+    ): CloudBackupLookup = withContext(Dispatchers.IO) {
+        if (candidates.isEmpty()) return@withContext CloudBackupLookup.Checked(emptyMap())
+        val supabase = client ?: return@withContext CloudBackupLookup.Checked(emptyMap())
+        val userId = currentUserId()
+        if (userId.isNullOrBlank()) {
+            DeveloperLogger.warn(
+                category = LogCategory.DATABASE,
+                event = "CLOUD_BACKUP_VERIFY_UNAVAILABLE",
+                message = "Cloud-backed check skipped: no authenticated user id",
+                metadata = mapOf("candidates" to candidates.size.toString(), "cause" to "no_session")
+            )
+            return@withContext CloudBackupLookup.Unavailable
+        }
+        if (!network.isOnline()) {
+            DeveloperLogger.warn(
+                category = LogCategory.DATABASE,
+                event = "CLOUD_BACKUP_VERIFY_UNAVAILABLE",
+                message = "Cloud-backed check skipped: offline",
+                metadata = mapOf("candidates" to candidates.size.toString(), "cause" to "offline")
+            )
+            return@withContext CloudBackupLookup.Unavailable
+        }
+        try {
+            val rows = ArrayList<MediaAssetRow>(candidates.size)
+            for (chunk in candidates.distinctBy { it.localMediaId to it.clientUploadId }.chunked(LOOKUP_CHUNK_SIZE)) {
+                val localIds = chunk.mapNotNull { it.localMediaId.takeIf { id -> id > 0L } }.distinct()
+                if (localIds.isNotEmpty()) {
+                    rows += cloudRowsWhere(supabase, userId) { isIn("local_media_id", localIds) }
+                }
+                // Also matched by the queue's stable upload identity, so a record
+                // whose MediaStore id moved or disappeared is still recognised.
+                val clientIds = chunk.mapNotNull { it.clientUploadId?.takeIf(String::isNotBlank) }.distinct()
+                if (clientIds.isNotEmpty()) {
+                    rows += cloudRowsWhere(supabase, userId) { isIn("client_upload_id", clientIds) }
+                }
+            }
+            CloudBackupMatch.index(rows.distinctBy { it.id }, candidates)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            DeveloperLogger.warn(
+                category = LogCategory.DATABASE,
+                event = "CLOUD_BACKUP_VERIFY_UNAVAILABLE",
+                message = "Cloud-backed check failed; uploads will wait instead of risking a duplicate",
+                throwable = error,
+                metadata = mapOf(
+                    "candidates" to candidates.size.toString(),
+                    "cause" to RemoteFailureClassifier.classify(error).name
+                )
+            )
+            CloudBackupLookup.Unavailable
+        }
+    }
+
+    /**
+     * The rows owned by [userId] that satisfy [criteria], at any status.
+     *
+     * The status is deliberately NOT filtered here: the caller has to be able to
+     * tell "the cloud holds nothing" (`MISSING`, the only case in which a re-upload
+     * is legitimate) apart from "the cloud holds a row that is not finished"
+     * (`PENDING`) and from a `DELETED` tombstone. Only `READY` counts as a backup —
+     * see [CloudBackupMatch.isAuthoritativeBackup].
+     */
+    private suspend fun cloudRowsWhere(
+        supabase: SupabaseClient,
+        userId: String,
+        criteria: PostgrestFilterBuilder.() -> Unit
+    ): List<MediaAssetRow> = supabase.from(TABLE)
+        .select(columns = Columns.raw(LOCAL_IDENTITY_COLUMNS)) {
+            filter {
+                eq("owner_id", userId)
+                criteria()
+            }
+        }
+        .decodeList<MediaAssetRow>()
+
     private suspend fun annotateDriveArchives(
         supabase: SupabaseClient,
         rows: List<MediaAssetRow>
@@ -610,5 +710,21 @@ class MediaAssetsRepository(
         private const val TABLE = "media_assets"
         private const val TABLE_REPLICATION_JOBS = "replication_jobs"
         private const val RPC_SET_LIBRARY_VISIBILITY = "set_media_library_visibility"
+
+        /**
+         * Enough of a `media_assets` row to decide "already backed up" and to adopt
+         * its identity locally, and nothing more.
+         */
+        private const val LOCAL_IDENTITY_COLUMNS =
+            "id,owner_id,local_media_id,file_name,mime_type,file_size,storage_url,thumbnail_url," +
+                "storage_asset_id,client_upload_id,status,user_hidden_at,uploaded_at,created_at," +
+                "updated_at,drive_archived_at,primary_cleanup_status,primary_deleted_at"
+
+        /**
+         * Identities per request. A device library is walked in a handful of
+         * indexed `IN (…)` lookups instead of one request per media, which keeps a
+         * reconciliation cheap enough to run on every launch.
+         */
+        private const val LOOKUP_CHUNK_SIZE = 100
     }
 }
