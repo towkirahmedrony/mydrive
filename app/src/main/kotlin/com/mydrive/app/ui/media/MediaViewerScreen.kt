@@ -111,7 +111,8 @@ import kotlinx.coroutines.launch
 @Composable
 fun MediaViewerScreen(
     viewModel: MediaViewerViewModel,
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    onEditPhoto: (String) -> Unit = {}
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val operation by viewModel.pendingOperation.collectAsStateWithLifecycle()
@@ -398,9 +399,12 @@ fun MediaViewerScreen(
 
                 // Primary action bar: Share | Edit | Delete | More
                 ViewerActionBar(
-                    item = current,
                     onShare = { viewModel.shareMedia(current) },
-                    onEdit = { viewModel.editMedia(current) },
+                    onEdit = if (current.type == MediaType.PHOTO) {
+                        { onEditPhoto(current.id) }
+                    } else {
+                        null
+                    },
                     onDelete = { viewModel.requestDelete(current.id) },
                     onMore = { viewModel.requestMoreMenu(current.id) }
                 )
@@ -686,9 +690,8 @@ private fun RenameDialog(
 
 @Composable
 private fun ViewerActionBar(
-    item: MediaItem,
     onShare: () -> Unit,
-    onEdit: () -> Unit,
+    onEdit: (() -> Unit)?,
     onDelete: () -> Unit,
     onMore: () -> Unit
 ) {
@@ -704,11 +707,13 @@ private fun ViewerActionBar(
             label = "Share",
             onClick = onShare
         )
-        ViewerBarAction(
-            icon = Icons.Outlined.Edit,
-            label = "Edit",
-            onClick = onEdit
-        )
+        if (onEdit != null) {
+            ViewerBarAction(
+                icon = Icons.Outlined.Edit,
+                label = "Edit",
+                onClick = onEdit
+            )
+        }
         ViewerBarAction(
             icon = Icons.Outlined.Delete,
             label = "Move to Trash",

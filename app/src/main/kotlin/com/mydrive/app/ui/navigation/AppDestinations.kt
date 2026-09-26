@@ -18,6 +18,9 @@ sealed class AppDestination(val route: String) {
             }
         }
     }
+    data object PhotoEditor : AppDestination("editor/{mediaId}") {
+        fun create(mediaId: String): String = "editor/${Uri.encode(mediaId)}"
+    }
     data object AlbumDetail : AppDestination("album/{albumId}") {
         fun create(albumId: String) = "album/${Uri.encode(albumId)}"
     }

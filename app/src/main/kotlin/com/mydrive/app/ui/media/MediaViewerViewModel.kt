@@ -114,26 +114,6 @@ class MediaViewerViewModel(
         }
     }
 
-    fun editMedia(item: MediaItem) {
-        if (item.uri.isBlank()) return
-        try {
-            val editUri = Uri.parse(item.uri)
-            val intent = Intent(Intent.ACTION_EDIT).apply {
-                setDataAndType(editUri, item.mimeType.ifBlank {
-                    if (item.type == MediaType.VIDEO) "video/*" else "image/*"
-                })
-                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            }
-            val chooser = Intent.createChooser(intent, "Edit with").apply {
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            }
-            context.startActivity(chooser)
-        } catch (_: Exception) {
-            Toast.makeText(context, "No editor available on this device", Toast.LENGTH_SHORT).show()
-        }
-    }
-
     fun requestDelete(itemId: String) { _pendingOperation.value = MediaOperation.DeleteConfirm(itemId) }
     fun dismissOperation() { _pendingOperation.value = MediaOperation.Idle }
 

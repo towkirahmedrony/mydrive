@@ -68,6 +68,8 @@ import com.mydrive.app.ui.albums.AlbumsScreen
 import com.mydrive.app.ui.albums.AlbumsViewModel
 import com.mydrive.app.ui.gallery.GalleryScreen
 import com.mydrive.app.ui.gallery.GalleryViewModel
+import com.mydrive.app.ui.editor.PhotoEditorScreen
+import com.mydrive.app.ui.editor.PhotoEditorViewModel
 import com.mydrive.app.ui.media.MediaViewerScreen
 import com.mydrive.app.ui.media.MediaViewerViewModel
 import com.mydrive.app.ui.permission.MediaAccessRequest
@@ -118,7 +120,8 @@ fun AppNavHost(
     val navBackStackEntry by navController.currentBackStackEntryAsState()
     val currentDestination = navBackStackEntry?.destination
     val isViewer = currentDestination?.route?.startsWith("viewer") == true ||
-        currentDestination?.route?.startsWith("trash-viewer") == true
+        currentDestination?.route?.startsWith("trash-viewer") == true ||
+        currentDestination?.route?.startsWith("editor") == true
     val isDeveloperConsole = currentDestination?.route == AppDestination.DeveloperConsole.route
     val isVaultRoute = currentDestination?.route == AppDestination.HiddenPhotos.route ||
         currentDestination?.route == AppDestination.VaultSettings.route
@@ -282,6 +285,21 @@ fun AppNavHost(
                     factory = MediaViewerViewModel.factory(repository, mediaId, albumId, app)
                 )
                 MediaViewerScreen(
+                    viewModel = vm,
+                    onBack = { navController.popBackStack() },
+                    onEditPhoto = { id -> navController.navigate(AppDestination.PhotoEditor.create(id)) }
+                )
+            }
+            composable(
+                route = AppDestination.PhotoEditor.route,
+                arguments = listOf(navArgument("mediaId") { type = NavType.StringType })
+            ) { entry ->
+                val editorMediaId = android.net.Uri.decode(entry.arguments?.getString("mediaId").orEmpty())
+                val app = LocalContext.current.applicationContext as MyDriveApp
+                val vm: PhotoEditorViewModel = viewModel(
+                    factory = PhotoEditorViewModel.factory(repository, editorMediaId, app)
+                )
+                PhotoEditorScreen(
                     viewModel = vm,
                     onBack = { navController.popBackStack() }
                 )

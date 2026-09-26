@@ -41,4 +41,26 @@ class AppDestinationsTest {
         assertFalse(bottomDestinations.contains(AppDestination.VaultSettings))
         assertFalse(galleryDestinations.contains(AppDestination.VaultSettings))
     }
+
+    @Test
+    fun photoEditorIsANavigableRouteOutsideBottomAndGalleryTabs() {
+        assertEquals("editor/{mediaId}", AppDestination.PhotoEditor.route)
+        assertEquals("editor/photo%201", AppDestination.PhotoEditor.create("photo 1"))
+        assertFalse(bottomDestinations.contains(AppDestination.PhotoEditor))
+        assertFalse(galleryDestinations.contains(AppDestination.PhotoEditor))
+        assertFalse(AppDestination.PhotoEditor.route.startsWith("settings/hidden-photos"))
+    }
+
+    @Test
+    fun photoEditorIsReachedFromTheViewerAndPopsBackToTheSameMedia() {
+        val mediaId = "abc 123"
+        val viewer = AppDestination.MediaViewer.create(mediaId)
+        val editor = AppDestination.PhotoEditor.create(mediaId)
+        assertEquals("viewer/abc%20123", viewer)
+        assertEquals("editor/abc%20123", editor)
+        assertFalse(editor.startsWith("viewer"))
+        assertFalse(viewer.startsWith("editor"))
+        assertFalse(AppDestination.HiddenPhotos.route.contains("editor"))
+        assertFalse(AppDestination.VaultSettings.route.contains("editor"))
+    }
 }
