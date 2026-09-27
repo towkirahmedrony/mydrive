@@ -289,6 +289,7 @@ private fun TrashGrid(
                     onClick = { onClick(item.id) },
                     onLongClick = { onLongClick(item.id) },
                     selected = item.id in selectedIds,
+                    selectionMode = selectionMode,
                     showStatusOverlays = false
                 )
             }

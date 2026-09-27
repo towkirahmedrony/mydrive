@@ -2664,13 +2664,13 @@ class MediaRepository(
         )
     }
 
-    suspend fun finalizeLocalDelete(id: String): Boolean = withContext(Dispatchers.IO) {
+    suspend fun finalizeLocalDelete(id: String, refreshAfter: Boolean = true): Boolean = withContext(Dispatchers.IO) {
         locallyHiddenIds += id
         val existedOnDevice = _deviceMedia.value.any { it.id == id }
         _deviceMedia.update { items -> items.filter { it.id != id } }
         rememberCloudCopy(id)
         // Local MediaStore/Room refresh only. user_hidden_at, media_assets, and archive data remain untouched.
-        refresh(force = true)
+        if (refreshAfter) refresh(force = true)
         existedOnDevice || _media.value.any { it.id == id } || !_deviceMedia.value.any { it.id == id }
     }
 
@@ -2821,7 +2821,8 @@ class MediaRepository(
      */
     suspend fun moveCloudToTrash(
         id: String,
-        itemSnapshot: MediaItem? = null
+        itemSnapshot: MediaItem? = null,
+        refreshAfter: Boolean = true
     ): RemoveFromLibraryResult = withContext(Dispatchers.IO) {
         // Local MediaStore trash finalization refreshes the catalog before this
         // cloud mutation runs. Keep the pre-refresh identity so a successful
@@ -2902,7 +2903,7 @@ class MediaRepository(
                 )
             }
         }
-        refresh(force = true)
+        if (refreshAfter) refresh(force = true)
         when (result) {
             HideMediaResult.Success, HideMediaResult.NotFound -> RemoveFromLibraryResult.Success
             HideMediaResult.Unauthorized -> RemoveFromLibraryResult.Unauthorized
@@ -3493,7 +3494,12 @@ class MediaRepository(
         )
     }
 
-    suspend fun copyMedia(context: Context, id: String, destFolderUri: Uri): Boolean = withContext(Dispatchers.IO) {
+    suspend fun copyMedia(
+        context: Context,
+        id: String,
+        destFolderUri: Uri,
+        refreshAfter: Boolean = true
+    ): Boolean = withContext(Dispatchers.IO) {
         val item = lookupDeviceItem(id) ?: return@withContext false
         val sourceUri = Uri.parse(item.uri)
         try {
@@ -3507,7 +3513,7 @@ class MediaRepository(
                 } ?: false
             } ?: false
 
-            if (success) {
+            if (success && refreshAfter) {
                 refresh(force = true)
             }
             success
@@ -3516,10 +3522,17 @@ class MediaRepository(
         }
     }
 
-    suspend fun moveMedia(context: Context, id: String, destFolderUri: Uri): Boolean = withContext(Dispatchers.IO) {
-        val copied = copyMedia(context, id, destFolderUri)
+    suspend fun moveMedia(
+        context: Context,
+        id: String,
+        destFolderUri: Uri,
+        refreshAfter: Boolean = true
+    ): Boolean = withContext(Dispatchers.IO) {
+        val copied = copyMedia(context, id, destFolderUri, refreshAfter = false)
         if (copied) {
-            deleteMedia(context, id)
+            val deleted = deleteMedia(context, id)
+            if (refreshAfter) refresh(force = true)
+            deleted
         } else {
             false
         }

@@ -214,7 +214,8 @@ fun AppNavHost(
                 popExitTransition = { fadeOut(tabFade) }
             ) {
             composable(AppDestination.Photos.route) {
-                val vm: GalleryViewModel = viewModel(factory = GalleryViewModel.factory(repository))
+                val app = LocalContext.current.applicationContext as MyDriveApp
+                val vm: GalleryViewModel = viewModel(factory = GalleryViewModel.factory(repository, app))
                 GalleryScreen(
                     viewModel = vm,
                     onMediaClick = { id ->
@@ -309,8 +310,9 @@ fun AppNavHost(
                 arguments = listOf(navArgument("albumId") { type = NavType.StringType })
             ) { entry ->
                 val albumId = android.net.Uri.decode(entry.arguments?.getString("albumId").orEmpty())
+                val app = LocalContext.current.applicationContext as MyDriveApp
                 val vm: AlbumDetailViewModel = viewModel(
-                    factory = AlbumDetailViewModel.factory(repository, albumId)
+                    factory = AlbumDetailViewModel.factory(repository, albumId, app)
                 )
                 AlbumDetailScreen(
                     viewModel = vm,

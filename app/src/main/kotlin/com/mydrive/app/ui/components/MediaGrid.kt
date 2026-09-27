@@ -63,7 +63,10 @@ fun MediaGrid(
     showSkeleton: Boolean = false,
     isLoadingMore: Boolean = false,
     hasNextPage: Boolean = false,
-    onLoadMore: (() -> Unit)? = null
+    onLoadMore: (() -> Unit)? = null,
+    selectedIds: Set<String> = emptySet(),
+    selectionMode: Boolean = false,
+    onMediaLongClick: ((String) -> Unit)? = null
 ) {
     val colors = MaterialTheme.colorScheme
     val gridState = rememberSaveable(saver = LazyGridState.Saver) { LazyGridState() }
@@ -142,7 +145,13 @@ fun MediaGrid(
             ) { entry ->
                 val item = entry.item
                 if (item != null) {
-                    MediaThumb(item = item, onClick = { onMediaClick(item.id) })
+                    MediaThumb(
+                        item = item,
+                        onClick = { onMediaClick(item.id) },
+                        onLongClick = onMediaLongClick?.let { handler -> { handler(item.id) } },
+                        selected = item.id in selectedIds,
+                        selectionMode = selectionMode
+                    )
                 } else {
                     Text(
                         text = entry.groupLabel.orEmpty(),

@@ -1,5 +1,6 @@
 package com.mydrive.app.ui.gallery
 
+import android.app.Application
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
@@ -7,6 +8,9 @@ import com.mydrive.app.data.media.MediaLibraryPaging
 import com.mydrive.app.data.model.MediaItem
 import com.mydrive.app.data.model.MediaType
 import com.mydrive.app.data.repository.MediaRepository
+import com.mydrive.app.ui.selection.BulkActionProgress
+import com.mydrive.app.ui.selection.GallerySelectionController
+import com.mydrive.app.ui.selection.MediaSelection
 import com.mydrive.app.ui.util.dateGroupLabel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -41,15 +45,26 @@ data class GalleryUiState(
     val permissionDenied: Boolean = false,
     val accessPartial: Boolean = false,
     val errorMessage: String? = null,
-    val hasMedia: Boolean = false
+    val hasMedia: Boolean = false,
+    val selectedIds: Set<String> = emptySet(),
+    val selectionMode: Boolean = false,
+    val bulkProgress: BulkActionProgress = BulkActionProgress()
 )
 
 class GalleryViewModel(
-    private val repository: MediaRepository
+    private val repository: MediaRepository,
+    app: Application
 ) : ViewModel() {
 
     private val filter = MutableStateFlow(GalleryFilter.ALL)
     private val query = MutableStateFlow("")
+
+    val selection = GallerySelectionController(
+        repository = repository,
+        app = app,
+        scope = viewModelScope,
+        visibleItems = { currentVisibleItems() }
+    )
 
     init {
         // Not forced: the repository already restored the last known gallery from
@@ -57,43 +72,44 @@ class GalleryViewModel(
         // in the background. A forced pass here would bypass the launch throttle
         // and start a second device scan on top of the app-start one.
         refresh(force = false)
+        viewModelScope.launch {
+            combine(repository.media, filter, query) { _, _, _ -> currentVisibleItems() }
+                .collect { selection.published(it) }
+        }
     }
 
     val uiState: StateFlow<GalleryUiState> = combine(
-        repository.media,
-        repository.loadState,
-        filter,
-        query
-    ) { media, load, currentFilter, currentQuery ->
-        val filtered = media
-            .filter { item ->
-                when (currentFilter) {
-                    GalleryFilter.ALL -> true
-                    GalleryFilter.PHOTOS -> item.type == MediaType.PHOTO
-                    GalleryFilter.VIDEOS -> item.type == MediaType.VIDEO
-                    GalleryFilter.FAVORITES -> item.isFavorite
-                }
-            }
-            .filter { item ->
-                currentQuery.isBlank() || item.filename.contains(currentQuery, ignoreCase = true)
-            }
-        val groups = MediaLibraryPaging.groupChronologically(filtered) { dateGroupLabel(it) }
-            .map { (label, items) -> MediaGroup(label, items) }
-
-        GalleryUiState(
-            filter = currentFilter,
-            query = currentQuery,
-            groups = groups,
-            isLoading = load.isLoading,
-            isRestoring = load.isRestoring,
-            isRefreshing = load.isRefreshing,
-            isLoadingMore = load.isLoadingMore,
-            hasNextPage = load.hasNextPage,
-            needsPermission = load.needsPermission,
-            permissionDenied = load.permissionDenied,
-            accessPartial = load.accessPartial,
-            errorMessage = load.errorMessage,
-            hasMedia = media.isNotEmpty()
+        combine(repository.media, repository.loadState, filter, query) { media, load, currentFilter, currentQuery ->
+            val filtered = applyVisibleFilter(media, currentFilter, currentQuery)
+            val groups = MediaLibraryPaging.groupChronologically(filtered) { dateGroupLabel(it) }
+                .map { (label, items) -> MediaGroup(label, items) }
+            GalleryUiState(
+                filter = currentFilter,
+                query = currentQuery,
+                groups = groups,
+                isLoading = load.isLoading,
+                isRestoring = load.isRestoring,
+                isRefreshing = load.isRefreshing,
+                isLoadingMore = load.isLoadingMore,
+                hasNextPage = load.hasNextPage,
+                needsPermission = load.needsPermission,
+                permissionDenied = load.permissionDenied,
+                accessPartial = load.accessPartial,
+                errorMessage = load.errorMessage,
+                hasMedia = media.isNotEmpty()
+            )
+        },
+        selection.selection,
+        selection.progress
+    ) { base, rawSelection, progress ->
+        val pruned = MediaSelection.intersectVisible(
+            rawSelection,
+            MediaSelection.eligibleIdSet(base.groups.flatMap { it.items })
+        )
+        base.copy(
+            selectedIds = pruned.selectedIds,
+            selectionMode = pruned.mode,
+            bulkProgress = progress
         )
     }.flowOn(Dispatchers.Default).stateIn(
         scope = viewModelScope,
@@ -146,12 +162,32 @@ class GalleryViewModel(
         return uiState.value.groups.flatMap { group -> group.items.map { it.id } }
     }
 
+    private fun currentVisibleItems(): List<MediaItem> =
+        applyVisibleFilter(repository.media.value, filter.value, query.value)
+
     companion object {
-        fun factory(repository: MediaRepository): ViewModelProvider.Factory =
+        fun applyVisibleFilter(
+            media: List<MediaItem>,
+            currentFilter: GalleryFilter,
+            currentQuery: String
+        ): List<MediaItem> = media
+            .filter { item ->
+                when (currentFilter) {
+                    GalleryFilter.ALL -> true
+                    GalleryFilter.PHOTOS -> item.type == MediaType.PHOTO
+                    GalleryFilter.VIDEOS -> item.type == MediaType.VIDEO
+                    GalleryFilter.FAVORITES -> item.isFavorite
+                }
+            }
+            .filter { item ->
+                currentQuery.isBlank() || item.filename.contains(currentQuery, ignoreCase = true)
+            }
+
+        fun factory(repository: MediaRepository, app: Application): ViewModelProvider.Factory =
             object : ViewModelProvider.Factory {
                 @Suppress("UNCHECKED_CAST")
                 override fun <T : ViewModel> create(modelClass: Class<T>): T {
-                    return GalleryViewModel(repository) as T
+                    return GalleryViewModel(repository, app) as T
                 }
             }
     }

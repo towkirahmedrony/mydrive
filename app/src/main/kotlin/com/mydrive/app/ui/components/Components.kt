@@ -71,6 +71,7 @@ import com.mydrive.app.ui.theme.StatusIdle
 import com.mydrive.app.ui.theme.StatusSyncing
 import com.mydrive.app.ui.util.formatDuration
 import com.mydrive.app.data.model.cacheVersion
+import com.mydrive.app.ui.selection.SelectionIndicator
 
 @Composable
 fun AppCard(
@@ -206,6 +207,7 @@ fun MediaThumb(
     onClick: (() -> Unit)? = null,
     onLongClick: (() -> Unit)? = null,
     selected: Boolean = false,
+    selectionMode: Boolean = false,
     showStatusOverlays: Boolean = true
 ) {
     val clickMod = when {
@@ -215,10 +217,14 @@ fun MediaThumb(
         )
         else -> Modifier
     }
-    val description = if (item.type == MediaType.VIDEO) {
-        "Video ${item.filename}"
-    } else {
-        "Photo ${item.filename}"
+    val isVideo = item.type == MediaType.VIDEO
+    val description = when {
+        selectionMode && selected && isVideo -> "Deselect video"
+        selectionMode && selected -> "Deselect photo"
+        selectionMode && isVideo -> "Select video"
+        selectionMode -> "Select photo"
+        isVideo -> "Video ${item.filename}"
+        else -> "Photo ${item.filename}"
     }
     Box(
         modifier = modifier
@@ -274,7 +280,7 @@ fun MediaThumb(
                 }
             }
         }
-        if (showStatusOverlays && item.isFavorite) {
+        if (showStatusOverlays && item.isFavorite && !selectionMode) {
             Icon(
                 Icons.Outlined.Favorite,
                 contentDescription = "Favorite",
@@ -285,7 +291,7 @@ fun MediaThumb(
                     .size(14.dp)
             )
         }
-        if (showStatusOverlays) {
+        if (showStatusOverlays && !selectionMode) {
             Box(
                 modifier = Modifier
                     .align(Alignment.TopStart)
@@ -294,7 +300,22 @@ fun MediaThumb(
                 MiniSyncDot(item.backupState)
             }
         }
-        if (selected) {
+        if (selectionMode) {
+            if (selected) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(Ink.copy(alpha = 0.28f))
+                )
+            }
+            SelectionIndicator(
+                selected = selected,
+                isVideo = isVideo,
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(Spacing.xs)
+            )
+        } else if (selected) {
             Box(
                 modifier = Modifier
                     .fillMaxSize()

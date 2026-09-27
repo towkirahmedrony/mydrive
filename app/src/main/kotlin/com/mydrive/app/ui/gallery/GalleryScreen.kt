@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
@@ -31,6 +32,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -52,6 +54,12 @@ import com.mydrive.app.ui.components.EmptyState
 import com.mydrive.app.ui.components.MediaGrid
 import com.mydrive.app.ui.components.SearchField
 import com.mydrive.app.ui.permission.MediaPermissionScreen
+import com.mydrive.app.ui.selection.MediaSelectionBottomBar
+import com.mydrive.app.ui.selection.MediaSelectionEffects
+import com.mydrive.app.ui.selection.MediaSelectionProgress
+import com.mydrive.app.ui.selection.MediaSelectionSheets
+import com.mydrive.app.ui.selection.MediaSelectionSnackbarHost
+import com.mydrive.app.ui.selection.MediaSelectionTopBar
 import kotlinx.coroutines.launch
 import com.mydrive.app.ui.theme.ChipShape
 import com.mydrive.app.ui.theme.Copper
@@ -67,6 +75,9 @@ fun GalleryScreen(
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val colors = MaterialTheme.colorScheme
+    val snackbarHostState = remember { SnackbarHostState() }
+    val selecting = state.selectionMode
+    val visibleItems = remember(state.groups) { state.groups.flatMap { it.items } }
 
     val permissionScope = rememberCoroutineScope()
     val permissionLauncher = rememberLauncherForActivityResult(
@@ -108,41 +119,53 @@ fun GalleryScreen(
         return
     }
 
-    Column(
+    MediaSelectionEffects(viewModel.selection, snackbarHostState)
+
+    Box(
         modifier = Modifier
             .fillMaxSize()
             .background(colors.background)
     ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = Spacing.md, vertical = Spacing.sm),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text(
-                text = "Photos",
-                style = MaterialTheme.typography.headlineMedium,
-                color = colors.onBackground,
-                modifier = Modifier.weight(1f)
+    Column(modifier = Modifier.fillMaxSize()) {
+        if (selecting) {
+            MediaSelectionTopBar(
+                selectedCount = state.selectedIds.size,
+                onClose = viewModel.selection::clearSelection,
+                onSelectAll = viewModel.selection::selectAll
             )
-            IconButtonCircle(
-                icon = if (searchOpen) Icons.Outlined.Close else Icons.Outlined.Search,
-                contentDescription = if (searchOpen) "Close search" else "Search"
+        } else {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = Spacing.md, vertical = Spacing.sm),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                searchOpen = !searchOpen
-                if (!searchOpen) viewModel.setQuery("")
+                Text(
+                    text = "Photos",
+                    style = MaterialTheme.typography.headlineMedium,
+                    color = colors.onBackground,
+                    modifier = Modifier.weight(1f)
+                )
+                IconButtonCircle(
+                    icon = if (searchOpen) Icons.Outlined.Close else Icons.Outlined.Search,
+                    contentDescription = if (searchOpen) "Close search" else "Search"
+                ) {
+                    searchOpen = !searchOpen
+                    if (!searchOpen) viewModel.setQuery("")
+                }
             }
         }
 
-        if ((state.isLoading || state.isRefreshing) && state.hasMedia) {
+        if ((state.isLoading || state.isRefreshing) && state.hasMedia && !state.bulkProgress.inProgress) {
             LinearProgressIndicator(
                 modifier = Modifier.fillMaxWidth(),
                 color = Copper,
                 trackColor = colors.surfaceVariant
             )
         }
+        MediaSelectionProgress(state.bulkProgress)
 
-        if (searchOpen) {
+        if (searchOpen && !selecting) {
             SearchField(
                 value = state.query,
                 onValueChange = viewModel::setQuery,
@@ -153,13 +176,15 @@ fun GalleryScreen(
             )
         }
 
-        FilterRow(
-            selected = state.filter,
-            onSelect = viewModel::setFilter,
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = Spacing.md, vertical = Spacing.xs)
-        )
+        if (!selecting) {
+            FilterRow(
+                selected = state.filter,
+                onSelect = viewModel::setFilter,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = Spacing.md, vertical = Spacing.xs)
+            )
+        }
 
         when {
             // Existing content, or a catalog still being restored, always wins over
@@ -195,17 +220,34 @@ fun GalleryScreen(
                 }
                 MediaGrid(
                     groups = state.groups,
-                    onMediaClick = onMediaClick,
+                    onMediaClick = { id -> viewModel.selection.onItemClick(id, onMediaClick) },
                     emptyTitle = emptyTitle,
                     emptyMessage = emptyMessage,
-                    contentPadding = PaddingValues(bottom = Spacing.lg),
+                    contentPadding = PaddingValues(bottom = if (selecting) 112.dp else Spacing.lg),
                     isLoadingMore = state.isLoadingMore,
                     hasNextPage = state.hasNextPage,
-                    onLoadMore = viewModel::loadMore
+                    onLoadMore = viewModel::loadMore,
+                    selectedIds = state.selectedIds,
+                    selectionMode = selecting,
+                    onMediaLongClick = viewModel.selection::onItemLongClick
                 )
             }
         }
     }
+        if (selecting) {
+            MediaSelectionBottomBar(
+                enabled = state.selectedIds.isNotEmpty() && !state.bulkProgress.inProgress,
+                onDelete = viewModel.selection::requestDeleteSelected,
+                onMove = viewModel.selection::requestMoveSelected,
+                modifier = Modifier.align(Alignment.BottomCenter)
+            )
+        }
+        MediaSelectionSnackbarHost(
+            snackbarHostState = snackbarHostState,
+            modifier = Modifier.align(Alignment.BottomCenter)
+        )
+    }
+    MediaSelectionSheets(viewModel.selection, visibleItems)
 }
 
 @Composable
