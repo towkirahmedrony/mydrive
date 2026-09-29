@@ -28,6 +28,7 @@ import com.mydrive.app.data.worker.BackupDiscoveryScheduler
 import com.mydrive.app.data.worker.UploadWorkScheduler
 import com.mydrive.app.data.local.LastAccountProfileStore
 import com.mydrive.app.data.local.LibraryVisibilityStore
+import com.mydrive.app.data.local.GalleryAlbumStore
 import com.mydrive.app.data.local.MediaCatalogStore
 import com.mydrive.app.data.local.MediaSyncCursorStore
 import com.mydrive.app.data.repository.AuthRepository
@@ -97,6 +98,7 @@ class MyDriveApp : Application() {
             // Last known composed gallery, in the app's existing Room database:
             // Photos/Albums are restored from here before any scan or network pass.
             mediaCatalogStore = MediaCatalogStore(UploadQueueDatabase.get(this).mediaCatalogDao()),
+            galleryAlbumStore = GalleryAlbumStore(UploadQueueDatabase.get(this).galleryAlbumDao()),
             scope = applicationScope
         )
     }

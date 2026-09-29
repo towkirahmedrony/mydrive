@@ -26,10 +26,14 @@ import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.DeleteOutline
 import androidx.compose.material.icons.outlined.PhotoLibrary
 import androidx.compose.material.icons.outlined.Search
+import androidx.compose.material.icons.outlined.Sort
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
@@ -54,7 +58,9 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.mydrive.app.MyDriveApp
+import com.mydrive.app.data.album.AlbumSort
 import com.mydrive.app.data.backup.BackupDiscoveryReason
+import com.mydrive.app.ui.album.AlbumNameDialog
 import com.mydrive.app.ui.components.AlbumCard
 import com.mydrive.app.ui.components.EmptyState
 import com.mydrive.app.ui.components.SearchField
@@ -65,12 +71,6 @@ import com.mydrive.app.ui.theme.Copper
 import com.mydrive.app.ui.theme.Spacing
 import com.mydrive.app.ui.util.formatFileSize
 
-/**
- * Compact, gallery-like album grid.
- *
- * Phones show 3 folders per row; wider screens/tablets add columns so the available
- * width is used instead of stretching two oversized cards.
- */
 private fun albumGridColumnCount(screenWidthDp: Int): Int = when {
     screenWidthDp >= 900 -> 6
     screenWidthDp >= 720 -> 5
@@ -86,6 +86,7 @@ fun AlbumsScreen(
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     var searchOpen by rememberSaveable { mutableStateOf(false) }
+    var sortOpen by rememberSaveable { mutableStateOf(false) }
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val colors = MaterialTheme.colorScheme
@@ -150,6 +151,43 @@ fun AlbumsScreen(
                 modifier = Modifier.weight(1f)
             )
             IconButtonCircle(
+                icon = Icons.Outlined.Add,
+                contentDescription = "New album"
+            ) {
+                viewModel.openCreateAlbum()
+            }
+            Box {
+                IconButtonCircle(
+                    icon = Icons.Outlined.Sort,
+                    contentDescription = "Sort albums"
+                ) {
+                    sortOpen = true
+                }
+                DropdownMenu(expanded = sortOpen, onDismissRequest = { sortOpen = false }) {
+                    DropdownMenuItem(
+                        text = { Text("Recently updated") },
+                        onClick = {
+                            sortOpen = false
+                            viewModel.setSort(AlbumSort.RECENTLY_UPDATED)
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Name") },
+                        onClick = {
+                            sortOpen = false
+                            viewModel.setSort(AlbumSort.NAME)
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Item count") },
+                        onClick = {
+                            sortOpen = false
+                            viewModel.setSort(AlbumSort.ITEM_COUNT)
+                        }
+                    )
+                }
+            }
+            IconButtonCircle(
                 icon = if (searchOpen) Icons.Outlined.Close else Icons.Outlined.Search,
                 contentDescription = if (searchOpen) "Close search" else "Search albums"
             ) {
@@ -158,8 +196,6 @@ fun AlbumsScreen(
             }
         }
 
-        // A non-blocking refresh indicator: the folders below stay visible and
-        // usable while the background reconciliation runs.
         if ((state.isLoading || state.isRefreshing) && state.albums.isNotEmpty()) {
             LinearProgressIndicator(
                 modifier = Modifier.fillMaxWidth(),
@@ -193,16 +229,15 @@ fun AlbumsScreen(
             verticalArrangement = Arrangement.spacedBy(Spacing.sm)
         ) {
             when {
-                // Folders that are still being restored from disk are not "no
-                // albums"; they are simply not known yet, and are not worth a
-                // blocking placeholder.
                 state.isLoading && !state.isRestoring &&
                     state.albums.isEmpty() && state.query.isBlank() -> {
                     item(key = "empty-loading", span = { GridItemSpan(maxLineSpan) }, contentType = "empty") {
                         EmptyState(
-                            title = "No albums found",
-                            message = "Albums from your device will appear here.",
-                            icon = Icons.Outlined.PhotoLibrary
+                            title = "No albums yet",
+                            message = "Create an album or wait for folders from your device to appear.",
+                            icon = Icons.Outlined.PhotoLibrary,
+                            actionLabel = "New album",
+                            onAction = viewModel::openCreateAlbum
                         )
                     }
                 }
@@ -222,9 +257,11 @@ fun AlbumsScreen(
                             message = if (state.query.isNotBlank()) {
                                 "No matches for that name."
                             } else {
-                                "Albums from your device will appear here."
+                                "Create an album to organize photos and videos."
                             },
-                            icon = Icons.Outlined.PhotoLibrary
+                            icon = Icons.Outlined.PhotoLibrary,
+                            actionLabel = if (state.query.isBlank()) "New album" else null,
+                            onAction = if (state.query.isBlank()) viewModel::openCreateAlbum else null
                         )
                     }
                 }
@@ -241,8 +278,6 @@ fun AlbumsScreen(
                     }
                 }
             }
-            // The Trash Bin is the last entry of the scrollable album content, so it is
-            // revealed after scrolling past the folders and scrolls with the page.
             if (state.query.isBlank()) {
                 item(key = "trash-section", span = { GridItemSpan(maxLineSpan) }, contentType = "trash") {
                     TrashSection(
@@ -254,6 +289,21 @@ fun AlbumsScreen(
                 }
             }
         }
+    }
+
+    if (state.showCreateDialog) {
+        AlbumNameDialog(
+            title = "New album",
+            confirmLabel = "Create",
+            value = state.createName,
+            error = state.createError,
+            onValueChange = viewModel::setCreateName,
+            onConfirm = {
+                val createdId = viewModel.confirmCreateAlbum()
+                if (createdId != null) onAlbumClick(createdId)
+            },
+            onDismiss = viewModel::dismissCreateAlbum
+        )
     }
 }
 

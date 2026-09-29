@@ -143,7 +143,8 @@ fun MediaSelectionBottomBar(
     enabled: Boolean,
     onDelete: () -> Unit,
     onMove: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    extraAction: (@Composable androidx.compose.foundation.layout.RowScope.() -> Unit)? = null
 ) {
     Row(
         modifier = modifier
@@ -166,6 +167,7 @@ fun MediaSelectionBottomBar(
             onClick = onMove,
             modifier = Modifier.weight(1f)
         )
+        extraAction?.invoke(this)
     }
 }
 
@@ -293,7 +295,7 @@ private fun SelectionHeaderIcon(
 }
 
 @Composable
-private fun SelectionActionButton(
+fun SelectionActionButton(
     icon: ImageVector,
     label: String,
     enabled: Boolean,

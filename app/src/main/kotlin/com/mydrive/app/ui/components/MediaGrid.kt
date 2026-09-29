@@ -58,6 +58,8 @@ fun MediaGrid(
     modifier: Modifier = Modifier,
     emptyTitle: String = "No media yet",
     emptyMessage: String = "Your photos and videos will appear here.",
+    emptyActionLabel: String? = null,
+    onEmptyAction: (() -> Unit)? = null,
     contentPadding: PaddingValues = PaddingValues(bottom = Spacing.lg),
     header: (@Composable () -> Unit)? = null,
     showSkeleton: Boolean = false,
@@ -101,7 +103,9 @@ fun MediaGrid(
             title = emptyTitle,
             message = emptyMessage,
             icon = Icons.Outlined.PhotoLibrary,
-            modifier = modifier.fillMaxSize()
+            modifier = modifier.fillMaxSize(),
+            actionLabel = emptyActionLabel,
+            onAction = onEmptyAction
         )
         return
     }
@@ -133,7 +137,9 @@ fun MediaGrid(
                 EmptyState(
                     title = emptyTitle,
                     message = emptyMessage,
-                    icon = Icons.Outlined.PhotoLibrary
+                    icon = Icons.Outlined.PhotoLibrary,
+                    actionLabel = emptyActionLabel,
+                    onAction = onEmptyAction
                 )
             }
         } else {

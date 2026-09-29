@@ -15,12 +15,18 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.MoreVert
+import androidx.compose.material.icons.outlined.Image
+import androidx.compose.material.icons.outlined.PlaylistRemove
 import androidx.compose.material.icons.outlined.Search
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -39,6 +45,7 @@ import com.mydrive.app.ui.selection.MediaSelectionProgress
 import com.mydrive.app.ui.selection.MediaSelectionSheets
 import com.mydrive.app.ui.selection.MediaSelectionSnackbarHost
 import com.mydrive.app.ui.selection.MediaSelectionTopBar
+import com.mydrive.app.ui.selection.SelectionActionButton
 import com.mydrive.app.ui.theme.Spacing
 
 @Composable
@@ -52,11 +59,21 @@ fun AlbumDetailScreen(
     val count = state.album?.mediaCount ?: 0
     val colors = MaterialTheme.colorScheme
     var searchOpen by rememberSaveable { mutableStateOf(false) }
+    var menuOpen by rememberSaveable { mutableStateOf(false) }
     val snackbarHostState = remember { SnackbarHostState() }
     val selecting = state.selectionMode
     val visibleItems = remember(state.groups) { state.groups.flatMap { it.items } }
 
     MediaSelectionEffects(viewModel.selection, snackbarHostState)
+
+    LaunchedEffect(state.albumDeleted) {
+        if (state.albumDeleted) onBack()
+    }
+    LaunchedEffect(state.userMessage) {
+        val message = state.userMessage ?: return@LaunchedEffect
+        snackbarHostState.showSnackbar(message)
+        viewModel.consumeUserMessage()
+    }
 
     Box(
         modifier = Modifier
@@ -77,14 +94,9 @@ fun AlbumDetailScreen(
                         .padding(horizontal = Spacing.md, vertical = Spacing.sm),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Box(
-                        modifier = Modifier
-                            .size(40.dp)
-                            .clip(CircleShape)
-                            .background(colors.surfaceVariant)
-                            .border(1.dp, colors.outlineVariant, CircleShape)
-                            .clickable(onClick = onBack),
-                        contentAlignment = Alignment.Center
+                    CircleHeaderButton(
+                        onClick = onBack,
+                        contentDescription = "Back"
                     ) {
                         Icon(
                             Icons.AutoMirrored.Outlined.ArrowBack,
@@ -104,17 +116,12 @@ fun AlbumDetailScreen(
                             color = colors.onSurfaceVariant
                         )
                     }
-                    Box(
-                        modifier = Modifier
-                            .size(40.dp)
-                            .clip(CircleShape)
-                            .background(colors.surfaceVariant)
-                            .border(1.dp, colors.outlineVariant, CircleShape)
-                            .clickable {
-                                searchOpen = !searchOpen
-                                if (!searchOpen) viewModel.setQuery("")
-                            },
-                        contentAlignment = Alignment.Center
+                    CircleHeaderButton(
+                        onClick = {
+                            searchOpen = !searchOpen
+                            if (!searchOpen) viewModel.setQuery("")
+                        },
+                        contentDescription = if (searchOpen) "Close search" else "Search album"
                     ) {
                         Icon(
                             if (searchOpen) Icons.Outlined.Close else Icons.Outlined.Search,
@@ -122,6 +129,52 @@ fun AlbumDetailScreen(
                             tint = colors.onSurface,
                             modifier = Modifier.size(20.dp)
                         )
+                    }
+                    Box {
+                        CircleHeaderButton(
+                            onClick = { menuOpen = true },
+                            contentDescription = "Album options"
+                        ) {
+                            Icon(
+                                Icons.Outlined.MoreVert,
+                                contentDescription = "Album options",
+                                tint = colors.onSurface
+                            )
+                        }
+                        DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                            if (state.isUserAlbum) {
+                                DropdownMenuItem(
+                                    text = { Text("Rename") },
+                                    onClick = {
+                                        menuOpen = false
+                                        viewModel.openRename()
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Add photos/videos") },
+                                    onClick = {
+                                        menuOpen = false
+                                        viewModel.openAddMedia()
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Delete album") },
+                                    onClick = {
+                                        menuOpen = false
+                                        viewModel.openDelete()
+                                    }
+                                )
+                            }
+                            if (selecting.not() && state.groups.isNotEmpty() && state.isUserAlbum) {
+                                DropdownMenuItem(
+                                    text = { Text("Organize") },
+                                    onClick = {
+                                        menuOpen = false
+                                        visibleItems.firstOrNull()?.id?.let { viewModel.selection.onItemLongClick(it) }
+                                    }
+                                )
+                            }
+                        }
                     }
                 }
             }
@@ -139,12 +192,14 @@ fun AlbumDetailScreen(
             MediaGrid(
                 groups = state.groups,
                 onMediaClick = { id -> viewModel.selection.onItemClick(id, onMediaClick) },
-                emptyTitle = if (state.query.isNotBlank()) "No matches" else "Empty album",
+                emptyTitle = if (state.query.isNotBlank()) "No matches" else title,
                 emptyMessage = if (state.query.isNotBlank()) {
                     "No matches for that name."
                 } else {
-                    "Media in this album will appear here."
+                    "Add photos and videos to this album. They will stay in Photos."
                 },
+                emptyActionLabel = if (state.query.isBlank() && state.isUserAlbum) "Add photos/videos" else null,
+                onEmptyAction = if (state.query.isBlank() && state.isUserAlbum) viewModel::openAddMedia else null,
                 contentPadding = PaddingValues(bottom = if (selecting) 112.dp else Spacing.lg),
                 isLoadingMore = state.isLoadingMore,
                 hasNextPage = state.hasNextPage,
@@ -158,8 +213,38 @@ fun AlbumDetailScreen(
             MediaSelectionBottomBar(
                 enabled = state.selectedIds.isNotEmpty() && !state.bulkProgress.inProgress,
                 onDelete = viewModel.selection::requestDeleteSelected,
-                onMove = viewModel.selection::requestMoveSelected,
-                modifier = Modifier.align(Alignment.BottomCenter)
+                onMove = {
+                    if (state.isUserAlbum && state.destinationAlbums.isNotEmpty()) {
+                        viewModel.requestMoveToAlbum()
+                    } else {
+                        viewModel.selection.requestMoveSelected()
+                    }
+                },
+                modifier = Modifier.align(Alignment.BottomCenter),
+                extraAction = if (state.isUserAlbum) {
+                    {
+                        if (state.selectedIds.size == 1) {
+                            SelectionActionButton(
+                                icon = Icons.Outlined.Image,
+                                label = "Cover",
+                                enabled = !state.bulkProgress.inProgress,
+                                onClick = {
+                                    state.selectedIds.firstOrNull()?.let(viewModel::setCover)
+                                },
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+                        SelectionActionButton(
+                            icon = Icons.Outlined.PlaylistRemove,
+                            label = "Remove",
+                            enabled = state.selectedIds.isNotEmpty() && !state.bulkProgress.inProgress,
+                            onClick = viewModel::requestRemoveSelected,
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+                } else {
+                    null
+                }
             )
         }
         MediaSelectionSnackbarHost(
@@ -168,4 +253,61 @@ fun AlbumDetailScreen(
         )
     }
     MediaSelectionSheets(viewModel.selection, visibleItems)
+
+    when (state.sheet) {
+        AlbumSheet.RENAME -> AlbumNameDialog(
+            title = "Rename album",
+            confirmLabel = "Rename",
+            value = state.renameValue,
+            error = state.renameError,
+            onValueChange = viewModel::setRenameValue,
+            onConfirm = viewModel::confirmRename,
+            onDismiss = viewModel::dismissSheet
+        )
+        AlbumSheet.DELETE -> DeleteAlbumDialog(
+            albumName = title,
+            onConfirm = viewModel::confirmDeleteAlbum,
+            onDismiss = viewModel::dismissSheet
+        )
+        AlbumSheet.REMOVE_CONFIRM -> RemoveFromAlbumDialog(
+            count = state.selectedIds.size,
+            onConfirm = viewModel::confirmRemoveSelected,
+            onDismiss = viewModel::dismissSheet
+        )
+        AlbumSheet.ADD_MEDIA -> AddMediaSheet(
+            items = state.pickerItems,
+            selectedIds = state.pickerSelectedIds,
+            query = state.pickerQuery,
+            onQueryChange = viewModel::setPickerQuery,
+            onToggle = viewModel::togglePickerItem,
+            onConfirm = viewModel::confirmAddMedia,
+            onDismiss = viewModel::dismissSheet
+        )
+        AlbumSheet.MOVE_TO_ALBUM -> MoveToAlbumSheet(
+            albums = state.destinationAlbums,
+            onSelect = viewModel::confirmMoveToAlbum,
+            onDismiss = viewModel::dismissSheet
+        )
+        AlbumSheet.HIDDEN -> Unit
+    }
+}
+
+@Composable
+private fun CircleHeaderButton(
+    onClick: () -> Unit,
+    contentDescription: String,
+    content: @Composable () -> Unit
+) {
+    val colors = MaterialTheme.colorScheme
+    Box(
+        modifier = Modifier
+            .size(40.dp)
+            .clip(CircleShape)
+            .background(colors.surfaceVariant)
+            .border(1.dp, colors.outlineVariant, CircleShape)
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center
+    ) {
+        content()
+    }
 }

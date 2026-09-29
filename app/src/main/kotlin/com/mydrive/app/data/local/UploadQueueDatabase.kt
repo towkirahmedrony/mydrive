@@ -60,15 +60,17 @@ interface UploadQueueDao {
 
 /**
  * The app's single Room database: the media upload queue, the Private Vault
- * state, and the persisted gallery catalog the Photos/Albums UI is restored from.
+ * state, the persisted gallery catalog, and user-created album membership.
  */
 @Database(
     entities = [
         UploadQueueEntity::class,
         VaultItemEntity::class,
-        MediaCatalogEntity::class
+        MediaCatalogEntity::class,
+        GalleryAlbumEntity::class,
+        GalleryAlbumMemberEntity::class
     ],
-    version = 7,
+    version = 8,
     exportSchema = false
 )
 abstract class UploadQueueDatabase : RoomDatabase() {
@@ -82,6 +84,9 @@ abstract class UploadQueueDatabase : RoomDatabase() {
      * disk instead of waiting for a MediaStore scan and a cloud reconciliation.
      */
     abstract fun mediaCatalogDao(): MediaCatalogDao
+
+    /** User-created albums and their membership, independent of MediaStore folders. */
+    abstract fun galleryAlbumDao(): GalleryAlbumDao
 
     companion object {
         @Volatile private var instance: UploadQueueDatabase? = null
@@ -251,12 +256,62 @@ abstract class UploadQueueDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * Adds user-created albums as a membership overlay on the existing catalog.
+         * MediaStore folders keep their identity; these tables only store logical
+         * albums the user created and the media ids that belong to them.
+         */
+        private val MIGRATION_7_8 = object : Migration(7, 8) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `gallery_albums` (" +
+                        "`ownerUserId` TEXT NOT NULL, " +
+                        "`albumId` TEXT NOT NULL, " +
+                        "`name` TEXT NOT NULL, " +
+                        "`coverMediaId` TEXT, " +
+                        "`createdAtMillis` INTEGER NOT NULL, " +
+                        "`updatedAtMillis` INTEGER NOT NULL, " +
+                        "PRIMARY KEY(`ownerUserId`, `albumId`))"
+                )
+                database.execSQL(
+                    "CREATE INDEX IF NOT EXISTS " +
+                        "`index_gallery_albums_ownerUserId_updatedAtMillis_albumId` " +
+                        "ON `gallery_albums` (`ownerUserId`, `updatedAtMillis`, `albumId`)"
+                )
+                database.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `gallery_album_members` (" +
+                        "`ownerUserId` TEXT NOT NULL, " +
+                        "`albumId` TEXT NOT NULL, " +
+                        "`mediaId` TEXT NOT NULL, " +
+                        "PRIMARY KEY(`ownerUserId`, `albumId`, `mediaId`))"
+                )
+                database.execSQL(
+                    "CREATE INDEX IF NOT EXISTS " +
+                        "`index_gallery_album_members_ownerUserId_albumId` " +
+                        "ON `gallery_album_members` (`ownerUserId`, `albumId`)"
+                )
+                database.execSQL(
+                    "CREATE INDEX IF NOT EXISTS " +
+                        "`index_gallery_album_members_ownerUserId_mediaId` " +
+                        "ON `gallery_album_members` (`ownerUserId`, `mediaId`)"
+                )
+            }
+        }
+
         fun get(context: Context): UploadQueueDatabase = instance ?: synchronized(this) {
             instance ?: Room.databaseBuilder(
                 context.applicationContext,
                 UploadQueueDatabase::class.java,
                 "upload_queue.db"
-            ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7)
+            ).addMigrations(
+                MIGRATION_1_2,
+                MIGRATION_2_3,
+                MIGRATION_3_4,
+                MIGRATION_4_5,
+                MIGRATION_5_6,
+                MIGRATION_6_7,
+                MIGRATION_7_8
+            )
                 .build()
                 .also { instance = it }
         }

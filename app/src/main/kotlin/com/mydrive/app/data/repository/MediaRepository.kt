@@ -16,8 +16,12 @@ import java.io.File
 import java.io.FileNotFoundException
 import java.io.FileOutputStream
 import androidx.exifinterface.media.ExifInterface
+import com.mydrive.app.data.album.AlbumCatalogState
+import com.mydrive.app.data.album.AlbumMutationResult
+import com.mydrive.app.data.album.GalleryAlbumCatalog
 import com.mydrive.app.data.local.CloudLibraryEntry
 import com.mydrive.app.data.local.FavoritesStore
+import com.mydrive.app.data.local.GalleryAlbumStore
 import com.mydrive.app.data.local.LibraryVisibilityStore
 import com.mydrive.app.data.local.MediaCatalogReconciler
 import com.mydrive.app.data.local.MediaCatalogStore
@@ -42,9 +46,9 @@ import com.mydrive.app.data.media.RemoteRefreshGate
 import com.mydrive.app.data.remote.dto.MediaAssetRow
 import com.mydrive.app.data.mock.MockMediaData
 import com.mydrive.app.data.model.ActivityEvent
-import com.mydrive.app.data.media.AlbumCoverResolver
 import com.mydrive.app.data.media.classifyMediaSource
 import com.mydrive.app.data.model.AlbumFolder
+import com.mydrive.app.data.model.AlbumKind
 import com.mydrive.app.data.model.BackupOverview
 import com.mydrive.app.data.model.BackupPreferences
 import com.mydrive.app.data.model.BackupState
@@ -52,7 +56,6 @@ import com.mydrive.app.data.model.MediaAlbumRef
 import com.mydrive.app.data.model.MediaItem
 import com.mydrive.app.data.model.MediaLoadState
 import com.mydrive.app.data.model.MediaType
-import com.mydrive.app.data.model.UNGROUPED_ALBUM_NAME
 import com.mydrive.app.data.model.resolveAlbum
 import com.mydrive.app.data.model.resolveAlbums
 import com.mydrive.app.data.model.StorageSummary
@@ -150,6 +153,11 @@ class MediaRepository(
      * trip to become visible.
      */
     private val mediaCatalogStore: MediaCatalogStore,
+    /**
+     * User-created albums as a membership overlay on the composed catalog.
+     * MediaStore folders stay derived; these records persist independently.
+     */
+    private val galleryAlbumStore: GalleryAlbumStore,
     private val scope: CoroutineScope
 ) {
 
@@ -223,6 +231,10 @@ class MediaRepository(
     private val catalogWriteMutex = Mutex()
     private var catalogDirty = false
     private var catalogWriterJob: Job? = null
+
+    @Volatile
+    private var albumCatalog: AlbumCatalogState = AlbumCatalogState()
+    private val albumWriteMutex = Mutex()
 
     private companion object {
         /** Per-composition cap for the verbose cloud availability trace. */
@@ -336,6 +348,7 @@ class MediaRepository(
         _media.value = emptyList()
         _deviceMedia.value = emptyList()
         _albums.value = emptyList()
+        albumCatalog = AlbumCatalogState()
         publishTrash(emptyList())
         _loadState.update {
             it.copy(
@@ -392,6 +405,8 @@ class MediaRepository(
                 // catalog. This is the one case where a loading state is honest —
                 // publishing the cloud-only subset here would be the very
                 // "partial dataset, then a different dataset" flicker.
+                hydrateAlbumCatalog(userId)
+                _albums.value = buildAlbums(emptyList())
                 _loadState.update {
                     it.copy(
                         isLoading = true,
@@ -408,8 +423,9 @@ class MediaRepository(
             // dropped here, before anything is rendered.
             val restored = withoutTrashedMedia(rows.map { it.toMediaItem(favorites.ids.value) }).resolveAlbums()
             _media.value = restored
-            _albums.value = buildAlbums(_media.value)
-            updateStorage(_media.value)
+            hydrateAlbumCatalog(userId)
+            _albums.value = buildAlbums(restored)
+            updateStorage(restored)
             _loadState.update { it.copy(isLoading = false, isRestoring = false, errorMessage = null) }
             DeveloperLogger.info(
                 category = LogCategory.DATABASE,
@@ -454,12 +470,16 @@ class MediaRepository(
             if (rows.isEmpty()) {
                 // Genuinely nothing cached for this account. Whether that deserves
                 // a loading state is now the refresh's decision, not ours.
+                hydrateAlbumCatalog(userId)
+                _albums.value = buildAlbums(emptyList())
                 _loadState.update { it.copy(isRestoring = false) }
                 return
             }
-            _media.value = withoutTrashedMedia(rows.map { it.toMediaItem(favorites.ids.value) }).resolveAlbums()
-            _albums.value = buildAlbums(_media.value)
-            updateStorage(_media.value)
+            val restored = withoutTrashedMedia(rows.map { it.toMediaItem(favorites.ids.value) }).resolveAlbums()
+            _media.value = restored
+            hydrateAlbumCatalog(userId)
+            _albums.value = buildAlbums(restored)
+            updateStorage(restored)
             _loadState.update { it.copy(isLoading = false, isRestoring = false, errorMessage = null) }
             DeveloperLogger.info(
                 category = LogCategory.DATABASE,
@@ -741,8 +761,11 @@ class MediaRepository(
         val byId = current.associateBy { it.id }
         val session = viewerSessionIds?.mapNotNull { byId[it] }?.takeIf { items -> items.any { it.id == startId } }
         if (session != null) return session
-        val scoped = if (!albumId.isNullOrBlank()) current.filter { it.albumId == albumId } else current
-            .sortedByDescending { it.capturedAtMillis }
+        val scoped = if (!albumId.isNullOrBlank()) {
+            GalleryAlbumCatalog.mediaForAlbum(albumId, current, albumCatalog.members)
+        } else {
+            current.sortedByDescending { it.capturedAtMillis }
+        }
         if (scoped.any { it.id == startId }) return scoped
         val start = byId[startId]
         return if (start != null) listOf(start) else scoped
@@ -1694,39 +1717,126 @@ class MediaRepository(
     }
 
     /**
-     * Groups the library into the user's own folders.
+     * Groups the library into device folders plus user-created albums.
      *
-     * There is deliberately no "cloud" folder and no synthetic album of any kind:
-     * an album is a device folder, and the only entries here are folders that at
-     * least one item actually belongs to. A photo backed up to My Drive is still
-     * a Camera photo, and cloud-only media is filed under the folder it originally
-     * came from — see [resolveAlbum].
+     * Device folders stay derived from MediaStore identity. User albums are a
+     * membership overlay persisted in Room: empty albums remain, deleted media
+     * never reappears, and "My Drive" is never treated as an album.
      */
     private fun buildAlbums(items: List<MediaItem>): List<AlbumFolder> {
-        return items
-            .groupBy { resolveAlbum(it.albumId, it.albumName).id }
-            .map { (albumId, albumItems) ->
-                val newest = albumItems.maxByOrNull { it.capturedAtMillis }
-                // The cover keeps its cloud fallback so a device URI whose MediaStore
-                // row disappeared does not blank out the album; the stored delivery
-                // URL is also what the resolver rewrites to a small Cloudinary
-                // derivative instead of downloading a full-size original.
-                val cover = AlbumCoverResolver.select(albumItems)
-                AlbumFolder(
-                    id = albumId,
-                    name = newest?.let { resolveAlbum(it.albumId, it.albumName).name }
-                        ?: UNGROUPED_ALBUM_NAME,
-                    coverSeed = cover?.seed ?: 0,
-                    coverType = cover?.type ?: MediaType.PHOTO,
-                    mediaCount = albumItems.size,
-                    coverUri = cover?.uri.orEmpty(),
-                    coverPreviewUri = cover?.previewUri,
-                    coverRemoteMediaId = cover?.remoteMediaId,
-                    coverVersion = cover?.version
-                )
-            }
-            .sortedByDescending { it.mediaCount }
+        val catalog = albumCatalog
+        val folders = GalleryAlbumCatalog.folderAlbums(items)
+        val users = GalleryAlbumCatalog.userAlbums(catalog.albums, catalog.members, items)
+        return GalleryAlbumCatalog.mergeAlbums(folders, users)
     }
+
+    private fun hydrateAlbumCatalog(userId: String) {
+        albumCatalog = galleryAlbumStore.snapshotForStartup(userId) ?: AlbumCatalogState()
+    }
+
+    private fun persistAlbumCatalog(previous: AlbumCatalogState, next: AlbumCatalogState) {
+        val owner = boundUserId?.takeIf { it.isNotBlank() } ?: return
+        if (previous == next) return
+        scope.launch {
+            albumWriteMutex.withLock {
+                if (boundUserId != owner) return@withLock
+                runCatching { galleryAlbumStore.save(owner, previous, next) }
+            }
+        }
+    }
+
+    private fun mutateAlbumCatalog(
+        transform: (AlbumCatalogState) -> Pair<AlbumCatalogState, AlbumMutationResult>
+    ): AlbumMutationResult {
+        val previous: AlbumCatalogState
+        val next: AlbumCatalogState
+        val result: AlbumMutationResult
+        synchronized(sessionLock) {
+            previous = albumCatalog
+            val mutation = transform(previous)
+            next = mutation.first
+            result = mutation.second
+            if (next != previous) {
+                albumCatalog = next
+                _albums.value = buildAlbums(_media.value)
+            }
+        }
+        if (next != previous) persistAlbumCatalog(previous, next)
+        return result
+    }
+
+    fun createAlbum(name: String): AlbumMutationResult = mutateAlbumCatalog { state ->
+        state.create(
+            rawName = name,
+            now = System.currentTimeMillis(),
+            folderNames = GalleryAlbumCatalog.folderNames(_albums.value)
+        )
+    }
+
+    fun renameAlbum(albumId: String, name: String): AlbumMutationResult = mutateAlbumCatalog { state ->
+        state.rename(
+            albumId = albumId,
+            rawName = name,
+            now = System.currentTimeMillis(),
+            folderNames = GalleryAlbumCatalog.folderNames(_albums.value)
+        )
+    }
+
+    fun deleteAlbum(albumId: String): AlbumMutationResult = mutateAlbumCatalog { state ->
+        state.delete(albumId)
+    }
+
+    fun addMediaToAlbum(albumId: String, mediaIds: Collection<String>): AlbumMutationResult {
+        val ids = mediaIds.filter { isActiveLibraryId(it) }
+        if (ids.isEmpty()) return AlbumMutationResult.Unchanged
+        return mutateAlbumCatalog { state ->
+            state.addMedia(albumId, ids, System.currentTimeMillis())
+        }
+    }
+
+    fun removeMediaFromAlbum(albumId: String, mediaIds: Collection<String>): AlbumMutationResult {
+        if (mediaIds.isEmpty()) return AlbumMutationResult.Unchanged
+        return mutateAlbumCatalog { state ->
+            state.removeMedia(albumId, mediaIds, System.currentTimeMillis())
+        }
+    }
+
+    fun moveMediaToAlbum(
+        fromAlbumId: String?,
+        toAlbumId: String,
+        mediaIds: Collection<String>
+    ): AlbumMutationResult {
+        val ids = mediaIds.filter { isActiveLibraryId(it) }
+        if (ids.isEmpty()) return AlbumMutationResult.Unchanged
+        return mutateAlbumCatalog { state ->
+            if (fromAlbumId.isNullOrBlank() || !GalleryAlbumCatalog.isUserAlbumId(fromAlbumId)) {
+                state.addMedia(toAlbumId, ids, System.currentTimeMillis())
+            } else {
+                state.moveMedia(fromAlbumId, toAlbumId, ids, System.currentTimeMillis())
+            }
+        }
+    }
+
+    fun setAlbumCover(albumId: String, mediaId: String): AlbumMutationResult {
+        if (!isActiveLibraryId(mediaId)) return AlbumMutationResult.Unchanged
+        return mutateAlbumCatalog { state ->
+            state.setCover(albumId, mediaId, System.currentTimeMillis())
+        }
+    }
+
+    private fun isActiveLibraryId(id: String): Boolean {
+        if (id.isBlank()) return false
+        val item = _media.value.firstOrNull { it.id == id } ?: return false
+        return !item.isTrashed && !item.hiddenFromLibrary
+    }
+
+    fun mediaForAlbum(albumId: String): List<MediaItem> =
+        GalleryAlbumCatalog.mediaForAlbum(albumId, _media.value, albumCatalog.members)
+
+    fun eligibleMediaForAlbum(albumId: String): List<MediaItem> =
+        GalleryAlbumCatalog.eligibleToAdd(_media.value, albumCatalog.memberIds(albumId))
+
+    fun userAlbums(): List<AlbumFolder> = _albums.value.filter { it.kind == AlbumKind.USER }
 
     private fun updateStorage(items: List<MediaItem>) {
         val photos = items.count { it.type == MediaType.PHOTO }

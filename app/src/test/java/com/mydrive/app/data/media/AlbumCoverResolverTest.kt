@@ -40,6 +40,22 @@ class AlbumCoverResolverTest {
     }
 
     @Test
+    fun `a preferred cover id is used when that media is still in the album`() {
+        val older = item("older", 1L, uri = "content://media/external/images/media/1")
+        val newer = item("newer", 2L, uri = "content://media/external/images/media/2")
+        val cover = AlbumCoverResolver.select(listOf(older, newer), preferredMediaId = "older")!!
+        assertEquals("content://media/external/images/media/1", cover.uri)
+    }
+
+    @Test
+    fun `a missing preferred cover falls back to the newest local item`() {
+        val older = item("older", 1L, uri = "content://media/external/images/media/1")
+        val newer = item("newer", 2L, uri = "content://media/external/images/media/2")
+        val cover = AlbumCoverResolver.select(listOf(older, newer), preferredMediaId = "gone")!!
+        assertEquals("content://media/external/images/media/2", cover.uri)
+    }
+
+    @Test
     fun `locally backed album keeps the newest local item as primary`() {
         val older = item("older", 1L, uri = "content://media/external/images/media/1")
         val newer = item(

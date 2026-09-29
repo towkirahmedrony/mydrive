@@ -440,7 +440,9 @@ fun EmptyState(
     title: String,
     message: String,
     modifier: Modifier = Modifier,
-    icon: ImageVector = Icons.Outlined.Inbox
+    icon: ImageVector = Icons.Outlined.Inbox,
+    actionLabel: String? = null,
+    onAction: (() -> Unit)? = null
 ) {
     Column(
         modifier = modifier
@@ -454,6 +456,15 @@ fun EmptyState(
         Text(text = title, style = MaterialTheme.typography.titleMedium, color = colors.onBackground)
         Spacer(Modifier.height(Spacing.xxs))
         Text(text = message, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+        if (actionLabel != null && onAction != null) {
+            Spacer(Modifier.height(Spacing.md))
+            Text(
+                text = actionLabel,
+                style = MaterialTheme.typography.labelLarge,
+                color = Copper,
+                modifier = Modifier.clickable(onClick = onAction)
+            )
+        }
     }
 }
 

@@ -3,6 +3,9 @@ package com.mydrive.app.ui.albums
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import com.mydrive.app.data.album.AlbumMutationResult
+import com.mydrive.app.data.album.AlbumSort
+import com.mydrive.app.data.album.GalleryAlbumCatalog
 import com.mydrive.app.data.model.AlbumFolder
 import com.mydrive.app.data.repository.MediaRepository
 import kotlinx.coroutines.Dispatchers
@@ -28,7 +31,11 @@ data class AlbumsUiState(
     val errorMessage: String? = null,
     val hasAlbums: Boolean = false,
     val trashCount: Int = 0,
-    val trashSizeBytes: Long = 0L
+    val trashSizeBytes: Long = 0L,
+    val sort: AlbumSort = AlbumSort.RECENTLY_UPDATED,
+    val showCreateDialog: Boolean = false,
+    val createName: String = "",
+    val createError: String? = null
 )
 
 class AlbumsViewModel(
@@ -36,32 +43,40 @@ class AlbumsViewModel(
 ) : ViewModel() {
 
     private val query = MutableStateFlow("")
+    private val sort = MutableStateFlow(AlbumSort.RECENTLY_UPDATED)
+    private val createDialog = MutableStateFlow(CreateAlbumDialogState())
 
     init {
         refresh(force = false)
     }
 
     val uiState: StateFlow<AlbumsUiState> = combine(
-        repository.albums,
-        repository.loadState,
-        repository.trashSummary,
-        query
-    ) { albums, load, trash, currentQuery ->
-        val filtered = albums.filter { album ->
-            currentQuery.isBlank() || album.name.contains(currentQuery, ignoreCase = true)
+        combine(repository.albums, repository.loadState, repository.trashSummary, query) { albums, load, trash, currentQuery ->
+            AlbumQuerySlice(albums, load, trash, currentQuery)
+        },
+        sort,
+        createDialog
+    ) { slice, currentSort, dialog ->
+        val filtered = slice.albums.filter { album ->
+            slice.query.isBlank() || album.name.contains(slice.query, ignoreCase = true)
         }
+        val sorted = GalleryAlbumCatalog.sortAlbums(filtered, currentSort)
         AlbumsUiState(
-            query = currentQuery,
-            albums = filtered,
-            isLoading = load.isLoading,
-            isRestoring = load.isRestoring,
-            isRefreshing = load.isRefreshing,
-            needsPermission = load.needsPermission,
-            permissionDenied = load.permissionDenied,
-            errorMessage = load.errorMessage,
-            hasAlbums = filtered.isNotEmpty() || currentQuery.isNotBlank(),
-            trashCount = trash.count,
-            trashSizeBytes = trash.totalSizeBytes
+            query = slice.query,
+            albums = sorted,
+            isLoading = slice.load.isLoading,
+            isRestoring = slice.load.isRestoring,
+            isRefreshing = slice.load.isRefreshing,
+            needsPermission = slice.load.needsPermission,
+            permissionDenied = slice.load.permissionDenied,
+            errorMessage = slice.load.errorMessage,
+            hasAlbums = sorted.isNotEmpty() || slice.query.isNotBlank(),
+            trashCount = slice.trash.count,
+            trashSizeBytes = slice.trash.totalSizeBytes,
+            sort = currentSort,
+            showCreateDialog = dialog.visible,
+            createName = dialog.name,
+            createError = dialog.error
         )
     }.flowOn(Dispatchers.Default).stateIn(
         scope = viewModelScope,
@@ -83,6 +98,34 @@ class AlbumsViewModel(
         query.update { value }
     }
 
+    fun setSort(value: AlbumSort) {
+        sort.value = value
+    }
+
+    fun openCreateAlbum() {
+        createDialog.value = CreateAlbumDialogState(visible = true)
+    }
+
+    fun dismissCreateAlbum() {
+        createDialog.value = CreateAlbumDialogState()
+    }
+
+    fun setCreateName(value: String) {
+        createDialog.update { it.copy(name = value, error = null) }
+    }
+
+    fun confirmCreateAlbum(): String? {
+        val result = repository.createAlbum(createDialog.value.name)
+        val error = GalleryAlbumCatalog.nameErrorMessage(result)
+        if (error != null) {
+            createDialog.update { it.copy(error = error) }
+            return null
+        }
+        val created = result as? AlbumMutationResult.Created
+        createDialog.value = CreateAlbumDialogState()
+        return created?.albumId
+    }
+
     fun permissionPermissions(): Array<String> = repository.requiredPermissions()
 
     fun onPermissionResult() {
@@ -95,6 +138,19 @@ class AlbumsViewModel(
             repository.refresh(force = force)
         }
     }
+
+    private data class CreateAlbumDialogState(
+        val visible: Boolean = false,
+        val name: String = "",
+        val error: String? = null
+    )
+
+    private data class AlbumQuerySlice(
+        val albums: List<AlbumFolder>,
+        val load: com.mydrive.app.data.model.MediaLoadState,
+        val trash: com.mydrive.app.data.model.TrashSummary,
+        val query: String
+    )
 
     companion object {
         fun factory(repository: MediaRepository): ViewModelProvider.Factory =

@@ -55,8 +55,11 @@ object AlbumCoverResolver {
      * album); cloud-backed items are only preferred when the album has no local
      * copy at all, which is the cloud-only / Drive-only case.
      */
-    fun select(items: List<MediaItem>): AlbumCover? {
+    fun select(items: List<MediaItem>, preferredMediaId: String? = null): AlbumCover? {
         if (items.isEmpty()) return null
+        val preferred = preferredMediaId?.takeIf { it.isNotBlank() }
+            ?.let { id -> items.firstOrNull { it.id == id } }
+        if (preferred != null) return coverOf(preferred)
         val locallyBacked = items.filter { MediaFetchOrder.isLocalUri(it.uri) }
         val cloudBacked = items.filter { it.hasCloudSource }
         val chosen = locallyBacked.maxByOrNull { it.capturedAtMillis }

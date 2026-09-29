@@ -229,6 +229,11 @@ fun MediaItem.withAlbum(album: MediaAlbumRef): MediaItem =
 fun List<MediaItem>.resolveAlbums(): List<MediaItem> =
     map { it.withAlbum(resolveAlbum(it.albumId, it.albumName)) }
 
+enum class AlbumKind {
+    FOLDER,
+    USER
+}
+
 data class AlbumFolder(
     val id: String,
     val name: String,
@@ -243,8 +248,14 @@ data class AlbumFolder(
     val coverUri: String = "",
     /** Lightweight cloud candidate used when [coverUri] is a stale device URI. */
     val coverPreviewUri: String? = null,
-    val coverRemoteMediaId: String? = null
-)
+    val coverRemoteMediaId: String? = null,
+    val kind: AlbumKind = AlbumKind.FOLDER,
+    val coverMediaId: String? = null,
+    val updatedAtMillis: Long = 0L,
+    val createdAtMillis: Long = 0L
+) {
+    val isUserAlbum: Boolean get() = kind == AlbumKind.USER
+}
 
 data class ActivityEvent(
     val id: String,
